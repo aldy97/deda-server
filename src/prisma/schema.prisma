@@ -1,0 +1,195 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 家长账号
+model User {
+  id            String    @id @default(uuid())
+  openid        String    @unique // 微信小程序 openid
+  phone         String?   @unique // 手机号，可选绑定
+  nickname      String?   // 微信昵称
+  avatarUrl     String?   // 头像
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  bindings      UserDeviceBinding[]
+  childProfiles ChildProfile[]
+
+  @@map("users")
+}
+
+// 设备信息
+model Device {
+  id              String   @id @default(uuid())
+  deviceId        String   @unique // 厂商侧设备唯一编号
+  deviceCode      String?  @unique // 设备编码（展示用）
+  firmwareVersion String?  // 固件版本
+  wifiName        String?  // WiFi 名称
+  ipAddress       String?  // IP 地址
+  networkType     String?  // 网络类型：4G / WiFi
+  macAddress      String?  // MAC 地址
+  subnetMask      String?  // 子网掩码
+  gateway         String?  // 网关
+  dns             String?  // DNS
+  timezone        String?  // 时区
+  topicAddress    String?  // 主题地址
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  bindings        UserDeviceBinding[]
+  configs         DeviceConfig[]
+  conversations   Conversation[]
+  learningStats   LearningStat[]
+
+  @@map("devices")
+}
+
+// 家长与设备绑定关系（多对多）
+model UserDeviceBinding {
+  id        String   @id @default(uuid())
+  userId    String
+  deviceId  String
+  isOwner   Boolean  @default(true) // 是否为拥有者
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceId])
+  @@map("user_device_bindings")
+}
+
+// 孩子档案
+model ChildProfile {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String?  // 孩子姓名
+  birthday  String?  // 生日 YYYY-MM-DD
+  englishName String? // 英文名（可选传递给厂商用于 AI 称呼）
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("child_profiles")
+}
+
+// 教材元数据
+model Textbook {
+  id          String   @id @default(uuid())
+  textbookId  String   @unique // 业务教材 ID
+  name        String   // 教材名称
+  description String?  // 教材描述
+  cefrLevel   String?  // 默认 CEFR 等级
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  units Unit[]
+
+  @@map("textbooks")
+}
+
+// 单元元数据
+model Unit {
+  id          String   @id @default(uuid())
+  unitId      String   // 业务单元 ID
+  textbookId  String
+  name        String   // 单元名称
+  cefrLevel   String?  // 单元 CEFR 等级
+  sortOrder   Int      @default(0) // 排序
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  textbook Textbook @relation(fields: [textbookId], references: [id], onDelete: Cascade)
+
+  @@unique([textbookId, unitId])
+  @@map("units")
+}
+
+// 设备配置快照
+model DeviceConfig {
+  id            String   @id @default(uuid())
+  deviceId      String
+  textbookId    String?  // 当前教材 ID
+  unitId        String?  // 当前单元 ID（可选）
+  mode          String   // 学习模式：locked_unit / free_textbook / free_chat
+  cefrLevel     String?  // CEFR 难度等级
+  isActive      Boolean  @default(true) // 是否当前生效
+  payload       Json?    // 下发给厂商的完整配置快照
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("device_configs")
+}
+
+// 对话记录
+model Conversation {
+  id              String   @id @default(uuid())
+  deviceId        String
+  conversationId  String?  @unique // 厂商侧对话唯一 ID（如有）
+  asrText         String?  // 孩子说话 ASR 文本
+  aiReply         String?  // AI 回答文本
+  hitUnitIds      String[] // 命中单元 ID 列表
+  textbookId      String?  // 当前配置教材 ID
+  unitId          String?  // 当前配置单元 ID
+  mode            String?  // 当前配置模式
+  cefrLevel       String?  // 当前配置 CEFR
+  rawPayload      Json     // Webhook 原始 payload
+  spokeAt         DateTime // 对话发生时间
+  createdAt       DateTime @default(now())
+  deletedAt       DateTime? // 软删除
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, spokeAt])
+  @@index([deviceId, deletedAt, spokeAt])
+  @@map("conversations")
+}
+
+// 学习统计（按日聚合）
+model LearningStat {
+  id              String   @id @default(uuid())
+  deviceId        String
+  statDate        String   // YYYY-MM-DD
+  durationSeconds Int      @default(0) // 有效学习时长（秒）
+  speakCount      Int      @default(0) // 有效开口次数
+  newWords        Int      @default(0) // 当日新增单词数
+  totalDurationSeconds Int @default(0) // 累计学习时长（可每日快照）
+  totalSpeakCount Int      @default(0) // 累计开口次数
+  totalWords      Int      @default(0) // 累计掌握单词数
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, statDate])
+  @@index([deviceId, statDate])
+  @@map("learning_stats")
+}
+
+// Webhook 接收日志
+model WebhookLog {
+  id          String   @id @default(uuid())
+  source      String   // 来源标识，如 manufacturer
+  eventType   String?  // 事件类型
+  payload     Json     // 原始 payload
+  signature   String?  // 签名
+  processed   Boolean  @default(false) // 是否已处理
+  idempotencyKey String? @unique // 幂等键
+  errorMsg    String?  // 处理失败原因
+  createdAt   DateTime @default(now())
+
+  @@index([processed, createdAt])
+  @@map("webhook_logs")
+}

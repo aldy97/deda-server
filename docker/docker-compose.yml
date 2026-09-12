@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: deda-server
+    restart: always
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      APP_PORT: 3000
+      DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/deda?schema=public
+      REDIS_URL: redis://redis:6379/0
+      # 厂商 API 基地址，部署时替换
+      MANUFACTURER_BASE_URL: https://manufacturer-api.example.com
+      # 微信小程序配置，部署时替换
+      WECHAT_APPID: ${WECHAT_APPID}
+      WECHAT_SECRET: ${WECHAT_SECRET}
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - deda-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: deda-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: deda
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: deda
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    networks:
+      - deda-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: deda-redis
+    restart: always
+    volumes:
+      - redis-data:/data
+    ports:
+      - '6379:6379'
+    networks:
+      - deda-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: deda-nginx
+    restart: always
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - app
+    networks:
+      - deda-network
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  deda-network:
+    driver: bridge
