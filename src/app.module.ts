@@ -13,6 +13,8 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
 import { LearningStatsModule } from './modules/learning-stats/learning-stats.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { ManufacturerModule } from './modules/manufacturer/manufacturer.module';
+import { VendorModule } from './modules/vendor/vendor.module';
+import { MusicModule } from './modules/music/music.module';
 import { RedisModule } from './common/redis/redis.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 
@@ -43,6 +45,8 @@ import { PrismaModule } from './common/prisma/prisma.module';
     LearningStatsModule,
     WebhooksModule,
     ManufacturerModule,
+    VendorModule,
+    MusicModule,
   ],
 })
 export class AppModule {}
