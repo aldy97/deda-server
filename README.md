@@ -29,14 +29,16 @@ deda-server/
 │   ├── config/               # 应用/数据库/Redis 配置
 │   ├── modules/              # 业务模块
 │   │   ├── users             # 用户账号（微信登录、手机号绑定）
-│   │   ├── devices           # 设备管理、状态查询、控制转发
+│   │   ├── devices           # 设备管理、状态查询、控制转发、绑定、WiFi 下发
 │   │   ├── child-profiles    # 孩子档案
 │   │   ├── textbooks         # 教材与单元元数据
-│   │   ├── device-configs    # 设备学习配置下发
+│   │   ├── device-configs    # 设备学习配置下发、模式/语言/语速同步
 │   │   ├── conversations     # 对话记录查询与删除
 │   │   ├── learning-stats    # 学习统计与进度
 │   │   ├── webhooks          # 接收厂商 Webhook
-│   │   └── manufacturer      # 机芯厂商 API 客户端
+│   │   ├── manufacturer      # 我方调用机芯厂商 API 客户端
+│   │   ├── vendor            # 机芯厂调用我方的 WebSocket/HTTP 接口
+│   │   └── music             # 音乐播放控制与网易云音乐绑定
 │   ├── prisma/
 │   │   └── schema.prisma     # 数据库模型
 │   ├── app.module.ts
