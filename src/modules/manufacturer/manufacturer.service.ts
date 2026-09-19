@@ -48,21 +48,6 @@ export class ManufacturerService {
     return null;
   }
 
-  async getOnlineStatus(deviceId: string) {
-    // TODO: 查询设备在线离线状态
-    return null;
-  }
-
-  async getBattery(deviceId: string) {
-    // TODO: 查询电量百分比
-    return null;
-  }
-
-  async getChargeStatus(deviceId: string) {
-    // TODO: 查询充电状态
-    return null;
-  }
-
   async controlVolume(deviceId: string, volume: number) {
     // TODO: 调节音量
     return { success: true, deviceId, volume };

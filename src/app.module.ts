@@ -14,9 +14,12 @@ import { LearningStatsModule } from './modules/learning-stats/learning-stats.mod
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { ManufacturerModule } from './modules/manufacturer/manufacturer.module';
 import { VendorModule } from './modules/vendor/vendor.module';
+import { HealthModule } from './modules/health/health.module';
 import { MusicModule } from './modules/music/music.module';
 import { RedisModule } from './common/redis/redis.module';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { MqttModule } from './common/mqtt/mqtt.module';
+import { DeviceStatusModule } from './modules/device-status/device-status.module';
 
 @Module({
   imports: [
@@ -36,6 +39,8 @@ import { PrismaModule } from './common/prisma/prisma.module';
     }),
     PrismaModule,
     RedisModule,
+    MqttModule,
+    DeviceStatusModule,
     UsersModule,
     DevicesModule,
     ChildProfilesModule,
@@ -46,6 +51,7 @@ import { PrismaModule } from './common/prisma/prisma.module';
     WebhooksModule,
     ManufacturerModule,
     VendorModule,
+    HealthModule,
     MusicModule,
   ],
 })

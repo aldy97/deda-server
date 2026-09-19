@@ -6,6 +6,7 @@ import {
   Param,
   Body,
   Query,
+  Headers,
 } from "@nestjs/common";
 import { ApiTags, ApiOperation } from "@nestjs/swagger";
 import { DevicesService } from "./devices.service";
@@ -25,27 +26,32 @@ export class DevicesController {
   }
 
   @Get()
-  async list(@Query() query: any) {
-    // TODO: 获取当前用户绑定的设备列表
-    return this.devicesService.list(query);
+  async list(@Headers("x-user-id") userId: string) {
+    return this.devicesService.list(userId);
   }
 
   @Get(":id")
-  async detail(@Param("id") id: string) {
-    // TODO: 获取单台设备详情
-    return this.devicesService.detail(id);
+  async detail(
+    @Param("id") id: string,
+    @Headers("x-user-id") userId: string,
+  ) {
+    return this.devicesService.detail(userId, id);
   }
 
   @Get(":id/status")
   async status(@Param("id") id: string) {
-    // TODO: 查询设备在线、电量、充电状态
     return this.devicesService.status(id);
+  }
+
+  @Get(":id/members")
+  @ApiOperation({ summary: "查询设备绑定成员列表" })
+  async members(@Param("id") id: string) {
+    return this.devicesService.findMembers(id);
   }
 
   @Post(":id/control")
   @ApiOperation({ summary: "控制设备：音量、开关机、打断模式、休眠、自动关机" })
   async control(@Param("id") id: string, @Body() dto: DeviceControlDto) {
-    // TODO: 转发设备控制指令到厂商
     return this.devicesService.control(id, dto);
   }
 
@@ -56,8 +62,10 @@ export class DevicesController {
   }
 
   @Delete(":id")
-  async unbind(@Param("id") id: string) {
-    // TODO: 解绑设备
-    return this.devicesService.unbind(id);
+  async unbind(
+    @Param("id") id: string,
+    @Headers("x-user-id") userId: string,
+  ) {
+    return this.devicesService.unbind(userId, id);
   }
 }

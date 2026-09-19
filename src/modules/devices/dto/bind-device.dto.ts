@@ -16,4 +16,9 @@ export class BindDeviceDto {
   @IsOptional()
   @IsString()
   childProfileId?: string;
+
+  @ApiProperty({ description: '当前用户 ID（临时，待 JWT 认证替换）' })
+  @IsString()
+  @IsNotEmpty()
+  userId: string;
 }
