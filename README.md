@@ -83,7 +83,7 @@ Deda 微信小程序后端服务，负责家长 App 设备管理、学习数据�
 |------|------------|------|
 | 文字通道 | WebSocket `/vendor` | 机芯厂商云作为客户端连接 |
 | 健康检查（可选） | `GET /health` | 供机芯厂商云或负载均衡探活；机芯厂如不需要，可由业务接口响应替代 |
-| 厂商 Webhook（备用） | `POST /vendor/health`、`POST /vendor/text` | 现有备用 HTTP 接口 |
+| 厂商 Webhook（备用） | `POST /vendor/health` | 现有备用 HTTP 接口 |
 
 ### 家长 App 可以期望 deda-server 提供的接口
 
