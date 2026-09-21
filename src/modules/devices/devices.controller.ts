@@ -5,37 +5,42 @@ import {
   Delete,
   Param,
   Body,
-  Query,
-  Headers,
+  Req,
+  UseGuards,
 } from "@nestjs/common";
-import { ApiTags, ApiOperation } from "@nestjs/swagger";
+import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
+import { Request } from "express";
 import { DevicesService } from "./devices.service";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
+import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
+
+interface RequestWithUser extends Request {
+  user: { userId: string; openid: string };
+}
 
 @ApiTags("设备管理")
 @Controller("devices")
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
 export class DevicesController {
   constructor(private readonly devicesService: DevicesService) {}
 
   @Post("bind")
   @ApiOperation({ summary: "家长 App 绑定设备（扫码或输入码）" })
-  async bind(@Body() dto: BindDeviceDto) {
-    return this.devicesService.bind(dto);
+  async bind(@Body() dto: BindDeviceDto, @Req() req: RequestWithUser) {
+    return this.devicesService.bind(req.user.userId, dto);
   }
 
   @Get()
-  async list(@Headers("x-user-id") userId: string) {
-    return this.devicesService.list(userId);
+  async list(@Req() req: RequestWithUser) {
+    return this.devicesService.list(req.user.userId);
   }
 
   @Get(":id")
-  async detail(
-    @Param("id") id: string,
-    @Headers("x-user-id") userId: string,
-  ) {
-    return this.devicesService.detail(userId, id);
+  async detail(@Param("id") id: string, @Req() req: RequestWithUser) {
+    return this.devicesService.detail(req.user.userId, id);
   }
 
   @Get(":id/status")
@@ -62,10 +67,7 @@ export class DevicesController {
   }
 
   @Delete(":id")
-  async unbind(
-    @Param("id") id: string,
-    @Headers("x-user-id") userId: string,
-  ) {
-    return this.devicesService.unbind(userId, id);
+  async unbind(@Param("id") id: string, @Req() req: RequestWithUser) {
+    return this.devicesService.unbind(req.user.userId, id);
   }
 }

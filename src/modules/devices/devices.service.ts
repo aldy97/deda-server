@@ -14,41 +14,59 @@ export class DevicesService {
     private readonly manufacturer: ManufacturerService,
   ) {}
 
-  async bind(dto: BindDeviceDto) {
-    // 查找或创建设备（可能已由 4G 对话懒创建）
-    let device = await this.prisma.device.findUnique({
-      where: { deviceId: dto.deviceId },
-    });
-    if (!device) {
-      device = await this.prisma.device.create({
-        data: { deviceId: dto.deviceId },
+  async bind(userId: string, dto: BindDeviceDto) {
+    if (!dto.deviceId && !dto.deviceCode) {
+      throw new Error('deviceId or deviceCode is required');
+    }
+
+    let device;
+
+    if (dto.deviceId) {
+      // 按 deviceId 查找或创建（可能已由 4G 对话懒创建）
+      device = await this.prisma.device.findUnique({
+        where: { deviceId: dto.deviceId },
       });
+      if (!device) {
+        device = await this.prisma.device.create({
+          data: { deviceId: dto.deviceId },
+        });
+      }
+    } else if (dto.deviceCode) {
+      // 按 deviceCode 查找，不存在则报错（避免随意创建）
+      device = await this.prisma.device.findUnique({
+        where: { deviceCode: dto.deviceCode },
+      });
+      if (!device) {
+        throw new NotFoundException(`Device with code ${dto.deviceCode} not found`);
+      }
+    } else {
+      throw new Error('deviceId or deviceCode is required');
     }
 
     // 检查是否已绑定
     const existing = await this.prisma.userDeviceBinding.findUnique({
       where: {
         userId_deviceId: {
-          userId: dto.userId,
+          userId,
           deviceId: device.id,
         },
       },
     });
 
     if (existing) {
-      return { success: true, deviceId: dto.deviceId, alreadyBound: true };
+      return { success: true, deviceId: device.deviceId, alreadyBound: true };
     }
 
-    // 当前阶段不区分 owner/member，isOwner 默认 false，保留扩展性
+    // 当前阶段不区分 owner/member，isOwner 默认 true（第一个绑定者）
     await this.prisma.userDeviceBinding.create({
       data: {
-        userId: dto.userId,
+        userId,
         deviceId: device.id,
-        isOwner: false,
+        isOwner: true,
       },
     });
 
-    return { success: true, deviceId: dto.deviceId, alreadyBound: false };
+    return { success: true, deviceId: device.deviceId, alreadyBound: false };
   }
 
   async list(userId: string) {
@@ -56,7 +74,14 @@ export class DevicesService {
       where: { userId },
       include: { device: true },
     });
-    return bindings.map((b) => b.device);
+    return bindings.map((b) => ({
+      id: b.device.deviceId,
+      name: b.device.deviceCode || b.device.deviceId,
+      deviceId: b.device.deviceId,
+      deviceCode: b.device.deviceCode,
+      networkType: b.device.networkType,
+      firmwareVersion: b.device.firmwareVersion,
+    }));
   }
 
   async detail(userId: string, id: string) {

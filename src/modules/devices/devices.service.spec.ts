@@ -63,9 +63,7 @@ describe('DevicesService', () => {
     it('should create device and binding when both are new', async () => {
       const dto: BindDeviceDto = {
         deviceId: 'dev-001',
-        serialNumber: 'SN123456',
         childProfileId: 'child-001',
-        userId: 'user-001',
       };
 
       prisma.device.findUnique.mockResolvedValue(null);
@@ -73,11 +71,11 @@ describe('DevicesService', () => {
       prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.create.mockResolvedValue({ id: 'binding-001' });
 
-      const result = await service.bind(dto);
+      const result = await service.bind('user-001', dto);
 
       expect(prisma.device.create).toHaveBeenCalledWith({ data: { deviceId: 'dev-001' } });
       expect(prisma.userDeviceBinding.create).toHaveBeenCalledWith({
-        data: { userId: 'user-001', deviceId: 'device-uuid-001', isOwner: false },
+        data: { userId: 'user-001', deviceId: 'device-uuid-001', isOwner: true },
       });
       expect(result).toEqual({ success: true, deviceId: 'dev-001', alreadyBound: false });
     });
@@ -85,17 +83,41 @@ describe('DevicesService', () => {
     it('should reuse existing device and binding', async () => {
       const dto: BindDeviceDto = {
         deviceId: 'dev-002',
-        userId: 'user-001',
       };
 
       prisma.device.findUnique.mockResolvedValue({ id: 'device-uuid-002', deviceId: 'dev-002' });
       prisma.userDeviceBinding.findUnique.mockResolvedValue({ id: 'binding-002' });
 
-      const result = await service.bind(dto);
+      const result = await service.bind('user-001', dto);
 
       expect(prisma.device.create).not.toHaveBeenCalled();
       expect(prisma.userDeviceBinding.create).not.toHaveBeenCalled();
       expect(result).toEqual({ success: true, deviceId: 'dev-002', alreadyBound: true });
+    });
+
+    it('should bind by deviceCode', async () => {
+      const dto: BindDeviceDto = {
+        deviceCode: 'CODE123',
+      };
+
+      prisma.device.findUnique.mockResolvedValue({ id: 'device-uuid-003', deviceId: 'dev-003', deviceCode: 'CODE123' });
+      prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
+      prisma.userDeviceBinding.create.mockResolvedValue({ id: 'binding-003' });
+
+      const result = await service.bind('user-001', dto);
+
+      expect(prisma.device.findUnique).toHaveBeenCalledWith({ where: { deviceCode: 'CODE123' } });
+      expect(result).toEqual({ success: true, deviceId: 'dev-003', alreadyBound: false });
+    });
+
+    it('should throw when deviceCode not found', async () => {
+      const dto: BindDeviceDto = {
+        deviceCode: 'CODE999',
+      };
+
+      prisma.device.findUnique.mockResolvedValue(null);
+
+      await expect(service.bind('user-001', dto)).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -131,7 +153,14 @@ describe('DevicesService', () => {
         where: { userId: 'user-001' },
         include: { device: true },
       });
-      expect(result).toEqual([{ id: 'device-uuid-001', deviceId: 'dev-001' }]);
+      expect(result).toEqual([{
+        id: 'dev-001',
+        name: 'dev-001',
+        deviceId: 'dev-001',
+        deviceCode: undefined,
+        networkType: undefined,
+        firmwareVersion: undefined,
+      }]);
     });
   });
 

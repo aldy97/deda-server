@@ -4,6 +4,10 @@ import { DevicesService } from './devices.service';
 import { BindDeviceDto } from './dto/bind-device.dto';
 import { DeviceControlDto } from './dto/device-control.dto';
 import { WifiConfigDto } from './dto/wifi-config.dto';
+import { JwtAuthGuard } from '@/modules/users/guards/jwt-auth.guard';
+
+const mockReq = (userId: string) =>
+  ({ user: { userId, openid: `openid-${userId}` } } as any);
 
 describe('DevicesController', () => {
   let controller: DevicesController;
@@ -27,7 +31,10 @@ describe('DevicesController', () => {
           },
         },
       ],
-    }).compile();
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
 
     controller = module.get<DevicesController>(DevicesController);
     service = module.get(DevicesService);
@@ -38,19 +45,17 @@ describe('DevicesController', () => {
   });
 
   describe('POST /devices/bind', () => {
-    it('should call service.bind with dto', async () => {
+    it('should call service.bind with userId and dto', async () => {
       const dto: BindDeviceDto = {
         deviceId: 'dev-001',
-        serialNumber: 'SN123456',
         childProfileId: 'child-001',
-        userId: 'user-001',
       };
       const expected = { success: true, deviceId: 'dev-001', alreadyBound: false };
       service.bind.mockResolvedValue(expected);
 
-      const result = await controller.bind(dto);
+      const result = await controller.bind(dto, mockReq('user-001'));
 
-      expect(service.bind).toHaveBeenCalledWith(dto);
+      expect(service.bind).toHaveBeenCalledWith('user-001', dto);
       expect(result).toEqual(expected);
     });
   });
@@ -60,7 +65,7 @@ describe('DevicesController', () => {
       const expected = { success: true, deviceId: 'dev-001' };
       service.unbind.mockResolvedValue(expected);
 
-      const result = await controller.unbind('dev-001', 'user-001');
+      const result = await controller.unbind('dev-001', mockReq('user-001'));
 
       expect(service.unbind).toHaveBeenCalledWith('user-001', 'dev-001');
       expect(result).toEqual(expected);
@@ -74,7 +79,7 @@ describe('DevicesController', () => {
       ] as any;
       service.list.mockResolvedValue(expected);
 
-      const result = await controller.list('user-001');
+      const result = await controller.list(mockReq('user-001'));
 
       expect(service.list).toHaveBeenCalledWith('user-001');
       expect(result).toEqual(expected);
@@ -86,7 +91,7 @@ describe('DevicesController', () => {
       const expected = { deviceId: 'dev-001', name: 'Device 001' } as any;
       service.detail.mockResolvedValue(expected);
 
-      const result = await controller.detail('dev-001', 'user-001');
+      const result = await controller.detail('dev-001', mockReq('user-001'));
 
       expect(service.detail).toHaveBeenCalledWith('user-001', 'dev-001');
       expect(result).toEqual(expected);
