@@ -1,0 +1,32 @@
+version: '3.8'
+
+# 本地开发覆盖配置
+# 用法：docker-compose -f docker/docker-compose.yml -f docker/docker-compose.override.yml up -d
+
+services:
+  app:
+    container_name: deda-server-dev
+    restart: 'no'
+    # 本地开发不构建镜像，直接挂载源码并用 ts-node 热重载
+    build: false
+    image: node:20-alpine
+    working_dir: /app
+    command: >
+      sh -c "npm install --cache /tmp/npm-cache && npx prisma generate && npm run start:dev"
+    volumes:
+      - ..:/app
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/deda?schema=public
+      REDIS_URL: redis://redis:6379/0
+      MQTT_URL: ${MQTT_URL}
+      MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
+      MANUFACTURER_BASE_URL: ${MANUFACTURER_BASE_URL}
+      WECHAT_APPID: ${WECHAT_APPID}
+      WECHAT_SECRET: ${WECHAT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret}
+
+  nginx:
+    container_name: deda-nginx-dev
+    restart: 'no'

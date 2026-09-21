@@ -139,6 +139,22 @@ deda-server/
 └── tsconfig.json
 ```
 
+## 环境隔离说明
+
+项目支持三套环境，彼此隔离：
+
+| 环境 | 用途 | 域名示例 | 机芯厂对接 |
+|------|------|---------|-----------|
+| **local** | 本地开发 | `localhost:3000` | 机芯厂商云测试环境或内网穿透 |
+| **staging** | 联调/测试 | `api-staging.deda.example.com` | 机芯厂商云测试环境 |
+| **production** | 正式用户 | `api.deda.example.com` | 机芯厂商云生产环境 |
+
+**关键原则**：
+- 机芯设备只连接机芯厂商云，不直接连接 deda-server。
+- 机芯厂商云需要支持配置不同环境的 deda-server 地址（WebSocket/MQTT/HTTP）。
+- 测试/生产数据库、Redis、MQTT topic 必须隔离。
+- 禁止本地/测试环境连接生产数据库。
+
 ## 本地开发
 
 ### 1. 安装依赖
@@ -152,10 +168,10 @@ npm install
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写数据库、Redis、微信、厂商 API 等配置
+# 编辑 .env，填写数据库、Redis、MQTT、微信、厂商 API 等配置
 ```
 
-### 3. 启动 PostgreSQL 与 Redis
+### 3. 启动基础设施（PostgreSQL + Redis）
 
 ```bash
 docker-compose -f docker/docker-compose.yml up -d postgres redis
@@ -176,6 +192,14 @@ npm run start:dev
 
 服务默认运行在 `http://localhost:3000`，Swagger 文档地址：`http://localhost:3000/api/docs`。
 
+### 6. 使用 Docker 启动完整本地环境（可选）
+
+```bash
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.override.yml up -d
+```
+
+该命令会挂载源码并启用热重载，适合需要 Nginx 反向代理或统一网络的场景。
+
 ## 生产部署（阿里云 ECS）
 
 ### 1. 准备服务器
@@ -188,26 +212,42 @@ npm run start:dev
 
 - 将域名（如 `api.deda.example.com`）解析到 ECS 公网 IP
 - 使用 Certbot 申请 Let's Encrypt 证书
-- 修改 `nginx/nginx.conf` 中的域名与证书路径
+- 生产 Nginx 配置位于 `nginx/nginx.prod.conf`，需替换为真实域名与证书路径
 
 ### 3. 配置环境变量
 
 ```bash
 cp .env.example .env
-# 填写生产环境配置
+# 填写生产环境配置（数据库、Redis、MQTT、微信、厂商 API、JWT 等）
 ```
 
 ### 4. 构建并启动
 
 ```bash
-docker-compose -f docker/docker-compose.yml up -d --build
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d --build
 ```
 
 ### 5. 查看日志
 
 ```bash
-docker logs -f deda-server
+docker logs -f deda-server-prod
 ```
+
+## 测试环境部署（Staging）
+
+测试环境用于与机芯厂商云联调，以及小程序真机预览/体验版调试。
+
+```bash
+# 1. 准备独立服务器或 ECS
+# 2. 域名解析 api-staging.deda.example.com
+# 3. 配置 .env.staging（独立数据库、Redis、MQTT、厂商测试环境地址）
+# 4. 启动
+docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml --env-file .env.staging up -d --build
+```
+
+**机芯调试**：让机芯厂商云测试环境连接 `wss://api-staging.deda.example.com/vendor` 和 `api-staging.deda.example.com` 的 MQTT/HTTP 地址。
+
+**小程序调试**：在微信开发者工具中关闭“校验合法域名、web-view 域名、TLS 版本以及 HTTPS 证书”可进行本地 API 调试；真机预览/体验版需将 `api-staging.deda.example.com` 配置为合法域名。
 
 ## 数据库迁移
 

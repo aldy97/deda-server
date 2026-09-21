@@ -1,5 +1,9 @@
 version: '3.8'
 
+# 基础编排：基础设施 + app 服务
+# 本地开发使用 docker-compose.override.yml 覆盖
+# 生产环境使用 docker-compose.prod.yml 覆盖
+
 services:
   app:
     build:
@@ -14,8 +18,11 @@ services:
       APP_PORT: 3000
       DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/deda?schema=public
       REDIS_URL: redis://redis:6379/0
+      # MQTT broker 地址；若使用自管 broker，可改为 mqtt://mqtt:1883
+      MQTT_URL: ${MQTT_URL}
+      MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
       # 厂商 API 基地址，部署时替换
-      MANUFACTURER_BASE_URL: https://manufacturer-api.example.com
+      MANUFACTURER_BASE_URL: ${MANUFACTURER_BASE_URL}
       # 微信小程序配置，部署时替换
       WECHAT_APPID: ${WECHAT_APPID}
       WECHAT_SECRET: ${WECHAT_SECRET}
@@ -58,10 +65,8 @@ services:
     restart: always
     ports:
       - '80:80'
-      - '443:443'
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - app
     networks:
