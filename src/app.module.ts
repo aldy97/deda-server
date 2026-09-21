@@ -16,6 +16,8 @@ import { ManufacturerModule } from './modules/manufacturer/manufacturer.module';
 import { VendorModule } from './modules/vendor/vendor.module';
 import { HealthModule } from './modules/health/health.module';
 import { MusicModule } from './modules/music/music.module';
+import { RagModule } from './modules/rag/rag.module';
+import { LlmModule } from './modules/llm/llm.module';
 import { RedisModule } from './common/redis/redis.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { MqttModule } from './common/mqtt/mqtt.module';
@@ -53,6 +55,8 @@ import { DeviceStatusModule } from './modules/device-status/device-status.module
     VendorModule,
     HealthModule,
     MusicModule,
+    RagModule,
+    LlmModule,
   ],
 })
 export class AppModule {}

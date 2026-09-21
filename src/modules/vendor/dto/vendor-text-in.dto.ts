@@ -22,6 +22,16 @@ export class VendorTextInDto {
   @IsString()
   firmwareVersion?: string;
 
+  @ApiPropertyOptional({ description: '当前教材 ID（可选，未传则使用设备配置或默认值）' })
+  @IsOptional()
+  @IsString()
+  textbookId?: string;
+
+  @ApiPropertyOptional({ description: '当前单元 ID（可选，未传则使用设备配置或默认值）' })
+  @IsOptional()
+  @IsString()
+  unitId?: string;
+
   @ApiPropertyOptional({ description: '扩展字段：语言、模式等' })
   @IsOptional()
   @IsObject()

@@ -1,0 +1,22 @@
+{
+  "textbookId": "sample-textbook",
+  "name": "Sample English Starter",
+  "description": "MVP 阶段示例教材，用于本地 RAG/LLM 联调",
+  "cefrLevel": "A1",
+  "units": [
+    {
+      "unitId": "unit-1",
+      "name": "Greetings",
+      "sortOrder": 1,
+      "cefrLevel": "A1",
+      "content": "Unit 1: Greetings\n\nKey sentences:\n- Hello! / Hi!\n- How are you?\n- I'm fine, thank you.\n- Nice to meet you.\n- Good morning. Good afternoon. Good evening.\n\nDialogue:\nA: Hello, I'm Amy. What's your name?\nB: Hi Amy, I'm Tom. Nice to meet you.\nA: Nice to meet you too. How are you today?\nB: I'm fine, thank you. And you?\nA: I'm great! Let's learn English together."
+    },
+    {
+      "unitId": "unit-2",
+      "name": "Colors and Shapes",
+      "sortOrder": 2,
+      "cefrLevel": "A1",
+      "content": "Unit 2: Colors and Shapes\n\nKey words:\nColors: red, blue, yellow, green, orange, purple, black, white.\nShapes: circle, square, triangle, rectangle, star.\n\nKey sentences:\n- What color is it?\n- It's red.\n- What shape is it?\n- It's a circle.\n\nDialogue:\nA: Look at the sky. What color is it?\nB: It's blue.\nA: And the sun?\nB: The sun is yellow and round like a circle.\nA: Great job! Can you find something green?\nB: Yes, the grass is green."
+    }
+  ]
+}

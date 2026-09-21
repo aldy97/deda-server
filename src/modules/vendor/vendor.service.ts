@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { RagService } from '@/modules/rag/rag.service';
+import { LlmService } from '@/modules/llm/llm.service';
 import { VendorTextInDto } from './dto/vendor-text-in.dto';
 import { VendorTextOutDto } from './dto/vendor-text-out.dto';
 import { VendorStatusDto } from './dto/vendor-status.dto';
@@ -13,8 +16,20 @@ import { VendorConversationDto } from './dto/vendor-conversation.dto';
 @Injectable()
 export class VendorService {
   private readonly logger = new Logger(VendorService.name);
+  private readonly defaultTextbookId: string;
+  private readonly defaultUnitId: string;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
+    private readonly ragService: RagService,
+    private readonly llmService: LlmService,
+  ) {
+    this.defaultTextbookId =
+      this.configService.get<string>('DEFAULT_TEXTBOOK_ID') || 'sample-textbook';
+    this.defaultUnitId =
+      this.configService.get<string>('DEFAULT_UNIT_ID') || 'unit-1';
+  }
 
   async ensureDeviceExists(deviceId: string) {
     const existing = await this.prisma.device.findUnique({
@@ -28,18 +43,119 @@ export class VendorService {
     });
   }
 
+  /**
+   * 解析本次对话使用的教材与单元
+   * 优先级：payload > 设备当前生效配置 > .env 默认值
+   */
+  private async resolveTextbookAndUnit(
+    dto: VendorTextInDto,
+    deviceInternalId: string,
+  ): Promise<{ textbookId: string; unitId: string }> {
+    if (dto.textbookId && dto.unitId) {
+      return { textbookId: dto.textbookId, unitId: dto.unitId };
+    }
+
+    const activeConfig = await this.prisma.deviceConfig.findFirst({
+      where: { deviceId: deviceInternalId, isActive: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      textbookId: dto.textbookId || activeConfig?.textbookId || this.defaultTextbookId,
+      unitId: dto.unitId || activeConfig?.unitId || this.defaultUnitId,
+    };
+  }
+
+  /**
+   * 获取同一设备、同一教材、同一单元的最近对话历史
+   * 用于 prompt 拼接，保证多轮对话上下文连续且单元边界隔离
+   */
+  private async getRecentHistory(
+    deviceInternalId: string,
+    textbookId: string,
+    unitId: string,
+    limit = 6,
+  ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
+    const rows = await this.prisma.conversation.findMany({
+      where: {
+        deviceId: deviceInternalId,
+        textbookId,
+        unitId,
+        deletedAt: null,
+      },
+      orderBy: { spokeAt: 'desc' },
+      take: limit,
+      select: { asrText: true, aiReply: true },
+    });
+
+    // 按时间正序排列，旧 → 新
+    const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    for (const row of rows.reverse()) {
+      if (row.asrText) {
+        history.push({ role: 'user', content: row.asrText });
+      }
+      if (row.aiReply) {
+        history.push({ role: 'assistant', content: row.aiReply });
+      }
+    }
+    return history;
+  }
+
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
 
-    // TODO: 保存用户输入，调用 RAG/LLM，生成回复文字
-    this.logger.debug(`handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}`);
+    const { textbookId, unitId } = await this.resolveTextbookAndUnit(
+      dto,
+      device.id,
+    );
+
+    // RAG 检索教材内容
+    const retrieveResult = this.ragService.retrieve(
+      textbookId,
+      unitId,
+      dto.asrText,
+    );
+
+    // 获取同单元最近对话历史，用于 prompt 拼接
+    const history = await this.getRecentHistory(device.id, textbookId, unitId);
+
+    let responseText: string;
+    try {
+      const context = retrieveResult.found
+        ? this.ragService.truncateContent(retrieveResult.content, 1500)
+        : '';
+      const messages = this.llmService.buildEnglishTutorPrompt(
+        dto.asrText,
+        context,
+        retrieveResult.unitName,
+        history,
+      );
+      const llmResult = await this.llmService.complete({ messages });
+      responseText = llmResult.text;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `LLM failed for deviceId=${dto.deviceId}: ${message}`,
+      );
+      responseText = "Sorry, I didn't catch that. Could you say it again?";
+    }
+
     const reply: VendorTextOutDto = {
       deviceId: dto.deviceId,
-      responseText: `收到：${dto.asrText}`,
-      context: {},
+      responseText,
+      context: {
+        textbookId,
+        unitId,
+        unitName: retrieveResult.unitName,
+        ragFound: retrieveResult.found,
+      },
       ttsOptions: {},
     };
+
+    this.logger.debug(
+      `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, textbookId=${textbookId}, unitId=${unitId}`,
+    );
 
     // 持久化本轮对话，使 4G 状态下产生的记录在绑定后可恢复
     await this.prisma.conversation.create({
@@ -47,6 +163,9 @@ export class VendorService {
         deviceId: device.id,
         asrText: dto.asrText,
         aiReply: reply.responseText,
+        textbookId,
+        unitId,
+        mode: 'locked_unit',
         rawPayload: dto as any,
         spokeAt: new Date(),
       },

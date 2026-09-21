@@ -22,6 +22,7 @@ RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/src/prisma ./src/prisma
+COPY --from=builder /app/data/textbooks ./data/textbooks
 
 ENV NODE_ENV=production
 ENV PORT=3000

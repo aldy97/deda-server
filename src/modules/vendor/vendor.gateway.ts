@@ -88,6 +88,12 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!payload.asrText || typeof payload.asrText !== "string") {
       return "asrText is required and must be a string";
     }
+    if (payload.textbookId && typeof payload.textbookId !== "string") {
+      return "textbookId must be a string";
+    }
+    if (payload.unitId && typeof payload.unitId !== "string") {
+      return "unitId must be a string";
+    }
     return null;
   }
 

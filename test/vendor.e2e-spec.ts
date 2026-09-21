@@ -3,6 +3,8 @@ import { INestApplication } from '@nestjs/common';
 import { io, Socket as ClientSocket } from 'socket.io-client';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/common/prisma/prisma.service';
+import { RagService } from './../src/modules/rag/rag.service';
+import { LlmService } from './../src/modules/llm/llm.service';
 
 describe('Vendor WebSocket (e2e)', () => {
   let app: INestApplication;
@@ -16,9 +18,34 @@ describe('Vendor WebSocket (e2e)', () => {
       findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockResolvedValue({ id: 'e2e-device-uuid', deviceId: 'e2e-dev-001' }),
     },
+    deviceConfig: {
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     conversation: {
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'e2e-conv-001' }),
     },
+  };
+
+  const mockRagService = {
+    retrieve: jest.fn().mockReturnValue({
+      textbookId: 'sample-textbook',
+      unitId: 'unit-1',
+      unitName: 'Greetings',
+      content: 'Hello! How are you?',
+      found: true,
+    }),
+    truncateContent: jest.fn((content: string) => content),
+  };
+
+  const mockLlmService = {
+    buildEnglishTutorPrompt: jest.fn().mockReturnValue([
+      { role: 'system', content: 'prompt' },
+      { role: 'user', content: '你好' },
+    ]),
+    complete: jest.fn().mockResolvedValue({
+      text: "Hello! I'm fine, thank you.",
+    }),
   };
 
   beforeAll(async () => {
@@ -27,6 +54,10 @@ describe('Vendor WebSocket (e2e)', () => {
     })
       .overrideProvider(PrismaService)
       .useValue(mockPrismaService)
+      .overrideProvider(RagService)
+      .useValue(mockRagService)
+      .overrideProvider(LlmService)
+      .useValue(mockLlmService)
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -99,7 +130,7 @@ describe('Vendor WebSocket (e2e)', () => {
     expect(typeof pong.timestamp).toBe('number');
   });
 
-  it('should echo vendor:text:in as vendor:text:out', async () => {
+  it('should reply vendor:text:in as vendor:text:out via RAG/LLM', async () => {
     client = await connectClient();
 
     const reply = await new Promise<{
@@ -116,7 +147,7 @@ describe('Vendor WebSocket (e2e)', () => {
     });
 
     expect(reply.deviceId).toBe('e2e-dev-001');
-    expect(reply.responseText).toBe('收到：你好');
+    expect(reply.responseText).toBe("Hello! I'm fine, thank you.");
   });
 
   it('should return vendor:error for invalid text payload', async () => {
