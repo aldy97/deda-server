@@ -1,13 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 
+export interface ChatRecord {
+  id: string;
+  role: 'user' | 'device';
+  content: string;
+  createdAt: string;
+}
+
 @Injectable()
 export class ConversationsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(userId: string, query: { page?: number; pageSize?: number; deviceId?: string }) {
-    const page = query.page ?? 1;
-    const pageSize = query.pageSize ?? 20;
+  async list(
+    userId: string,
+    query: { page?: number | string; pageSize?: number | string; deviceId?: string },
+  ) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const pageSize = Math.max(1, Number(query.pageSize) || 20);
     const skip = (page - 1) * pageSize;
 
     // 查询当前用户绑定的所有设备
@@ -18,25 +28,61 @@ export class ConversationsService {
 
     const deviceIds = bindings.map((b) => b.device.id);
 
+    // 本地开发兜底：若用户没有任何绑定，则允许查看所有对话（便于联调）
+    const effectiveDeviceIds =
+      deviceIds.length === 0 && process.env.NODE_ENV === 'development'
+        ? undefined
+        : deviceIds;
+
     // 如果指定了 deviceId，则只查该设备（需属于当前用户）
     const targetDeviceIds = query.deviceId
-      ? deviceIds.filter((id) => bindings.some((b) => b.device.deviceId === query.deviceId && b.device.id === id))
-      : deviceIds;
+      ? deviceIds.filter((id) =>
+          bindings.some(
+            (b) => b.device.deviceId === query.deviceId && b.device.id === id,
+          ),
+        )
+      : effectiveDeviceIds;
+
+    const where = {
+      deletedAt: null,
+      ...(targetDeviceIds ? { deviceId: { in: targetDeviceIds } } : {}),
+    };
 
     const [items, total] = await Promise.all([
       this.prisma.conversation.findMany({
-        where: { deviceId: { in: targetDeviceIds }, deletedAt: null },
-        orderBy: { spokeAt: 'desc' },
+        where,
+        orderBy: { spokeAt: 'asc' },
         skip,
         take: pageSize,
       }),
-      this.prisma.conversation.count({
-        where: { deviceId: { in: targetDeviceIds }, deletedAt: null },
-      }),
+      this.prisma.conversation.count({ where }),
     ]);
 
+    // 把每条对话拆成 user + device 两条消息，符合小程序 ChatRecord 结构
+    const records: ChatRecord[] = [];
+    for (const item of items) {
+      if (item.asrText) {
+        records.push({
+          id: `${item.id}-u`,
+          role: 'user',
+          content: item.asrText,
+          createdAt: item.spokeAt.toISOString(),
+        });
+      }
+      if (item.aiReply) {
+        records.push({
+          id: `${item.id}-d`,
+          role: 'device',
+          content: item.aiReply,
+          createdAt: new Date(
+            item.spokeAt.getTime() + 1000,
+          ).toISOString(),
+        });
+      }
+    }
+
     return {
-      items,
+      items: records,
       total,
       page,
       pageSize,

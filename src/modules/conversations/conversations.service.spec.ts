@@ -34,13 +34,13 @@ describe('ConversationsService', () => {
   });
 
   describe('list', () => {
-    it('should return conversations for user-bound devices ordered by spokeAt desc', async () => {
+    it('should return chat records for user-bound devices ordered by spokeAt asc', async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         { device: { id: 'device-uuid-001', deviceId: 'dev-001' } },
       ]);
       prisma.conversation.findMany.mockResolvedValue([
-        { id: 'conv-002', deviceId: 'device-uuid-001', asrText: '后说', spokeAt: new Date('2026-01-02') },
-        { id: 'conv-001', deviceId: 'device-uuid-001', asrText: '先说', spokeAt: new Date('2026-01-01') },
+        { id: 'conv-001', deviceId: 'device-uuid-001', asrText: '先说', aiReply: '先答', spokeAt: new Date('2026-01-01') },
+        { id: 'conv-002', deviceId: 'device-uuid-001', asrText: '后说', aiReply: '后答', spokeAt: new Date('2026-01-02') },
       ]);
       prisma.conversation.count.mockResolvedValue(2);
 
@@ -53,14 +53,17 @@ describe('ConversationsService', () => {
       expect(prisma.conversation.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { deviceId: { in: ['device-uuid-001'] }, deletedAt: null },
-          orderBy: { spokeAt: 'desc' },
+          orderBy: { spokeAt: 'asc' },
           skip: 0,
           take: 20,
         }),
       );
-      expect(result.items).toHaveLength(2);
-      expect(result.items[0].id).toBe('conv-002');
-      expect(result.items[1].id).toBe('conv-001');
+      // 每条 conversation 拆成 user + device 两条消息
+      expect(result.items).toHaveLength(4);
+      expect(result.items[0].role).toBe('user');
+      expect(result.items[0].content).toBe('先说');
+      expect(result.items[1].role).toBe('device');
+      expect(result.items[1].content).toBe('先答');
       expect(result.total).toBe(2);
     });
 

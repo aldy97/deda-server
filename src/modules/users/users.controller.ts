@@ -1,6 +1,20 @@
-import { Controller, Get, Post, Body, Patch } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
-import { UsersService } from './users.service';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { Request } from 'express';
+import { UsersService, WechatLoginDto } from './users.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+
+interface RequestWithUser extends Request {
+  user: { userId: string; openid: string };
+}
 
 @ApiTags('用户账号')
 @Controller('users')
@@ -8,26 +22,28 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Post('login')
-  async wechatLogin(@Body() dto: any) {
-    // TODO: 微信小程序登录
+  async wechatLogin(@Body() dto: WechatLoginDto) {
     return this.usersService.wechatLogin(dto);
   }
 
   @Post('phone')
-  async bindPhone(@Body() dto: any) {
-    // TODO: 绑定手机号
-    return this.usersService.bindPhone(dto);
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  async bindPhone(@Body() dto: any, @Req() req: RequestWithUser) {
+    return this.usersService.bindPhone({ ...dto, userId: req.user.userId });
   }
 
   @Get('profile')
-  async getProfile() {
-    // TODO: 获取当前用户信息
-    return this.usersService.getProfile();
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  async getProfile(@Req() req: RequestWithUser) {
+    return this.usersService.getProfile(req.user.userId);
   }
 
   @Patch('profile')
-  async updateProfile(@Body() dto: any) {
-    // TODO: 更新用户信息
-    return this.usersService.updateProfile(dto);
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  async updateProfile(@Body() dto: any, @Req() req: RequestWithUser) {
+    return this.usersService.updateProfile(req.user.userId, dto);
   }
 }
