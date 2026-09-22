@@ -93,7 +93,15 @@ export class DevicesService {
   }
 
   async status(id: string) {
-    return this.deviceStatusService.getStatus(id);
+    // TODO: 等待 MQTT 与机芯厂商对接后替换为真实状态
+    // 当前为硬编码状态，仅用于 wechat-app 联调验证设备状态展示。
+    return {
+      deviceId: id,
+      status: 'online' as const,
+      battery: 78,
+      isCharging: true,
+      lastActiveAt: new Date().toISOString(),
+    };
   }
 
   async control(id: string, dto: DeviceControlDto) {

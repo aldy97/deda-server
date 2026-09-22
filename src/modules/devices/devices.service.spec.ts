@@ -205,35 +205,20 @@ describe('DevicesService', () => {
   });
 
   describe('status', () => {
-    it('should return status from DeviceStatusService', async () => {
-      const expected = {
-        deviceId: 'dev-001',
-        online: { status: 'ONLINE', lastSeenAt: 1784298000000 },
-        battery: { percent: 80, chargingStatus: 'CHARGING', lowBattery: 0, reportedAt: 1784298000000 },
-        version: null,
-        runtime: null,
-        network: null,
-        updatedAt: 1784298000000,
-      };
-      deviceStatusService.getStatus.mockResolvedValue(expected);
-
+    it('should return hardcoded status for wechat-app integration (TODO: replace with real MQTT status)', async () => {
       const result = await service.status('dev-001');
 
-      expect(deviceStatusService.getStatus).toHaveBeenCalledWith('dev-001');
-      expect(result).toEqual(expected);
+      expect(result).toMatchObject({
+        deviceId: 'dev-001',
+        status: 'online',
+        battery: 78,
+        isCharging: true,
+      });
+      expect(result.lastActiveAt).toBeDefined();
+      expect(deviceStatusService.getStatus).not.toHaveBeenCalled();
     });
 
     it('should not call manufacturer status methods', async () => {
-      deviceStatusService.getStatus.mockResolvedValue({
-        deviceId: 'dev-001',
-        online: null,
-        battery: null,
-        version: null,
-        runtime: null,
-        network: null,
-        updatedAt: null,
-      });
-
       await service.status('dev-001');
 
       expect(manufacturer.controlVolume).not.toHaveBeenCalled();

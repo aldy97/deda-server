@@ -1,9 +1,9 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '@/common/prisma/prisma.service';
+import { Injectable } from "@nestjs/common";
+import { PrismaService } from "@/common/prisma/prisma.service";
 
 export interface ChatRecord {
   id: string;
-  role: 'user' | 'device';
+  role: "user" | "device";
   content: string;
   createdAt: string;
 }
@@ -14,7 +14,11 @@ export class ConversationsService {
 
   async list(
     userId: string,
-    query: { page?: number | string; pageSize?: number | string; deviceId?: string },
+    query: {
+      page?: number | string;
+      pageSize?: number | string;
+      deviceId?: string;
+    },
   ) {
     const page = Math.max(1, Number(query.page) || 1);
     const pageSize = Math.max(1, Number(query.pageSize) || 20);
@@ -29,10 +33,8 @@ export class ConversationsService {
     const deviceIds = bindings.map((b) => b.device.id);
 
     // 本地开发兜底：若用户没有任何绑定，则允许查看所有对话（便于联调）
-    let effectiveDeviceIds:
-      | string[]
-      | undefined =
-      deviceIds.length === 0 && process.env.NODE_ENV === 'development'
+    let effectiveDeviceIds: string[] | undefined =
+      deviceIds.length === 0 && process.env.NODE_ENV === "development"
         ? undefined
         : deviceIds;
 
@@ -42,10 +44,10 @@ export class ConversationsService {
     // 注意：此逻辑仅在 NODE_ENV=development 时生效，生产环境必须移除或关闭。
     const hasDevDevice = bindings.some(
       (b) =>
-        b.device.deviceCode === 'DEV001' ||
-        b.device.deviceId === 'dev-local-001',
+        b.device.deviceCode === "DEV001" ||
+        b.device.deviceId === "dev-local-001",
     );
-    if (process.env.NODE_ENV === 'development' && hasDevDevice) {
+    if (process.env.NODE_ENV === "development" && hasDevDevice) {
       effectiveDeviceIds = undefined;
     }
     // WORKAROUND END
@@ -67,7 +69,7 @@ export class ConversationsService {
     const [items, total] = await Promise.all([
       this.prisma.conversation.findMany({
         where,
-        orderBy: { spokeAt: 'asc' },
+        orderBy: { spokeAt: "asc" },
         skip,
         take: pageSize,
       }),
@@ -80,7 +82,7 @@ export class ConversationsService {
       if (item.asrText) {
         records.push({
           id: `${item.id}-u`,
-          role: 'user',
+          role: "user",
           content: item.asrText,
           createdAt: item.spokeAt.toISOString(),
         });
@@ -88,11 +90,9 @@ export class ConversationsService {
       if (item.aiReply) {
         records.push({
           id: `${item.id}-d`,
-          role: 'device',
+          role: "device",
           content: item.aiReply,
-          createdAt: new Date(
-            item.spokeAt.getTime() + 1000,
-          ).toISOString(),
+          createdAt: new Date(item.spokeAt.getTime() + 1000).toISOString(),
         });
       }
     }
