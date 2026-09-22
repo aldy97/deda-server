@@ -83,5 +83,45 @@ describe('ConversationsService', () => {
         }),
       );
     });
+
+    it('should return all conversations in development when user has no bindings', async () => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'development';
+
+      prisma.userDeviceBinding.findMany.mockResolvedValue([]);
+      prisma.conversation.findMany.mockResolvedValue([]);
+      prisma.conversation.count.mockResolvedValue(0);
+
+      await service.list('user-001', {});
+
+      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deletedAt: null },
+        }),
+      );
+
+      process.env.NODE_ENV = originalNodeEnv;
+    });
+
+    it('should return all conversations in development when user bound DEV001 (workaround)', async () => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'development';
+
+      prisma.userDeviceBinding.findMany.mockResolvedValue([
+        { device: { id: 'device-uuid-001', deviceId: 'dev-local-001', deviceCode: 'DEV001' } },
+      ]);
+      prisma.conversation.findMany.mockResolvedValue([]);
+      prisma.conversation.count.mockResolvedValue(0);
+
+      await service.list('user-001', {});
+
+      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deletedAt: null },
+        }),
+      );
+
+      process.env.NODE_ENV = originalNodeEnv;
+    });
   });
 });

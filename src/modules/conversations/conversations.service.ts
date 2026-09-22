@@ -29,10 +29,26 @@ export class ConversationsService {
     const deviceIds = bindings.map((b) => b.device.id);
 
     // 本地开发兜底：若用户没有任何绑定，则允许查看所有对话（便于联调）
-    const effectiveDeviceIds =
+    let effectiveDeviceIds:
+      | string[]
+      | undefined =
       deviceIds.length === 0 && process.env.NODE_ENV === 'development'
         ? undefined
         : deviceIds;
+
+    // WORKAROUND START: 本地开发联调专用
+    // 原因：小程序设备列表刷新问题尚未完全解决，为验证“绑定 → 查看对话”链路，
+    //      允许绑定 DEV001 的用户查看所有对话记录。
+    // 注意：此逻辑仅在 NODE_ENV=development 时生效，生产环境必须移除或关闭。
+    const hasDevDevice = bindings.some(
+      (b) =>
+        b.device.deviceCode === 'DEV001' ||
+        b.device.deviceId === 'dev-local-001',
+    );
+    if (process.env.NODE_ENV === 'development' && hasDevDevice) {
+      effectiveDeviceIds = undefined;
+    }
+    // WORKAROUND END
 
     // 如果指定了 deviceId，则只查该设备（需属于当前用户）
     const targetDeviceIds = query.deviceId
