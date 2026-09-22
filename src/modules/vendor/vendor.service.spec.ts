@@ -85,7 +85,7 @@ describe('VendorService', () => {
       prisma.device.create.mockResolvedValue({ id: 'uuid-001', deviceId: 'dev-001' } as any);
       prisma.conversation.findMany.mockResolvedValue([]);
       prisma.conversation.create.mockResolvedValue({ id: 'conv-001' } as any);
-      ragService.retrieve.mockReturnValue({
+      ragService.retrieve.mockResolvedValue({
         textbookId: 'sample-textbook',
         unitId: 'unit-1',
         unitName: 'Greetings',
@@ -146,7 +146,7 @@ describe('VendorService', () => {
       prisma.device.findUnique.mockResolvedValue({ id: 'uuid-002', deviceId: 'dev-002' } as any);
       prisma.conversation.findMany.mockResolvedValue([]);
       prisma.conversation.create.mockResolvedValue({ id: 'conv-002' } as any);
-      ragService.retrieve.mockReturnValue({
+      ragService.retrieve.mockResolvedValue({
         textbookId: 'custom-book',
         unitId: 'unit-colors',
         unitName: 'Colors',
@@ -183,7 +183,7 @@ describe('VendorService', () => {
       prisma.device.findUnique.mockResolvedValue({ id: 'uuid-003', deviceId: 'dev-003' } as any);
       prisma.conversation.findMany.mockResolvedValue([]);
       prisma.conversation.create.mockResolvedValue({ id: 'conv-003' } as any);
-      ragService.retrieve.mockReturnValue({
+      ragService.retrieve.mockResolvedValue({
         textbookId: 'sample-textbook',
         unitId: 'unit-1',
         unitName: 'Greetings',
@@ -221,7 +221,7 @@ describe('VendorService', () => {
       prisma.device.findUnique.mockResolvedValue({ id: 'uuid-abc', deviceId: 'dev-abc-123' } as any);
       prisma.conversation.findMany.mockResolvedValue([]);
       prisma.conversation.create.mockResolvedValue({ id: 'conv-002' } as any);
-      ragService.retrieve.mockReturnValue({
+      ragService.retrieve.mockResolvedValue({
         textbookId: 'sample-textbook',
         unitId: 'unit-1',
         unitName: 'Greetings',

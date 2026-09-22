@@ -111,7 +111,7 @@ export class VendorService {
     );
 
     // RAG 检索教材内容
-    const retrieveResult = this.ragService.retrieve(
+    const retrieveResult = await this.ragService.retrieve(
       textbookId,
       unitId,
       dto.asrText,

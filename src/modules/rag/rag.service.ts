@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '@/common/prisma/prisma.service';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -38,7 +39,10 @@ export class RagService {
   private readonly logger = new Logger(RagService.name);
   private readonly dataDir: string;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly prisma?: PrismaService,
+  ) {
     // 优先使用环境变量指定目录；否则根据运行环境推断
     const configuredDir = this.configService.get<string>('TEXTBOOK_DATA_DIR');
     if (configuredDir) {
@@ -180,12 +184,51 @@ export class RagService {
 
   /**
    * 按教材和单元检索内容
-   * @param textbookId 教材 ID
-   * @param unitId 单元 ID
-   * @param query 用户查询（MVP 阶段仅用于日志，不影响检索结果）
+   * 优先从数据库读取；数据库不存在时降级读取本地文件。
+   * @param textbookId 教材业务 ID
+   * @param unitId 单元业务 ID
+   * @param query 用户查询（当前阶段仅用于日志）
    * @returns 检索结果，包含单元内容和 found 标记
    */
-  retrieve(textbookId: string, unitId: string, query?: string): RetrieveResult {
+  async retrieve(
+    textbookId: string,
+    unitId: string,
+    query?: string,
+  ): Promise<RetrieveResult> {
+    // 1. 优先从数据库检索
+    if (this.prisma) {
+      const dbUnit = await this.prisma.unit.findFirst({
+        where: {
+          unitId,
+          textbook: { textbookId },
+        },
+        select: {
+          name: true,
+          content: true,
+        },
+      });
+
+      if (dbUnit) {
+        if (query) {
+          this.logger.debug(
+            `RAG retrieve from DB: textbookId=${textbookId}, unitId=${unitId}, query=${query}`,
+          );
+        }
+        return {
+          textbookId,
+          unitId,
+          unitName: dbUnit.name,
+          content: dbUnit.content,
+          found: true,
+        };
+      }
+    }
+
+    // 2. 降级：从本地文件读取
+    this.logger.warn(
+      `Unit not found in DB, falling back to file: textbookId=${textbookId}, unitId=${unitId}`,
+    );
+
     const textbook = this.loadTextbook(textbookId);
     if (!textbook) {
       return { textbookId, unitId, unitName: '', content: '', found: false };
@@ -201,7 +244,7 @@ export class RagService {
 
     if (query) {
       this.logger.debug(
-        `RAG retrieve: textbookId=${textbookId}, unitId=${unitId}, query=${query}`,
+        `RAG retrieve from file: textbookId=${textbookId}, unitId=${unitId}, query=${query}`,
       );
     }
 

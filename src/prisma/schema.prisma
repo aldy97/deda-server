@@ -85,13 +85,14 @@ model ChildProfile {
 
 // 教材元数据
 model Textbook {
-  id          String   @id @default(uuid())
-  textbookId  String   @unique // 业务教材 ID
-  name        String   // 教材名称
-  description String?  // 教材描述
-  cefrLevel   String?  // 默认 CEFR 等级
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(uuid())
+  textbookId     String   @unique // 业务教材 ID
+  name           String   // 教材名称
+  description    String?  // 教材描述
+  cefrLevel      String?  // 默认 CEFR 等级
+  promptTemplate String?  // 该教材对应的 prompt 模板
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   units Unit[]
 
@@ -104,8 +105,11 @@ model Unit {
   unitId      String   // 业务单元 ID
   textbookId  String
   name        String   // 单元名称
-  cefrLevel   String?  // 单元 CEFR 等级
+  description String?  // 单元描述
+  cefrLevel   String?  // 单元 CEFR 等级，如 A1/A2/B1
+  difficulty  Int?     // 数值化难度，如 1-5
   sortOrder   Int      @default(0) // 排序
+  content     String   // 单元正文，RAG 检索来源
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -113,6 +117,17 @@ model Unit {
 
   @@unique([textbookId, unitId])
   @@map("units")
+}
+
+// 教材同步日志（仅 schema 占位，Phase 1 不实现业务逻辑）
+model TextbookSyncLog {
+  id         String   @id @default(uuid())
+  textbookId String
+  action     String
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@map("textbook_sync_logs")
 }
 
 // 设备配置快照

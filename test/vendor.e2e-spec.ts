@@ -25,10 +25,28 @@ describe('Vendor WebSocket (e2e)', () => {
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'e2e-conv-001' }),
     },
+    conversationModeCategory: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
+    conversationMode: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    textbook: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    unit: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
   };
 
   const mockRagService = {
-    retrieve: jest.fn().mockReturnValue({
+    retrieve: jest.fn().mockResolvedValue({
       textbookId: 'sample-textbook',
       unitId: 'unit-1',
       unitName: 'Greetings',
