@@ -178,6 +178,42 @@ model LearningStat {
   @@map("learning_stats")
 }
 
+// 对话模式顶层分类
+model ConversationModeCategory {
+  id          String   @id @default(uuid())
+  key         String   @unique // 业务键：free_chat / textbook_learning
+  name        String   // 展示名
+  description String?  // 描述
+  sortOrder   Int      @default(0) // 排序
+  isActive    Boolean  @default(true) // 是否启用
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  modes ConversationMode[]
+
+  @@map("conversation_mode_categories")
+}
+
+// 对话模式细粒度子模式
+model ConversationMode {
+  id             String  @id @default(uuid())
+  categoryId     String
+  key            String  // 业务键，如 free_chat_casual
+  name           String  // 展示名
+  description    String? // 描述
+  sortOrder      Int     @default(0) // 排序
+  isActive       Boolean @default(true) // 是否启用
+  configSchema   Json?   // 前端配置 schema（可选）
+  promptTemplate String? // 提示词模板（可选）
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  category ConversationModeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([categoryId, key])
+  @@map("conversation_modes")
+}
+
 // Webhook 接收日志
 model WebhookLog {
   id          String   @id @default(uuid())

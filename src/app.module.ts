@@ -22,6 +22,7 @@ import { RedisModule } from './common/redis/redis.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { MqttModule } from './common/mqtt/mqtt.module';
 import { DeviceStatusModule } from './modules/device-status/device-status.module';
+import { ConversationModesModule } from './modules/conversation-modes/conversation-modes.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { DeviceStatusModule } from './modules/device-status/device-status.module
     RedisModule,
     MqttModule,
     DeviceStatusModule,
+    ConversationModesModule,
     UsersModule,
     DevicesModule,
     ChildProfilesModule,
