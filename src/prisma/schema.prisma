@@ -48,6 +48,7 @@ model Device {
   configs         DeviceConfig[]
   conversations   Conversation[]
   learningStats   LearningStat[]
+  childProfile    ChildProfile?
 
   @@map("devices")
 }
@@ -68,17 +69,19 @@ model UserDeviceBinding {
   @@map("user_device_bindings")
 }
 
-// 孩子档案
+// 孩子档案（与设备一对一）
 model ChildProfile {
   id        String   @id @default(uuid())
   userId    String
+  deviceId  String?  @unique // 设备内部 ID，一对一
   name      String?  // 孩子姓名
   birthday  String?  // 生日 YYYY-MM-DD
   englishName String? // 英文名（可选传递给厂商用于 AI 称呼）
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@map("child_profiles")
 }

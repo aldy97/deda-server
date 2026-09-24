@@ -1,32 +1,65 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { UpsertChildProfileDto } from './dto/upsert-child-profile.dto';
 
 @Injectable()
 export class ChildProfilesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list() {
-    // TODO: 查询当前用户的孩子档案
-    return [];
+  /**
+   * 查询指定设备的 owner info
+   * @returns ChildProfile 或 null（未填写）
+   */
+  async getByDevice(userId: string, deviceId: string) {
+    const binding = await this.ensureDeviceOwnership(userId, deviceId);
+
+    return this.prisma.childProfile.findUnique({
+      where: { deviceId: binding.device.id },
+    });
   }
 
-  async create(dto: any) {
-    // TODO: 创建档案
-    return null;
+  /**
+   * 创建或更新指定设备的 owner info
+   * 仅允许 name 和 birthday
+   */
+  async upsertByDevice(
+    userId: string,
+    deviceId: string,
+    dto: UpsertChildProfileDto,
+  ) {
+    const binding = await this.ensureDeviceOwnership(userId, deviceId);
+
+    return this.prisma.childProfile.upsert({
+      where: { deviceId: binding.device.id },
+      update: {
+        name: dto.name,
+        birthday: dto.birthday,
+      },
+      create: {
+        userId,
+        deviceId: binding.device.id,
+        name: dto.name,
+        birthday: dto.birthday,
+      },
+    });
   }
 
-  async detail(id: string) {
-    // TODO: 查询单条档案
-    return null;
-  }
+  /**
+   * 校验当前用户是否拥有该设备
+   */
+  private async ensureDeviceOwnership(userId: string, deviceId: string) {
+    const binding = await this.prisma.userDeviceBinding.findFirst({
+      where: {
+        userId,
+        device: { deviceId },
+      },
+      include: { device: true },
+    });
 
-  async update(id: string, dto: any) {
-    // TODO: 更新档案
-    return null;
-  }
+    if (!binding) {
+      throw new ForbiddenException('Device not bound to current user');
+    }
 
-  async remove(id: string) {
-    // TODO: 删除档案
-    return null;
+    return binding;
   }
 }
