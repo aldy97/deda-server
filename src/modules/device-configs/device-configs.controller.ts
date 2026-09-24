@@ -1,34 +1,60 @@
-import { Controller, Get, Post, Param, Body } from "@nestjs/common";
-import { ApiTags, ApiOperation } from "@nestjs/swagger";
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
+import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
+import { Request } from "express";
 import { DeviceConfigsService } from "./device-configs.service";
 import { SwitchModeDto } from "./dto/switch-mode.dto";
+import { ApplyDeviceConfigDto } from "./dto/apply-device-config.dto";
+import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
+
+interface RequestWithUser extends Request {
+  user: { userId: string; openid: string };
+}
 
 @ApiTags("设备配置")
 @Controller("device-configs")
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
 export class DeviceConfigsController {
   constructor(private readonly deviceConfigsService: DeviceConfigsService) {}
 
   @Get(":deviceId/current")
-  async current(@Param("deviceId") deviceId: string) {
-    // TODO: 获取设备当前生效配置
-    return this.deviceConfigsService.current(deviceId);
+  @ApiOperation({ summary: "获取设备当前生效配置" })
+  async current(
+    @Param("deviceId") deviceId: string,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.deviceConfigsService.current(req.user.userId, deviceId);
   }
 
   @Post(":deviceId/apply")
-  async apply(@Param("deviceId") deviceId: string, @Body() dto: any) {
-    // TODO: 提交教材/单元配置并下发厂商
-    return this.deviceConfigsService.apply(deviceId, dto);
+  @ApiOperation({ summary: "应用教材/单元配置" })
+  async apply(
+    @Param("deviceId") deviceId: string,
+    @Body() dto: ApplyDeviceConfigDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.deviceConfigsService.apply(req.user.userId, deviceId, dto);
   }
 
   @Post(":deviceId/mode")
-  @ApiOperation({
-    summary: "切换对话模式/语言/语速，并同步机芯厂 ASR/TTS 参数",
-  })
+  @ApiOperation({ summary: "切换对话模式/子模式" })
   async switchMode(
     @Param("deviceId") deviceId: string,
     @Body() dto: SwitchModeDto,
+    @Req() req: RequestWithUser,
   ) {
-    // TODO: 保存配置快照，调用厂商配置同步接口，必要时通过 WebSocket 通知设备发声
-    return this.deviceConfigsService.switchMode(deviceId, dto);
+    return this.deviceConfigsService.switchMode(
+      req.user.userId,
+      deviceId,
+      dto,
+    );
   }
 }

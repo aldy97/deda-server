@@ -1,19 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
 
-export class SwitchModeDto {
+export class ApplyDeviceConfigDto {
   @ApiProperty({
-    description: '对话模式',
+    description: '学习模式',
     enum: ['free_chat', 'textbook_learning', 'locked_unit', 'free_textbook'],
   })
   @IsString()
   @IsNotEmpty()
   mode: string;
-
-  @ApiPropertyOptional({ description: '自由对话子模式 key' })
-  @IsOptional()
-  @IsString()
-  conversationModeKey?: string;
 
   @ApiPropertyOptional({ description: '教材业务 ID' })
   @IsOptional()
@@ -24,6 +19,16 @@ export class SwitchModeDto {
   @IsOptional()
   @IsString()
   unitId?: string;
+
+  @ApiPropertyOptional({ description: '自由对话子模式 key' })
+  @IsOptional()
+  @IsString()
+  conversationModeKey?: string;
+
+  @ApiPropertyOptional({ description: 'CEFR 等级' })
+  @IsOptional()
+  @IsString()
+  cefrLevel?: string;
 
   @ApiPropertyOptional({ description: '语言：zh/en/bilingual' })
   @IsOptional()

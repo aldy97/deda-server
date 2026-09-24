@@ -132,16 +132,19 @@ model TextbookSyncLog {
 
 // 设备配置快照
 model DeviceConfig {
-  id            String   @id @default(uuid())
-  deviceId      String
-  textbookId    String?  // 当前教材 ID
-  unitId        String?  // 当前单元 ID（可选）
-  mode          String   // 学习模式：locked_unit / free_textbook / free_chat
-  cefrLevel     String?  // CEFR 难度等级
-  isActive      Boolean  @default(true) // 是否当前生效
-  payload       Json?    // 下发给厂商的完整配置快照
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                   String   @id @default(uuid())
+  deviceId             String
+  textbookId           String?  // 当前教材业务 ID
+  unitId               String?  // 当前单元业务 ID（可选）
+  mode                 String   // 学习模式：locked_unit / free_textbook / free_chat / textbook_learning
+  conversationModeKey  String?  // 自由对话子模式业务 key（如 free_chat_casual）
+  cefrLevel            String?  // CEFR 难度等级
+  language             String?  // 语言：zh/en/bilingual
+  speechRate           String?  // 语速：slow/normal/fast
+  isActive             Boolean  @default(true) // 是否当前生效
+  payload              Json?    // 扩展字段快照
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 

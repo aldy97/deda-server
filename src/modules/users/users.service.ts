@@ -30,7 +30,7 @@ export class UsersService {
   /**
    * 微信小程序登录
    * 1. 用 code 调微信 jscode2session 换 openid
-   * 2. 本地开发若未配置 AppSecret，则进入 mock 模式
+   * 2. 本地开发若未配置 AppSecret，则模拟 jscode2session 返回稳定 openid
    * 3. 创建或更新用户，签发 JWT
    */
   async wechatLogin(dto: WechatLoginDto): Promise<WechatLoginResult> {
@@ -65,11 +65,12 @@ export class UsersService {
         throw new Error('WeChat login failed');
       }
     } else {
-      // Mock 模式：本地开发使用 code 派生一个稳定 openid
+      // 开发环境模拟微信 jscode2session：同一开发者工具用户返回同一 openid
+      // 注意：这不是生产微信登录，仅用于本地联调时保持用户-设备关系稳定
       this.logger.warn(
-        'WECHAT_APPID/SECRET not configured, using mock WeChat login',
+        'WECHAT_APPID/SECRET not configured, simulating WeChat jscode2session with stable openid',
       );
-      openid = `mock-openid-${dto.code || 'default'}`;
+      openid = 'dev-openid-stable';
     }
 
     const user = await this.prisma.user.upsert({
