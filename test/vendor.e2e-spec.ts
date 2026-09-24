@@ -21,6 +21,9 @@ describe('Vendor WebSocket (e2e)', () => {
     deviceConfig: {
       findFirst: jest.fn().mockResolvedValue(null),
     },
+    childProfile: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
     conversation: {
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'e2e-conv-001' }),
@@ -31,6 +34,7 @@ describe('Vendor WebSocket (e2e)', () => {
     },
     conversationMode: {
       upsert: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
     },
     textbook: {

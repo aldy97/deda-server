@@ -74,9 +74,9 @@ model ChildProfile {
   id        String   @id @default(uuid())
   userId    String
   deviceId  String?  @unique // 设备内部 ID，一对一
-  name      String?  // 孩子姓名
-  birthday  String?  // 生日 YYYY-MM-DD
-  englishName String? // 英文名（可选传递给厂商用于 AI 称呼）
+  name        String?  // 孩子姓名
+  birthday    String?  // 生日 YYYY-MM-DD
+  englishName String?  // 英文名（AI 称呼用）
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

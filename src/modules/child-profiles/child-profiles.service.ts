@@ -34,12 +34,14 @@ export class ChildProfilesService {
       update: {
         name: dto.name,
         birthday: dto.birthday,
+        englishName: dto.englishName,
       },
       create: {
         userId,
         deviceId: binding.device.id,
         name: dto.name,
         birthday: dto.birthday,
+        englishName: dto.englishName,
       },
     });
   }

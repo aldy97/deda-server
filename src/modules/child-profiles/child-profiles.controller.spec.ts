@@ -83,22 +83,24 @@ describe('ChildProfilesController', () => {
       expect(result).toEqual(expected);
     });
 
-    it('should ignore fields other than name and birthday', async () => {
-      const dto = { name: 'Alice', birthday: '2018-05-20', englishName: 'A' } as any;
+    it('should accept englishName in addition to name and birthday', async () => {
+      const dto = { name: 'Alice', birthday: '2018-05-20', englishName: 'A' };
       const expected = {
         id: 'child-001',
         name: 'Alice',
         birthday: '2018-05-20',
+        englishName: 'A',
       };
       service.upsertByDevice.mockResolvedValue(expected as any);
 
-      await controller.updateByDevice('dev-001', dto, mockReq('user-001'));
+      const result = await controller.updateByDevice('dev-001', dto, mockReq('user-001'));
 
       expect(service.upsertByDevice).toHaveBeenCalledWith(
         'user-001',
         'dev-001',
         dto,
       );
+      expect(result).toEqual(expected);
     });
   });
 });

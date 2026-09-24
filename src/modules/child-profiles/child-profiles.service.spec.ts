@@ -93,6 +93,7 @@ describe('ChildProfilesService', () => {
       const dto: UpsertChildProfileDto = {
         name: 'Alice',
         birthday: '2018-05-20',
+        englishName: 'Ali',
       };
       const created = {
         id: 'child-001',
@@ -100,7 +101,7 @@ describe('ChildProfilesService', () => {
         deviceId: 'device-uuid-001',
         name: 'Alice',
         birthday: '2018-05-20',
-        englishName: null,
+        englishName: 'Ali',
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -112,12 +113,13 @@ describe('ChildProfilesService', () => {
 
       expect(prisma.childProfile.upsert).toHaveBeenCalledWith({
         where: { deviceId: 'device-uuid-001' },
-        update: { name: 'Alice', birthday: '2018-05-20' },
+        update: { name: 'Alice', birthday: '2018-05-20', englishName: 'Ali' },
         create: {
           userId: 'user-001',
           deviceId: 'device-uuid-001',
           name: 'Alice',
           birthday: '2018-05-20',
+          englishName: 'Ali',
         },
       });
       expect(result).toEqual(created);
@@ -126,6 +128,7 @@ describe('ChildProfilesService', () => {
     it('should update existing owner info', async () => {
       const dto: UpsertChildProfileDto = {
         name: 'Bob',
+        englishName: 'Bobby',
       };
       const updated = {
         id: 'child-001',
@@ -133,7 +136,7 @@ describe('ChildProfilesService', () => {
         deviceId: 'device-uuid-001',
         name: 'Bob',
         birthday: '2018-05-20',
-        englishName: null,
+        englishName: 'Bobby',
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -145,12 +148,13 @@ describe('ChildProfilesService', () => {
 
       expect(prisma.childProfile.upsert).toHaveBeenCalledWith({
         where: { deviceId: 'device-uuid-001' },
-        update: { name: 'Bob', birthday: undefined },
+        update: { name: 'Bob', birthday: undefined, englishName: 'Bobby' },
         create: {
           userId: 'user-001',
           deviceId: 'device-uuid-001',
           name: 'Bob',
           birthday: undefined,
+          englishName: 'Bobby',
         },
       });
       expect(result).toEqual(updated);

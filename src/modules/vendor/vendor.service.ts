@@ -55,15 +55,60 @@ export class VendorService {
       return { textbookId: dto.textbookId, unitId: dto.unitId };
     }
 
-    const activeConfig = await this.prisma.deviceConfig.findFirst({
-      where: { deviceId: deviceInternalId, isActive: true },
-      orderBy: { createdAt: 'desc' },
-    });
+    const activeConfig = await this.resolveActiveConfig(deviceInternalId);
 
     return {
       textbookId: dto.textbookId || activeConfig?.textbookId || this.defaultTextbookId,
       unitId: dto.unitId || activeConfig?.unitId || this.defaultUnitId,
     };
+  }
+
+  /**
+   * 查询设备当前生效配置
+   */
+  private async resolveActiveConfig(deviceInternalId: string) {
+    return this.prisma.deviceConfig.findFirst({
+      where: { deviceId: deviceInternalId, isActive: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /**
+   * 查询设备对应的孩子档案
+   */
+  private async getChildProfile(deviceInternalId: string) {
+    return this.prisma.childProfile.findUnique({
+      where: { deviceId: deviceInternalId },
+    });
+  }
+
+  /**
+   * 根据当前模式解析对应的 prompt 模板
+   * - free_chat 模式：从 ConversationMode.promptTemplate 读取
+   * - 教材相关模式：从 Textbook.promptTemplate 读取
+   */
+  private async resolvePromptTemplate(
+    mode: string | null | undefined,
+    textbookId: string | null | undefined,
+    conversationModeKey: string | null | undefined,
+  ): Promise<string | undefined> {
+    if (mode === 'free_chat' && conversationModeKey) {
+      const conversationMode = await this.prisma.conversationMode.findFirst({
+        where: { key: conversationModeKey },
+        select: { promptTemplate: true },
+      });
+      return conversationMode?.promptTemplate ?? undefined;
+    }
+
+    if (textbookId) {
+      const textbook = await this.prisma.textbook.findUnique({
+        where: { textbookId },
+        select: { promptTemplate: true },
+      });
+      return textbook?.promptTemplate ?? undefined;
+    }
+
+    return undefined;
   }
 
   /**
@@ -105,9 +150,18 @@ export class VendorService {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
 
+    const activeConfig = await this.resolveActiveConfig(device.id);
     const { textbookId, unitId } = await this.resolveTextbookAndUnit(
       dto,
       device.id,
+    );
+
+    // 读取孩子档案与当前模式对应的 prompt 模板
+    const childProfile = await this.getChildProfile(device.id);
+    const promptTemplate = await this.resolvePromptTemplate(
+      activeConfig?.mode,
+      textbookId,
+      activeConfig?.conversationModeKey,
     );
 
     // RAG 检索教材内容
@@ -130,6 +184,18 @@ export class VendorService {
         context,
         retrieveResult.unitName,
         history,
+        {
+          childProfile: childProfile
+            ? {
+                name: childProfile.name,
+                birthday: childProfile.birthday,
+                englishName: childProfile.englishName,
+              }
+            : undefined,
+          promptTemplate,
+          mode: activeConfig?.mode ?? undefined,
+          conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
+        },
       );
       const llmResult = await this.llmService.complete({ messages });
       responseText = llmResult.text;

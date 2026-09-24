@@ -174,5 +174,81 @@ describe('LlmService', () => {
         'No specific textbook context is selected',
       );
     });
+
+    it('should include child profile in system prompt', () => {
+      const messages = service.buildEnglishTutorPrompt(
+        'Hello',
+        '',
+        undefined,
+        undefined,
+        {
+          childProfile: {
+            name: 'Alice',
+            birthday: '2018-05-20',
+            englishName: 'Ali',
+          },
+        },
+      );
+
+      expect(messages[0].content).toContain('Child Profile');
+      expect(messages[0].content).toContain('Name: Alice');
+      expect(messages[0].content).toContain('Birthday: 2018-05-20');
+      expect(messages[0].content).toContain('English Name: Ali');
+      expect(messages[0].content).toContain('address the child using their name');
+    });
+
+    it('should use prompt template when provided', () => {
+      const template = 'You are a pirate tutor. Speak like a pirate.';
+      const messages = service.buildEnglishTutorPrompt(
+        'Hello',
+        '',
+        undefined,
+        undefined,
+        { promptTemplate: template },
+      );
+
+      expect(messages[0].content).toContain(template);
+      expect(messages[0].content).toContain('In addition, always follow these general rules');
+      expect(messages[0].content).toContain('friendly English-speaking AI companion');
+    });
+
+    it('should concatenate child profile, prompt template, and default rules', () => {
+      const template = 'Focus on daily routines.';
+      const messages = service.buildEnglishTutorPrompt(
+        'Good morning',
+        'Unit 1: Morning routines',
+        'Morning routines',
+        undefined,
+        {
+          childProfile: { name: 'Bob', englishName: 'Bobby' },
+          promptTemplate: template,
+        },
+      );
+
+      const system = messages[0].content;
+      expect(system.indexOf('Child Profile')).toBeLessThan(system.indexOf(template));
+      expect(system.indexOf(template)).toBeLessThan(system.indexOf('general rules'));
+      expect(system).toContain('Name: Bob');
+      expect(system).toContain('English Name: Bobby');
+      expect(system).toContain('Birthday: not provided');
+      expect(system).toContain('Current textbook context (Morning routines)');
+    });
+
+    it('should keep default behavior when options are omitted', () => {
+      const messagesWithOptions = service.buildEnglishTutorPrompt(
+        'Hello',
+        'Unit 1: Greetings',
+        'Greetings',
+        undefined,
+        {},
+      );
+      const messagesWithoutOptions = service.buildEnglishTutorPrompt(
+        'Hello',
+        'Unit 1: Greetings',
+        'Greetings',
+      );
+
+      expect(messagesWithOptions[0].content).toBe(messagesWithoutOptions[0].content);
+    });
   });
 });

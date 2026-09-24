@@ -29,6 +29,15 @@ describe('VendorService', () => {
             deviceConfig: {
               findFirst: jest.fn(),
             },
+            childProfile: {
+              findUnique: jest.fn(),
+            },
+            conversationMode: {
+              findFirst: jest.fn(),
+            },
+            textbook: {
+              findUnique: jest.fn(),
+            },
             conversation: {
               findMany: jest.fn(),
               create: jest.fn(),
@@ -83,6 +92,14 @@ describe('VendorService', () => {
 
       prisma.device.findUnique.mockResolvedValue(null);
       prisma.device.create.mockResolvedValue({ id: 'uuid-001', deviceId: 'dev-001' } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: 'locked_unit',
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        conversationModeKey: null,
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.textbook.findUnique.mockResolvedValue({ promptTemplate: null } as any);
       prisma.conversation.findMany.mockResolvedValue([]);
       prisma.conversation.create.mockResolvedValue({ id: 'conv-001' } as any);
       ragService.retrieve.mockResolvedValue({
@@ -105,6 +122,13 @@ describe('VendorService', () => {
 
       expect(prisma.device.findUnique).toHaveBeenCalledWith({ where: { deviceId: 'dev-001' } });
       expect(prisma.device.create).toHaveBeenCalledWith({ data: { deviceId: 'dev-001' } });
+      expect(prisma.childProfile.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: 'uuid-001' },
+      });
+      expect(prisma.textbook.findUnique).toHaveBeenCalledWith({
+        where: { textbookId: 'sample-textbook' },
+        select: { promptTemplate: true },
+      });
       expect(ragService.retrieve).toHaveBeenCalledWith(
         'sample-textbook',
         'unit-1',
@@ -239,6 +263,159 @@ describe('VendorService', () => {
       expect(prisma.device.create).not.toHaveBeenCalled();
       expect(result.deviceId).toBe('dev-abc-123');
       expect(result.responseText).toBe('Hi there!');
+    });
+
+    it('should pass child profile and textbook prompt template to prompt builder', async () => {
+      const dto: VendorTextInDto = {
+        deviceId: 'dev-001',
+        asrText: 'Hello',
+      };
+      const childProfile = {
+        id: 'child-001',
+        name: 'Alice',
+        birthday: '2018-05-20',
+        englishName: 'Ali',
+      };
+      const textbookTemplate = 'You are a friendly English tutor for Chinese children.';
+
+      prisma.device.findUnique.mockResolvedValue({ id: 'uuid-001', deviceId: 'dev-001' } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: 'locked_unit',
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        conversationModeKey: null,
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(childProfile as any);
+      prisma.textbook.findUnique.mockResolvedValue({ promptTemplate: textbookTemplate } as any);
+      prisma.conversation.findMany.mockResolvedValue([]);
+      prisma.conversation.create.mockResolvedValue({ id: 'conv-001' } as any);
+      ragService.retrieve.mockResolvedValue({
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        unitName: 'Greetings',
+        content: 'Hello!',
+        found: true,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: 'Hello' },
+      ] as any);
+      llmService.complete.mockResolvedValue({ text: 'Hi Alice!' });
+
+      await service.handleTextIn(dto);
+
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        'Hello',
+        'Hello!',
+        'Greetings',
+        [],
+        expect.objectContaining({
+          childProfile: {
+            name: 'Alice',
+            birthday: '2018-05-20',
+            englishName: 'Ali',
+          },
+          promptTemplate: textbookTemplate,
+          mode: 'locked_unit',
+        }),
+      );
+    });
+
+    it('should fetch conversation mode prompt template in free_chat mode', async () => {
+      const dto: VendorTextInDto = {
+        deviceId: 'dev-001',
+        asrText: 'Hi',
+      };
+      const modeTemplate = 'You are a casual chat partner for kids.';
+
+      prisma.device.findUnique.mockResolvedValue({ id: 'uuid-001', deviceId: 'dev-001' } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: 'free_chat',
+        textbookId: null,
+        unitId: null,
+        conversationModeKey: 'free_chat_casual',
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.conversationMode.findFirst.mockResolvedValue({ promptTemplate: modeTemplate } as any);
+      prisma.conversation.findMany.mockResolvedValue([]);
+      prisma.conversation.create.mockResolvedValue({ id: 'conv-001' } as any);
+      ragService.retrieve.mockResolvedValue({
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        unitName: 'Greetings',
+        content: '',
+        found: false,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: 'Hi' },
+      ] as any);
+      llmService.complete.mockResolvedValue({ text: 'Hey there!' });
+
+      await service.handleTextIn(dto);
+
+      expect(prisma.conversationMode.findFirst).toHaveBeenCalledWith({
+        where: { key: 'free_chat_casual' },
+        select: { promptTemplate: true },
+      });
+      expect(prisma.textbook.findUnique).not.toHaveBeenCalled();
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        'Hi',
+        '',
+        'Greetings',
+        [],
+        expect.objectContaining({
+          childProfile: undefined,
+          promptTemplate: modeTemplate,
+          mode: 'free_chat',
+          conversationModeKey: 'free_chat_casual',
+        }),
+      );
+    });
+
+    it('should use undefined template when no matching prompt template exists', async () => {
+      const dto: VendorTextInDto = {
+        deviceId: 'dev-001',
+        asrText: 'Hello',
+      };
+
+      prisma.device.findUnique.mockResolvedValue({ id: 'uuid-001', deviceId: 'dev-001' } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: 'locked_unit',
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        conversationModeKey: null,
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.textbook.findUnique.mockResolvedValue({ promptTemplate: null } as any);
+      prisma.conversation.findMany.mockResolvedValue([]);
+      prisma.conversation.create.mockResolvedValue({ id: 'conv-001' } as any);
+      ragService.retrieve.mockResolvedValue({
+        textbookId: 'sample-textbook',
+        unitId: 'unit-1',
+        unitName: 'Greetings',
+        content: 'Hello!',
+        found: true,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: 'Hello' },
+      ] as any);
+      llmService.complete.mockResolvedValue({ text: 'Hi!' });
+
+      await service.handleTextIn(dto);
+
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        'Hello',
+        'Hello!',
+        'Greetings',
+        [],
+        expect.objectContaining({
+          childProfile: undefined,
+          promptTemplate: undefined,
+          mode: 'locked_unit',
+        }),
+      );
     });
   });
 

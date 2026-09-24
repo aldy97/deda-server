@@ -15,4 +15,10 @@ export class UpsertChildProfileDto {
     message: 'birthday must be in YYYY-MM-DD format',
   })
   birthday?: string;
+
+  @ApiPropertyOptional({ description: '孩子英文名，AI 称呼用' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  englishName?: string;
 }

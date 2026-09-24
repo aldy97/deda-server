@@ -110,14 +110,30 @@ export class LlmService {
    * @param context 教材单元上下文
    * @param unitName 单元名称
    * @param history 同设备同教材同单元的最近对话历史
+   * @param options 扩展选项：孩子档案、模式/教材 prompt 模板
    */
   buildEnglishTutorPrompt(
     asrText: string,
     context: string,
     unitName?: string,
     history?: Array<{ role: "user" | "assistant"; content: string }>,
+    options?: {
+      childProfile?: {
+        name?: string | null;
+        birthday?: string | null;
+        englishName?: string | null;
+      };
+      promptTemplate?: string;
+      mode?: string;
+      conversationModeKey?: string;
+    },
   ): LlmMessage[] {
-    const systemPrompt = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
+    const childProfile = options?.childProfile;
+    const promptTemplate = options?.promptTemplate;
+
+    const childProfileSection = this.buildChildProfileSection(childProfile);
+
+    const defaultRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
 Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
 
 Rules:
@@ -131,9 +147,23 @@ Rules:
 8. Always end your reply with a question that is relevant to the unit topic, especially those topics that are not covered yet in the conversation, encouraging the child to respond in English.
 9. If the child does not answer your engaging question, smoothly shift to another aspect of the same unit. For example, ask about different jobs, describe what people do, or invite the child to imagine their own future job.
 10. IMPORTANT: If the child's answer seems off-topic, do NOT just say "let's go back." Instead, make a friendly, creative bridge back to the unit. For example, if the unit is about jobs and the child says "I want to play football," you can say "Playing football is fun! Do you want to be a football player when you grow up?" This keeps the conversation in the unit while honoring what the child said.
-11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.
+11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.`;
 
-${context ? `Current textbook context (${unitName || "selected unit"}):\n"""\n${context}\n"""` : "No specific textbook context is selected. Have a free English chat with the child."}`;
+    const rulesSection = promptTemplate
+      ? `In addition, always follow these general rules:\n${defaultRules}`
+      : defaultRules;
+
+    const templateSection = promptTemplate
+      ? `${promptTemplate}\n\n${rulesSection}`
+      : rulesSection;
+
+    const contextSection = context
+      ? `Current textbook context (${unitName || "selected unit"}):\n"""\n${context}\n"""`
+      : "No specific textbook context is selected. Have a free English chat with the child.";
+
+    const systemPrompt = [childProfileSection, templateSection, contextSection]
+      .filter((section) => section.length > 0)
+      .join("\n\n");
 
     const messages: LlmMessage[] = [{ role: "system", content: systemPrompt }];
 
@@ -146,5 +176,36 @@ ${context ? `Current textbook context (${unitName || "selected unit"}):\n"""\n${
     messages.push({ role: "user", content: asrText });
 
     return messages;
+  }
+
+  private buildChildProfileSection(
+    childProfile?: {
+      name?: string | null;
+      birthday?: string | null;
+      englishName?: string | null;
+    },
+  ): string {
+    if (!childProfile) {
+      return "";
+    }
+
+    const name = childProfile.name || "the child";
+    const birthday = childProfile.birthday || "not provided";
+    const englishName = childProfile.englishName || "not provided";
+
+    if (
+      !childProfile.name &&
+      !childProfile.birthday &&
+      !childProfile.englishName
+    ) {
+      return "";
+    }
+
+    return `Child Profile:
+- Name: ${name}
+- Birthday: ${birthday}
+- English Name: ${englishName}
+
+Please address the child using their name or English name when appropriate.`;
   }
 }
