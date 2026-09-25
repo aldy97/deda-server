@@ -1,6 +1,6 @@
 # 核心接口契约
 
-仅覆盖 8 条核心链路。完整接口见 Swagger：`http://localhost:3000/api/docs`。
+覆盖 8 条核心链路 + 学习全览 MVP。完整接口见 Swagger：`http://localhost:3000/api/docs`。
 
 统一响应：`{ "code": 0, "message": "success", "data": {} }`。除登录外均需 `Authorization: Bearer <token>`。
 
@@ -177,5 +177,106 @@
   "englishName": "Ming",
   "birthday": "2020-05-20",
   "deviceId": "dev-local-001"
+}
+```
+
+---
+
+## 9. 学习全览 MVP
+
+均需要 `Authorization: ******
+
+### 9.1 仪表盘
+
+`GET /learning-stats/dashboard?deviceId=`（deviceId 可选）
+
+响应示例：
+
+```json
+{
+  "totalDurationMinutes": 120,
+  "totalSessions": 15,
+  "activeDeviceCount": 1,
+  "boundDeviceCount": 2,
+  "continuousDays": 5,
+  "topicCount": 3,
+  "devices": [
+    {
+      "deviceId": "dev-local-001",
+      "deviceName": "DEV001",
+      "childName": "小明",
+      "status": "online",
+      "totalDurationMinutes": 120,
+      "totalSessions": 15,
+      "continuousDays": 5,
+      "topicCount": 3,
+      "todayDurationMinutes": 20,
+      "weekDurationMinutes": 120
+    }
+  ]
+}
+```
+
+### 9.2 学习趋势
+
+`GET /learning-stats/daily?deviceId=&days=7`
+
+响应示例：
+
+```json
+[
+  { "date": "9/19", "durationMinutes": 0, "sessionCount": 0 },
+  { "date": "9/25", "durationMinutes": 20, "sessionCount": 2 }
+]
+```
+
+### 9.3 主题分布
+
+`GET /learning-stats/topics?deviceId=`
+
+响应示例：
+
+```json
+[
+  {
+    "id": "free_chat|sample-textbook|unit-1",
+    "mode": "free_chat",
+    "textbookId": "sample-textbook",
+    "textbookName": "sample-textbook",
+    "unitId": "unit-1",
+    "unitName": "unit-1",
+    "conversationModeKey": null,
+    "conversationModeName": null,
+    "count": 3,
+    "lastSpokeAt": "2026-09-25T02:15:32.353Z",
+    "isActive": false,
+    "avgScore": null
+  }
+]
+```
+
+### 9.4 学习动态时间线
+
+`GET /learning-stats/timeline?deviceId=&page=1&pageSize=10`
+
+响应示例：
+
+```json
+{
+  "items": [
+    {
+      "id": "...",
+      "deviceId": "dev-local-001",
+      "deviceName": "DEV001",
+      "mode": "free_chat",
+      "topicName": "sample-textbook · unit-1",
+      "userText": "Hello",
+      "aiText": "Hi there!",
+      "createdAt": "2026-09-25T02:15:32.353Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 10
 }
 ```
