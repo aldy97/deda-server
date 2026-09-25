@@ -178,13 +178,11 @@ Rules:
     return messages;
   }
 
-  private buildChildProfileSection(
-    childProfile?: {
-      name?: string | null;
-      birthday?: string | null;
-      englishName?: string | null;
-    },
-  ): string {
+  private buildChildProfileSection(childProfile?: {
+    name?: string | null;
+    birthday?: string | null;
+    englishName?: string | null;
+  }): string {
     if (!childProfile) {
       return "";
     }
