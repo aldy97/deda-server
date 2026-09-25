@@ -47,7 +47,7 @@ export class ConversationsService {
       const [items, total] = await Promise.all([
         this.prisma.conversation.findMany({
           where,
-          orderBy: { spokeAt: "asc" },
+          orderBy: { spokeAt: "desc" },
           skip,
           take: pageSize,
         }),
@@ -98,7 +98,7 @@ export class ConversationsService {
     const [items, total] = await Promise.all([
       this.prisma.conversation.findMany({
         where,
-        orderBy: { spokeAt: "asc" },
+        orderBy: { spokeAt: "desc" },
         skip,
         take: pageSize,
       }),

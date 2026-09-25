@@ -112,6 +112,40 @@ export class VendorService {
   }
 
   /**
+   * 校验对话上下文是否有效
+   * - free_chat 模式不强制校验 textbook/unit
+   * - locked_unit / textbook_learning 模式要求 textbookId 与 unitId 真实存在
+   */
+  private async validateConversationContext(
+    mode: string | null | undefined,
+    textbookId: string,
+    unitId: string,
+  ): Promise<boolean> {
+    if (mode === 'free_chat') {
+      return true;
+    }
+
+    const textbook = await this.prisma.textbook.findUnique({
+      where: { textbookId },
+    });
+
+    if (!textbook) {
+      return false;
+    }
+
+    const unit = await this.prisma.unit.findUnique({
+      where: {
+        textbookId_unitId: {
+          textbookId: textbook.id,
+          unitId,
+        },
+      },
+    });
+
+    return !!unit;
+  }
+
+  /**
    * 获取同一设备、同一教材、同一单元的最近对话历史
    * 用于 prompt 拼接，保证多轮对话上下文连续且单元边界隔离
    */
@@ -207,6 +241,8 @@ export class VendorService {
       responseText = "Sorry, I didn't catch that. Could you say it again?";
     }
 
+    const mode = activeConfig?.mode ?? 'locked_unit';
+
     const reply: VendorTextOutDto = {
       deviceId: dto.deviceId,
       responseText,
@@ -220,22 +256,35 @@ export class VendorService {
     };
 
     this.logger.debug(
-      `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, textbookId=${textbookId}, unitId=${unitId}`,
+      `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
     );
 
     // 持久化本轮对话，使 4G 状态下产生的记录在绑定后可恢复
-    await this.prisma.conversation.create({
-      data: {
-        deviceId: device.id,
-        asrText: dto.asrText,
-        aiReply: reply.responseText,
-        textbookId,
-        unitId,
-        mode: 'locked_unit',
-        rawPayload: dto as any,
-        spokeAt: new Date(),
-      },
-    });
+    // 仅在校验通过时写入，避免脏数据
+    const contextValid = await this.validateConversationContext(
+      mode,
+      textbookId,
+      unitId,
+    );
+
+    if (contextValid) {
+      await this.prisma.conversation.create({
+        data: {
+          deviceId: device.id,
+          asrText: dto.asrText,
+          aiReply: reply.responseText,
+          textbookId,
+          unitId,
+          mode,
+          rawPayload: dto as any,
+          spokeAt: new Date(),
+        },
+      });
+    } else {
+      this.logger.warn(
+        `Invalid conversation context skipped: mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
+      );
+    }
 
     return reply;
   }
