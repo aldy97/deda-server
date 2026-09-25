@@ -13,6 +13,7 @@
 请求：`{ "code": "wx-login-code" }`
 
 成功：
+
 ```json
 {
   "code": 0,
@@ -34,8 +35,14 @@
 - `DELETE /devices/:id` → `{ "success": true }`
 
 `Device` 示例：
+
 ```json
-{ "id": "dev-local-001", "name": "DEV001", "deviceId": "dev-local-001", "deviceCode": "DEV001" }
+{
+  "id": "dev-local-001",
+  "name": "DEV001",
+  "deviceId": "dev-local-001",
+  "deviceCode": "DEV001"
+}
 ```
 
 ---
@@ -45,6 +52,7 @@
 `GET /device-configs/:deviceId/current`
 
 响应示例：
+
 ```json
 {
   "deviceId": "dev-local-001",
@@ -65,10 +73,13 @@
 `POST /device-configs/:deviceId/mode`
 
 请求示例：
+
 ```json
 { "mode": "free_chat", "conversationModeKey": "free_chat_casual" }
 ```
+
 或
+
 ```json
 { "mode": "textbook_learning" }
 ```
@@ -80,11 +91,20 @@
 ## 5. 选择自由对话子模式
 
 先取子模式：
+
 - `GET /conversation-modes?categoryKey=free_chat` → `ConversationMode[]`
 
 示例：
+
 ```json
-[{ "id": "...", "key": "free_chat_casual", "name": "自由闲聊", "description": "..." }]
+[
+  {
+    "id": "...",
+    "key": "free_chat_casual",
+    "name": "自由闲聊",
+    "description": "..."
+  }
+]
 ```
 
 再保存：同链路 4，`POST /device-configs/:deviceId/mode` 带 `conversationModeKey`。
@@ -98,6 +118,7 @@
 - `POST /device-configs/:deviceId/apply`
 
 请求示例：
+
 ```json
 {
   "mode": "locked_unit",
@@ -117,11 +138,22 @@
 说明：按设备当前 active config 隔离，按 `spokeAt` 倒序返回。
 
 响应示例：
+
 ```json
 {
   "items": [
-    { "id": "...-u", "role": "user", "content": "Hello", "createdAt": "2026-09-25T09:11:00.657Z" },
-    { "id": "...-d", "role": "device", "content": "Hi", "createdAt": "2026-09-25T09:11:01.657Z" }
+    {
+      "id": "...-u",
+      "role": "user",
+      "content": "Hello",
+      "createdAt": "2026-09-25T09:11:00.657Z"
+    },
+    {
+      "id": "...-d",
+      "role": "device",
+      "content": "Hi",
+      "createdAt": "2026-09-25T09:11:01.657Z"
+    }
   ],
   "total": 1,
   "page": 1,
@@ -137,6 +169,13 @@
 - `PATCH /child-profiles/device/:deviceId`
 
 请求/响应示例：
+
 ```json
-{ "id": "...", "name": "小明", "englishName": "Ming", "birthday": "2020-05-20", "deviceId": "dev-local-001" }
+{
+  "id": "...",
+  "name": "小明",
+  "englishName": "Ming",
+  "birthday": "2020-05-20",
+  "deviceId": "dev-local-001"
+}
 ```
