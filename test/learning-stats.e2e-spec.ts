@@ -36,19 +36,36 @@ describe("LearningStats (e2e)", () => {
         },
       ]),
     },
-    conversation: {
-      findMany: jest.fn().mockResolvedValue([
-        {
-          id: "conv-001",
-          deviceId: "device-uuid-001",
-          mode: "free_chat",
-          textbookId: null,
-          unitId: null,
-          asrText: "Hello",
-          aiReply: "Hi there",
-          spokeAt: new Date(),
-        },
-      ]),
+    message: {
+      findMany: jest.fn().mockImplementation((args: any = {}) => {
+        // timeline 第二次调用按 turnId 取 assistant 回复
+        if (args?.where?.role === "assistant") {
+          return Promise.resolve([
+            {
+              id: "msg-001-d",
+              turnId: "t1",
+              role: "assistant",
+              content: "Hi there",
+              status: "completed",
+              spokeAt: new Date(),
+            },
+          ]);
+        }
+        return Promise.resolve([
+          {
+            id: "msg-001-u",
+            deviceId: "device-uuid-001",
+            turnId: "t1",
+            role: "user",
+            content: "Hello",
+            status: "completed",
+            mode: "free_chat",
+            textbookId: null,
+            unitId: null,
+            spokeAt: new Date(),
+          },
+        ]);
+      }),
       count: jest.fn().mockResolvedValue(1),
     },
     conversationModeCategory: {

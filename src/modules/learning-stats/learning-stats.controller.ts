@@ -18,20 +18,52 @@ export class LearningStatsController {
   @Get("dashboard")
   async dashboard(
     @Req() req: RequestWithUser,
-    @Query("deviceId") deviceId?: string,
+    @Query()
+    query: {
+      deviceId?: string;
+      range?: "today" | "week" | "month";
+      textbookId?: string;
+      unitId?: string;
+      mode?: string;
+      conversationModeKey?: string;
+    },
   ) {
-    return this.learningStatsService.getDashboard(req.user.userId, deviceId);
+    return this.learningStatsService.getDashboard(
+      req.user.userId,
+      query.deviceId,
+      query.range,
+      {
+        textbookId: query.textbookId,
+        unitId: query.unitId,
+        mode: query.mode,
+        conversationModeKey: query.conversationModeKey,
+      },
+    );
   }
 
   @Get("daily")
   async daily(
     @Req() req: RequestWithUser,
-    @Query() query: { deviceId?: string; days?: string },
+    @Query()
+    query: {
+      deviceId?: string;
+      days?: string;
+      textbookId?: string;
+      unitId?: string;
+      mode?: string;
+      conversationModeKey?: string;
+    },
   ) {
     return this.learningStatsService.getDailyTrend(
       req.user.userId,
       query.deviceId,
       Number(query.days) || 7,
+      {
+        textbookId: query.textbookId,
+        unitId: query.unitId,
+        mode: query.mode,
+        conversationModeKey: query.conversationModeKey,
+      },
     );
   }
 
@@ -65,5 +97,35 @@ export class LearningStatsController {
     @Req() req: RequestWithUser,
   ) {
     return this.learningStatsService.getUnitProgress(req.user.userId, deviceId);
+  }
+
+  @Get("activities")
+  async activities(
+    @Req() req: RequestWithUser,
+    @Query()
+    query: {
+      deviceId?: string;
+      page?: string;
+      pageSize?: string;
+      range?: "today" | "week" | "month";
+      textbookId?: string;
+      unitId?: string;
+      mode?: string;
+      conversationModeKey?: string;
+    },
+  ) {
+    return this.learningStatsService.getActivities(
+      req.user.userId,
+      query.deviceId,
+      {
+        page: Number(query.page) || 1,
+        pageSize: Number(query.pageSize) || 10,
+        range: query.range,
+        textbookId: query.textbookId,
+        unitId: query.unitId,
+        mode: query.mode,
+        conversationModeKey: query.conversationModeKey,
+      },
+    );
   }
 }

@@ -37,10 +37,39 @@ describe("LearningStatsController", () => {
       const dashboard = { totalSessions: 5, devices: [] } as any;
       service.getDashboard.mockResolvedValue(dashboard);
 
-      const result = await controller.dashboard(req, "dev-001");
+      const result = await controller.dashboard(req, { deviceId: "dev-001" });
 
-      expect(service.getDashboard).toHaveBeenCalledWith("user-001", "dev-001");
+      expect(service.getDashboard).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        undefined,
+        {
+          textbookId: undefined,
+          unitId: undefined,
+          mode: undefined,
+          conversationModeKey: undefined,
+        },
+      );
       expect(result).toBe(dashboard);
+    });
+
+    it("should pass range through to service.getDashboard", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      service.getDashboard.mockResolvedValue({} as any);
+
+      await controller.dashboard(req, { deviceId: "dev-001", range: "week" });
+
+      expect(service.getDashboard).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "week",
+        {
+          textbookId: undefined,
+          unitId: undefined,
+          mode: undefined,
+          conversationModeKey: undefined,
+        },
+      );
     });
   });
 
@@ -61,6 +90,12 @@ describe("LearningStatsController", () => {
         "user-001",
         "dev-001",
         14,
+        {
+          textbookId: undefined,
+          unitId: undefined,
+          mode: undefined,
+          conversationModeKey: undefined,
+        },
       );
       expect(result).toBe(trend);
     });
@@ -101,6 +136,36 @@ describe("LearningStatsController", () => {
         10,
       );
       expect(result).toBe(timeline);
+    });
+  });
+
+  describe("activities", () => {
+    it("should call service.getActivities with pagination and range", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      const page = { items: [], total: 0, page: 1, pageSize: 10 } as any;
+      service.getActivities = jest.fn().mockResolvedValue(page);
+
+      const result = await controller.activities(req, {
+        deviceId: "dev-001",
+        page: "1",
+        pageSize: "10",
+        range: "week",
+      });
+
+      expect(service.getActivities).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        {
+          page: 1,
+          pageSize: 10,
+          range: "week",
+          textbookId: undefined,
+          unitId: undefined,
+          mode: undefined,
+          conversationModeKey: undefined,
+        },
+      );
+      expect(result).toBe(page);
     });
   });
 });
