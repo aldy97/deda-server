@@ -1,13 +1,14 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '@/common/prisma/prisma.service';
-import { RagService } from '@/modules/rag/rag.service';
-import { LlmService } from '@/modules/llm/llm.service';
-import { VendorTextInDto } from './dto/vendor-text-in.dto';
-import { VendorTextOutDto } from './dto/vendor-text-out.dto';
-import { VendorStatusDto } from './dto/vendor-status.dto';
-import { VendorBindDto } from './dto/vendor-bind.dto';
-import { VendorConversationDto } from './dto/vendor-conversation.dto';
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { randomUUID } from "crypto";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import { RagService } from "@/modules/rag/rag.service";
+import { LlmService } from "@/modules/llm/llm.service";
+import { VendorTextInDto } from "./dto/vendor-text-in.dto";
+import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
+import { VendorStatusDto } from "./dto/vendor-status.dto";
+import { VendorBindDto } from "./dto/vendor-bind.dto";
+import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 
 /**
  * 机芯厂-facing 业务服务
@@ -26,9 +27,10 @@ export class VendorService {
     private readonly llmService: LlmService,
   ) {
     this.defaultTextbookId =
-      this.configService.get<string>('DEFAULT_TEXTBOOK_ID') || 'sample-textbook';
+      this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
+      "sample-textbook";
     this.defaultUnitId =
-      this.configService.get<string>('DEFAULT_UNIT_ID') || 'unit-1';
+      this.configService.get<string>("DEFAULT_UNIT_ID") || "unit-1";
   }
 
   async ensureDeviceExists(deviceId: string) {
@@ -58,7 +60,8 @@ export class VendorService {
     const activeConfig = await this.resolveActiveConfig(deviceInternalId);
 
     return {
-      textbookId: dto.textbookId || activeConfig?.textbookId || this.defaultTextbookId,
+      textbookId:
+        dto.textbookId || activeConfig?.textbookId || this.defaultTextbookId,
       unitId: dto.unitId || activeConfig?.unitId || this.defaultUnitId,
     };
   }
@@ -69,7 +72,7 @@ export class VendorService {
   private async resolveActiveConfig(deviceInternalId: string) {
     return this.prisma.deviceConfig.findFirst({
       where: { deviceId: deviceInternalId, isActive: true },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
     });
   }
 
@@ -92,7 +95,7 @@ export class VendorService {
     textbookId: string | null | undefined,
     conversationModeKey: string | null | undefined,
   ): Promise<string | undefined> {
-    if (mode === 'free_chat' && conversationModeKey) {
+    if (mode === "free_chat" && conversationModeKey) {
       const conversationMode = await this.prisma.conversationMode.findFirst({
         where: { key: conversationModeKey },
         select: { promptTemplate: true },
@@ -121,7 +124,7 @@ export class VendorService {
     textbookId: string,
     unitId: string,
   ): Promise<boolean> {
-    if (mode === 'free_chat') {
+    if (mode === "free_chat") {
       return true;
     }
 
@@ -146,38 +149,31 @@ export class VendorService {
   }
 
   /**
-   * 获取同一设备、同一教材、同一单元的最近对话历史
+   * 获取同一设备、同一教材、同一单元的最近消息历史
    * 用于 prompt 拼接，保证多轮对话上下文连续且单元边界隔离
    */
   private async getRecentHistory(
     deviceInternalId: string,
     textbookId: string,
     unitId: string,
-    limit = 6,
-  ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
-    const rows = await this.prisma.conversation.findMany({
+    limit = 12, // 消息条数，约 6 轮问答
+  ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+    const rows = await this.prisma.message.findMany({
       where: {
         deviceId: deviceInternalId,
         textbookId,
         unitId,
-        deletedAt: null,
       },
-      orderBy: { spokeAt: 'desc' },
+      orderBy: { spokeAt: "desc" },
       take: limit,
-      select: { asrText: true, aiReply: true },
+      select: { role: true, content: true },
     });
 
     // 按时间正序排列，旧 → 新
-    const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-    for (const row of rows.reverse()) {
-      if (row.asrText) {
-        history.push({ role: 'user', content: row.asrText });
-      }
-      if (row.aiReply) {
-        history.push({ role: 'assistant', content: row.aiReply });
-      }
-    }
-    return history;
+    return rows.reverse().map((row) => ({
+      role: row.role === "user" ? ("user" as const) : ("assistant" as const),
+      content: row.content,
+    }));
   }
 
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
@@ -189,6 +185,43 @@ export class VendorService {
       dto,
       device.id,
     );
+
+    const mode = activeConfig?.mode ?? "locked_unit";
+
+    // free_chat 不涉及教材：快照置空,避免 .env 默认教材/单元污染统计口径
+    const stampTextbookId = mode === "free_chat" ? null : textbookId;
+    const stampUnitId = mode === "free_chat" ? null : unitId;
+
+    // 校验对话上下文是否有效，无效则整轮不落库，避免脏数据
+    const contextValid = await this.validateConversationContext(
+      mode,
+      textbookId,
+      unitId,
+    );
+
+    // 获取同单元最近消息历史，用于 prompt 拼接
+    // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt
+    const history = await this.getRecentHistory(device.id, textbookId, unitId);
+
+    // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
+    const turnId = randomUUID();
+    if (contextValid) {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: dto.asrText,
+          status: "completed",
+          textbookId: stampTextbookId,
+          unitId: stampUnitId,
+          mode,
+          conversationModeKey: activeConfig?.conversationModeKey ?? null,
+          rawPayload: dto as any,
+          spokeAt: new Date(),
+        },
+      });
+    }
 
     // 读取孩子档案与当前模式对应的 prompt 模板
     const childProfile = await this.getChildProfile(device.id);
@@ -205,14 +238,12 @@ export class VendorService {
       dto.asrText,
     );
 
-    // 获取同单元最近对话历史，用于 prompt 拼接
-    const history = await this.getRecentHistory(device.id, textbookId, unitId);
-
     let responseText: string;
+    let llmFailed = false;
     try {
       const context = retrieveResult.found
         ? this.ragService.truncateContent(retrieveResult.content, 1500)
-        : '';
+        : "";
       const messages = this.llmService.buildEnglishTutorPrompt(
         dto.asrText,
         context,
@@ -234,14 +265,11 @@ export class VendorService {
       const llmResult = await this.llmService.complete({ messages });
       responseText = llmResult.text;
     } catch (error) {
+      llmFailed = true;
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(
-        `LLM failed for deviceId=${dto.deviceId}: ${message}`,
-      );
+      this.logger.error(`LLM failed for deviceId=${dto.deviceId}: ${message}`);
       responseText = "Sorry, I didn't catch that. Could you say it again?";
     }
-
-    const mode = activeConfig?.mode ?? 'locked_unit';
 
     const reply: VendorTextOutDto = {
       deviceId: dto.deviceId,
@@ -259,24 +287,19 @@ export class VendorService {
       `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
     );
 
-    // 持久化本轮对话，使 4G 状态下产生的记录在绑定后可恢复
-    // 仅在校验通过时写入，避免脏数据
-    const contextValid = await this.validateConversationContext(
-      mode,
-      textbookId,
-      unitId,
-    );
-
+    // 补写 assistant 消息；LLM 失败时标 failed,与真实回答可区分
     if (contextValid) {
-      await this.prisma.conversation.create({
+      await this.prisma.message.create({
         data: {
           deviceId: device.id,
-          asrText: dto.asrText,
-          aiReply: reply.responseText,
-          textbookId,
-          unitId,
+          turnId,
+          role: "assistant",
+          content: reply.responseText,
+          status: llmFailed ? "failed" : "completed",
+          textbookId: stampTextbookId,
+          unitId: stampUnitId,
           mode,
-          rawPayload: dto as any,
+          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           spokeAt: new Date(),
         },
       });
@@ -291,26 +314,35 @@ export class VendorService {
 
   async handleStatusReport(dto: VendorStatusDto) {
     // TODO: 缓存设备状态到 Redis，供小程序查询
-    this.logger.debug(`handleStatusReport deviceId=${dto.deviceId}, online=${dto.online}`);
+    this.logger.debug(
+      `handleStatusReport deviceId=${dto.deviceId}, online=${dto.online}`,
+    );
     return { success: true, deviceId: dto.deviceId };
   }
 
   async handleBindCallback(dto: VendorBindDto) {
     // TODO: 更新设备绑定关系
-    this.logger.debug(`handleBindCallback deviceId=${dto.deviceId}, bound=${dto.bound ?? true}`);
+    this.logger.debug(
+      `handleBindCallback deviceId=${dto.deviceId}, bound=${dto.bound ?? true}`,
+    );
     return { success: true, deviceId: dto.deviceId, bound: dto.bound ?? true };
   }
 
-  async handleConversationBackup(dto: VendorConversationDto, idempotencyKey?: string) {
+  async handleConversationBackup(
+    dto: VendorConversationDto,
+    idempotencyKey?: string,
+  ) {
     // TODO: 幂等写入对话记录，idempotencyKey 去重
-    this.logger.debug(`handleConversationBackup deviceId=${dto.deviceId}, idempotencyKey=${idempotencyKey ?? 'none'}`);
+    this.logger.debug(
+      `handleConversationBackup deviceId=${dto.deviceId}, idempotencyKey=${idempotencyKey ?? "none"}`,
+    );
     return { success: true, idempotencyKey: idempotencyKey || null };
   }
 
   getHealth() {
     // TODO: 可扩展为检查数据库、Redis、LLM 可用性
     return {
-      status: 'up',
+      status: "up",
       timestamp: Date.now(),
       expectedRecovery: null,
     };

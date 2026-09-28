@@ -15,16 +15,10 @@ describe("ConversationsService", () => {
           useValue: {
             userDeviceBinding: {
               findMany: jest.fn(),
-              findFirst: jest.fn(),
             },
-            deviceConfig: {
-              findMany: jest.fn(),
-            },
-            conversation: {
-              findUnique: jest.fn(),
+            message: {
               findMany: jest.fn(),
               count: jest.fn(),
-              updateMany: jest.fn(),
             },
           },
         },
@@ -44,204 +38,159 @@ describe("ConversationsService", () => {
     { device: { id: "device-uuid-002", deviceId: "dev-002" } },
   ];
 
+  const makeMessage = (
+    id: string,
+    turnId: string,
+    role: "user" | "assistant",
+    content: string,
+    spokeAt: Date,
+    extra: Record<string, any> = {},
+  ) => ({
+    id,
+    deviceId: "device-uuid-001",
+    turnId,
+    role,
+    content,
+    status: "completed",
+    textbookId: "book-a",
+    unitId: "unit-1",
+    mode: "locked_unit",
+    conversationModeKey: null,
+    spokeAt,
+    ...extra,
+  });
+
   describe("list", () => {
-    it("should return only conversations from bound devices matching active config in descending order", async () => {
+    it("should map message rows directly to chat records with role mapping", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-        {
-          deviceId: "device-uuid-002",
-          mode: "free_chat",
-          textbookId: null,
-          unitId: null,
-        },
+      // DB desc：每轮内 assistant 比 user 晚 1s,整体最新在前
+      prisma.message.findMany.mockResolvedValue([
+        makeMessage(
+          "m2-d",
+          "t2",
+          "assistant",
+          "reply 2",
+          new Date("2026-01-02T00:00:01Z"),
+          {
+            deviceId: "device-uuid-002",
+            mode: "free_chat",
+            textbookId: null,
+            unitId: null,
+          },
+        ),
+        makeMessage(
+          "m2-u",
+          "t2",
+          "user",
+          "question 2",
+          new Date("2026-01-02T00:00:00Z"),
+          {
+            deviceId: "device-uuid-002",
+            mode: "free_chat",
+            textbookId: null,
+            unitId: null,
+          },
+        ),
+        makeMessage(
+          "m1-d",
+          "t1",
+          "assistant",
+          "reply 1",
+          new Date("2026-01-01T00:00:01Z"),
+        ),
+        makeMessage(
+          "m1-u",
+          "t1",
+          "user",
+          "question 1",
+          new Date("2026-01-01T00:00:00Z"),
+        ),
       ]);
-      prisma.conversation.findMany.mockResolvedValue([
-        {
-          id: "conv-002",
-          deviceId: "device-uuid-002",
-          asrText: "free chat user",
-          aiReply: "free chat ai",
-          mode: "free_chat",
-          textbookId: null,
-          unitId: null,
-          spokeAt: new Date("2026-01-02"),
-        },
-        {
-          id: "conv-001",
-          deviceId: "device-uuid-001",
-          asrText: "unit 1 user",
-          aiReply: "unit 1 ai",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-          spokeAt: new Date("2026-01-01"),
-        },
-      ]);
-      prisma.conversation.count.mockResolvedValue(2);
+      prisma.message.count.mockResolvedValue(4);
 
       const result = await service.list("user-001", {});
 
-      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: {
-            deletedAt: null,
-            deviceId: { in: ["device-uuid-001", "device-uuid-002"] },
-            OR: [
-              {
-                deviceId: "device-uuid-001",
-                mode: "locked_unit",
-                textbookId: "book-a",
-                unitId: "unit-1",
-              },
-              {
-                deviceId: "device-uuid-002",
-                mode: "free_chat",
-              },
-            ],
-          },
+          where: { deviceId: { in: ["device-uuid-001", "device-uuid-002"] } },
           orderBy: { spokeAt: "desc" },
           skip: 0,
           take: 20,
         }),
       );
-      // 倒序：conv-002 在前
-      expect(result.items[0].content).toBe("free chat user");
-      expect(result.items[2].content).toBe("unit 1 user");
-      expect(result.total).toBe(2);
+      // 页内正序（顶老底新）,assistant 映射为 device 角色,id 裸用无后缀
+      expect(result.items).toEqual([
+        {
+          id: "m1-u",
+          role: "user",
+          content: "question 1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: "m1-d",
+          role: "device",
+          content: "reply 1",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+        {
+          id: "m2-u",
+          role: "user",
+          content: "question 2",
+          createdAt: "2026-01-02T00:00:00.000Z",
+        },
+        {
+          id: "m2-d",
+          role: "device",
+          content: "reply 2",
+          createdAt: "2026-01-02T00:00:01.000Z",
+        },
+      ]);
+      // total 语义 = 消息条数
+      expect(result.total).toBe(4);
     });
 
-    it("should isolate conversations across different units of the same textbook", async () => {
+    it("should filter by deviceId + textbookId + unitId", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         { device: { id: "device-uuid-001", deviceId: "dev-001" } },
       ]);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findMany.mockResolvedValue([
-        {
-          id: "conv-unit1-latest",
-          deviceId: "device-uuid-001",
-          asrText: "unit 1 latest",
-          aiReply: "reply",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-          spokeAt: new Date("2026-01-03"),
-        },
-        {
-          id: "conv-unit1-older",
-          deviceId: "device-uuid-001",
-          asrText: "unit 1 older",
-          aiReply: "reply",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-          spokeAt: new Date("2026-01-02"),
-        },
-      ]);
-      prisma.conversation.count.mockResolvedValue(2);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.count.mockResolvedValue(0);
 
-      const result = await service.list("user-001", {});
+      await service.list("user-001", {
+        deviceId: "dev-001",
+        textbookId: "book-a",
+        unitId: "unit-1",
+      });
 
-      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
-            deletedAt: null,
             deviceId: { in: ["device-uuid-001"] },
-            OR: [
-              {
-                deviceId: "device-uuid-001",
-                mode: "locked_unit",
-                textbookId: "book-a",
-                unitId: "unit-1",
-              },
-            ],
+            textbookId: "book-a",
+            unitId: "unit-1",
           },
+          orderBy: { spokeAt: "desc" },
         }),
       );
-      expect(result.items[0].content).toBe("unit 1 latest");
-      expect(result.items[2].content).toBe("unit 1 older");
     });
 
-    it("should not mix free_chat conversations when active config is locked_unit", async () => {
+    it("should filter by conversationModeKey", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         { device: { id: "device-uuid-001", deviceId: "dev-001" } },
       ]);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findMany.mockResolvedValue([
-        {
-          id: "conv-unit1",
-          deviceId: "device-uuid-001",
-          asrText: "unit 1",
-          aiReply: "reply",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-          spokeAt: new Date("2026-01-01"),
-        },
-      ]);
-      prisma.conversation.count.mockResolvedValue(1);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.count.mockResolvedValue(0);
 
-      const result = await service.list("user-001", {});
+      await service.list("user-001", {
+        deviceId: "dev-001",
+        conversationModeKey: "free_chat_casual",
+      });
 
-      const orFilters = prisma.conversation.findMany.mock.calls[0][0].where.OR;
-      expect(orFilters).toEqual([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      expect(result.items).toHaveLength(2);
-    });
-
-    it("should filter by deviceId when provided and bound", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findMany.mockResolvedValue([]);
-      prisma.conversation.count.mockResolvedValue(0);
-
-      await service.list("user-001", { deviceId: "dev-001" });
-
-      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
-            deletedAt: null,
             deviceId: { in: ["device-uuid-001"] },
-            OR: [
-              {
-                deviceId: "device-uuid-001",
-                mode: "locked_unit",
-                textbookId: "book-a",
-                unitId: "unit-1",
-              },
-            ],
+            conversationModeKey: "free_chat_casual",
           },
         }),
       );
@@ -252,7 +201,7 @@ describe("ConversationsService", () => {
 
       const result = await service.list("user-001", { deviceId: "dev-999" });
 
-      expect(prisma.conversation.findMany).not.toHaveBeenCalled();
+      expect(prisma.message.findMany).not.toHaveBeenCalled();
       expect(result.items).toEqual([]);
       expect(result.total).toBe(0);
     });
@@ -265,227 +214,30 @@ describe("ConversationsService", () => {
 
       const result = await service.list("user-001", {});
 
-      expect(prisma.conversation.findMany).not.toHaveBeenCalled();
+      expect(prisma.message.findMany).not.toHaveBeenCalled();
       expect(result.items).toEqual([]);
-      expect(result.total).toBe(0);
 
       process.env.NODE_ENV = originalNodeEnv;
     });
 
-    it("should return all conversations in development when user has no bindings", async () => {
+    it("should return all messages in development when user has no bindings", async () => {
       const originalNodeEnv = process.env.NODE_ENV;
       process.env.NODE_ENV = "development";
 
       prisma.userDeviceBinding.findMany.mockResolvedValue([]);
-      prisma.deviceConfig.findMany.mockResolvedValue([]);
-      prisma.conversation.findMany.mockResolvedValue([]);
-      prisma.conversation.count.mockResolvedValue(0);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.count.mockResolvedValue(0);
 
       await service.list("user-001", {});
 
-      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { deletedAt: null },
+          where: {},
           orderBy: { spokeAt: "desc" },
         }),
       );
 
       process.env.NODE_ENV = originalNodeEnv;
-    });
-
-    it("should only return DEV001 device conversations in development workaround", async () => {
-      const originalNodeEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = "development";
-
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        {
-          device: {
-            id: "device-uuid-001",
-            deviceId: "dev-local-001",
-            deviceCode: "DEV001",
-          },
-        },
-      ]);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findMany.mockResolvedValue([]);
-      prisma.conversation.count.mockResolvedValue(0);
-
-      await service.list("user-001", {});
-
-      expect(prisma.conversation.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            deletedAt: null,
-            deviceId: { in: ["device-uuid-001"] },
-            OR: [
-              {
-                deviceId: "device-uuid-001",
-                mode: "locked_unit",
-                textbookId: "book-a",
-                unitId: "unit-1",
-              },
-            ],
-          },
-        }),
-      );
-
-      process.env.NODE_ENV = originalNodeEnv;
-    });
-  });
-
-  describe("remove", () => {
-    it("should soft-delete conversation when it belongs to user and matches active config", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        { device: { id: "device-uuid-001", deviceId: "dev-001" } },
-      ]);
-      prisma.userDeviceBinding.findFirst.mockResolvedValue({
-        id: "binding-001",
-        userId: "user-001",
-        deviceId: "device-uuid-001",
-      });
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findUnique.mockResolvedValue({
-        id: "conv-001",
-        deviceId: "device-uuid-001",
-        mode: "locked_unit",
-        textbookId: "book-a",
-        unitId: "unit-1",
-        deletedAt: null,
-      });
-      prisma.conversation.updateMany.mockResolvedValue({ count: 1 });
-
-      const result = await service.remove("user-001", "conv-001");
-
-      expect(prisma.conversation.findUnique).toHaveBeenCalledWith({
-        where: { id: "conv-001" },
-      });
-      expect(prisma.conversation.updateMany).toHaveBeenCalledWith({
-        where: {
-          id: "conv-001",
-          deviceId: "device-uuid-001",
-          deletedAt: null,
-        },
-        data: { deletedAt: expect.any(Date) },
-      });
-      expect(result).toEqual({ success: true });
-    });
-
-    it("should reject removal when conversation does not match active config", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        { device: { id: "device-uuid-001", deviceId: "dev-001" } },
-      ]);
-      prisma.userDeviceBinding.findFirst.mockResolvedValue({
-        id: "binding-001",
-        userId: "user-001",
-        deviceId: "device-uuid-001",
-      });
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.findUnique.mockResolvedValue({
-        id: "conv-002",
-        deviceId: "device-uuid-001",
-        mode: "locked_unit",
-        textbookId: "book-a",
-        unitId: "unit-2",
-        deletedAt: null,
-      });
-
-      const result = await service.remove("user-001", "conv-002");
-
-      expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
-      expect(result).toBeNull();
-    });
-
-    it("should reject removal when conversation belongs to unbound device", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        { device: { id: "device-uuid-001", deviceId: "dev-001" } },
-      ]);
-      prisma.deviceConfig.findMany.mockResolvedValue([]);
-      prisma.conversation.findUnique.mockResolvedValue({
-        id: "conv-003",
-        deviceId: "device-uuid-999",
-        mode: "locked_unit",
-        textbookId: "book-a",
-        unitId: "unit-1",
-        deletedAt: null,
-      });
-
-      const result = await service.remove("user-001", "conv-003");
-
-      expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
-      expect(result).toBeNull();
-    });
-  });
-
-  describe("clearByDate", () => {
-    it("should clear conversations for bound device matching active config and date", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        { device: { id: "device-uuid-001", deviceId: "dev-001" } },
-      ]);
-      prisma.userDeviceBinding.findFirst.mockResolvedValue({
-        id: "binding-001",
-        userId: "user-001",
-        deviceId: "device-uuid-001",
-        device: { id: "device-uuid-001", deviceId: "dev-001" },
-      });
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.conversation.updateMany.mockResolvedValue({ count: 3 });
-
-      const result = await service.clearByDate("user-001", "dev-001", "2026-01-01");
-
-      expect(prisma.conversation.updateMany).toHaveBeenCalledWith({
-        where: {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-          deletedAt: null,
-          spokeAt: {
-            gte: new Date("2026-01-01T00:00:00.000Z"),
-            lt: new Date("2026-01-01T23:59:59.999Z"),
-          },
-        },
-        data: { deletedAt: expect.any(Date) },
-      });
-      expect(result).toEqual({ success: true, cleared: 3 });
-    });
-
-    it("should reject clear when device does not belong to user", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([
-        { device: { id: "device-uuid-001", deviceId: "dev-001" } },
-      ]);
-
-      const result = await service.clearByDate("user-001", "dev-999", "2026-01-01");
-
-      expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
-      expect(result).toBeNull();
     });
   });
 });

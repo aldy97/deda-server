@@ -1,6 +1,7 @@
-import { Conversation } from "@prisma/client";
+import { Message } from "@prisma/client";
 
-export interface ConversationWithDevice extends Conversation {
+// 统计口径：一轮对话 = 一条 role='user' 的消息（由 service 层过滤后传入）
+export interface ConversationWithDevice extends Message {
   device?: {
     deviceId: string;
     name?: string | null;

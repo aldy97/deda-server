@@ -46,7 +46,7 @@ model Device {
 
   bindings        UserDeviceBinding[]
   configs         DeviceConfig[]
-  conversations   Conversation[]
+  messages        Message[]
   learningStats   LearningStat[]
   childProfile    ChildProfile?
 
@@ -154,28 +154,31 @@ model DeviceConfig {
   @@map("device_configs")
 }
 
-// 对话记录
-model Conversation {
-  id              String   @id @default(uuid())
-  deviceId        String
-  conversationId  String?  @unique // 厂商侧对话唯一 ID（如有）
-  asrText         String?  // 孩子说话 ASR 文本
-  aiReply         String?  // AI 回答文本
-  hitUnitIds      String[] // 命中单元 ID 列表
-  textbookId      String?  // 当前配置教材 ID
-  unitId          String?  // 当前配置单元 ID
-  mode            String?  // 当前配置模式
-  cefrLevel       String?  // 当前配置 CEFR
-  rawPayload      Json     // Webhook 原始 payload
-  spokeAt         DateTime // 对话发生时间
+// 消息（细颗粒度：一行一条消息,一轮问答由 turnId 关联两条）
+model Message {
+  id            String   @id @default(uuid())
+  deviceId      String
+  turnId        String   // 同一轮问答共享 ID（我方生成）
+  role          String   // user / assistant
+  content       String
+  status        String   @default("completed") // assistant: completed / failed
+  conversationId String? // 厂商侧对话唯一 ID（如有）
+  hitUnitIds    String[] // 命中单元 ID 列表（挂在 user 消息上）
+  textbookId          String?  // 当前配置教材 ID
+  unitId              String?  // 当前配置单元 ID
+  mode                String?  // 当前配置模式分类（快照，过滤请优先使用 textbookId/unitId/conversationModeKey）
+  conversationModeKey String?  // 当前配置具体子模式（如 free_chat_casual / textbook_dialogue）
+  cefrLevel           String?  // 当前配置 CEFR
+  rawPayload      Json?    // Webhook 原始 payload
+  spokeAt         DateTime // 消息发生时间
   createdAt       DateTime @default(now())
-  deletedAt       DateTime? // 软删除
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  @@unique([conversationId, role])
   @@index([deviceId, spokeAt])
-  @@index([deviceId, deletedAt, spokeAt])
-  @@map("conversations")
+  @@index([turnId])
+  @@map("messages")
 }
 
 // 学习统计（按日聚合）
