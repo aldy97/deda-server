@@ -193,5 +193,13 @@ Goodbye content.
       const result = service.truncateContent(longContent, 100);
       expect(service.estimateTokens(result)).toBeLessThanOrEqual(120);
     });
+
+    it("should not hang when content has only one trailing sentence end", () => {
+      const longContent = "word ".repeat(20000) + ".";
+      const start = Date.now();
+      const result = service.truncateContent(longContent, 100);
+      expect(Date.now() - start).toBeLessThan(100);
+      expect(service.estimateTokens(result)).toBeLessThanOrEqual(120);
+    });
   });
 });

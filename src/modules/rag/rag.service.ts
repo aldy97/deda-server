@@ -1,8 +1,8 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '@/common/prisma/prisma.service';
-import * as fs from 'fs';
-import * as path from 'path';
+import { Injectable, Logger, Optional } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import * as fs from "fs";
+import * as path from "path";
 
 export interface TextbookUnit {
   unitId: string;
@@ -44,14 +44,14 @@ export class RagService {
     @Optional() private readonly prisma?: PrismaService,
   ) {
     // 优先使用环境变量指定目录；否则根据运行环境推断
-    const configuredDir = this.configService.get<string>('TEXTBOOK_DATA_DIR');
+    const configuredDir = this.configService.get<string>("TEXTBOOK_DATA_DIR");
     if (configuredDir) {
       this.dataDir = configuredDir;
-    } else if (fs.existsSync(path.join(process.cwd(), 'data', 'textbooks'))) {
-      this.dataDir = path.join(process.cwd(), 'data', 'textbooks');
+    } else if (fs.existsSync(path.join(process.cwd(), "data", "textbooks"))) {
+      this.dataDir = path.join(process.cwd(), "data", "textbooks");
     } else {
       // 编译后 dist 目录与 data 目录的相对关系
-      this.dataDir = path.join(process.cwd(), '..', 'data', 'textbooks');
+      this.dataDir = path.join(process.cwd(), "..", "data", "textbooks");
     }
   }
 
@@ -70,17 +70,24 @@ export class RagService {
       return this.loadJsonTextbook(textbookId, jsonPath);
     }
 
-    this.logger.warn(`Textbook file not found: ${textbookId}.md or ${textbookId}.json`);
+    this.logger.warn(
+      `Textbook file not found: ${textbookId}.md or ${textbookId}.json`,
+    );
     return null;
   }
 
-  private loadJsonTextbook(textbookId: string, filePath: string): Textbook | null {
+  private loadJsonTextbook(
+    textbookId: string,
+    filePath: string,
+  ): Textbook | null {
     try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
+      const raw = fs.readFileSync(filePath, "utf-8");
       return JSON.parse(raw) as Textbook;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to load JSON textbook ${textbookId}: ${message}`);
+      this.logger.error(
+        `Failed to load JSON textbook ${textbookId}: ${message}`,
+      );
       return null;
     }
   }
@@ -98,9 +105,12 @@ export class RagService {
    *   ## next-unit-id: Next Unit Name
    *   ...
    */
-  private loadMarkdownTextbook(textbookId: string, filePath: string): Textbook | null {
+  private loadMarkdownTextbook(
+    textbookId: string,
+    filePath: string,
+  ): Textbook | null {
     try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
+      const raw = fs.readFileSync(filePath, "utf-8");
       const lines = raw.split(/\r?\n/);
 
       let name = textbookId;
@@ -116,7 +126,7 @@ export class RagService {
             name: currentUnit.name || currentUnit.unitId,
             sortOrder: currentUnit.sortOrder || sortOrder++,
             cefrLevel: currentUnit.cefrLevel,
-            content: currentContentLines.join('\n').trim(),
+            content: currentContentLines.join("\n").trim(),
           });
         }
         currentContentLines = [];
@@ -125,8 +135,8 @@ export class RagService {
       const slugify = (text: string): string => {
         return text
           .toLowerCase()
-          .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
-          .replace(/^-+|-+$/g, '')
+          .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+          .replace(/^-+|-+$/g, "")
           .substring(0, 60);
       };
 
@@ -152,9 +162,7 @@ export class RagService {
             };
           } else {
             // 格式 2/3：## Unit Name 或 ## 1.2 Unit Name
-            const cleanedName = heading
-              .replace(/^\d+(\.\d+)*\s+/, '')
-              .trim();
+            const cleanedName = heading.replace(/^\d+(\.\d+)*\s+/, "").trim();
             currentUnit = {
               unitId: slugify(cleanedName || heading),
               name: cleanedName || heading,
@@ -177,7 +185,9 @@ export class RagService {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to load Markdown textbook ${textbookId}: ${message}`);
+      this.logger.error(
+        `Failed to load Markdown textbook ${textbookId}: ${message}`,
+      );
       return null;
     }
   }
@@ -231,7 +241,7 @@ export class RagService {
 
     const textbook = this.loadTextbook(textbookId);
     if (!textbook) {
-      return { textbookId, unitId, unitName: '', content: '', found: false };
+      return { textbookId, unitId, unitName: "", content: "", found: false };
     }
 
     const unit = textbook.units.find((u) => u.unitId === unitId);
@@ -239,7 +249,7 @@ export class RagService {
       this.logger.warn(
         `Unit not found: textbookId=${textbookId}, unitId=${unitId}`,
       );
-      return { textbookId, unitId, unitName: '', content: '', found: false };
+      return { textbookId, unitId, unitName: "", content: "", found: false };
     }
 
     if (query) {
@@ -270,26 +280,34 @@ export class RagService {
 
   /**
    * 按最大 token 数截断内容
+   * 先按字符上限截断，再回退到最近一个句子结尾，避免在单词中间切断。
+   * 若内容中没有句子结尾或回退后无变化，则直接按字符上限截断，防止死循环。
    */
   truncateContent(content: string, maxTokens: number): string {
     if (this.estimateTokens(content) <= maxTokens) {
       return content;
     }
-    // 简单按字符截断，保留完整句子
-    let truncated = content;
-    while (this.estimateTokens(truncated) > maxTokens && truncated.length > 0) {
-      const lastSentenceEnd = Math.max(
-        truncated.lastIndexOf('.'),
-        truncated.lastIndexOf('。'),
-        truncated.lastIndexOf('!'),
-        truncated.lastIndexOf('?'),
-      );
-      if (lastSentenceEnd > 0) {
-        truncated = truncated.slice(0, lastSentenceEnd + 1);
-      } else {
-        truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
+
+    // 粗略：1 token ≈ 4 个非中文字符，预留 10% 余量
+    const targetChars = Math.floor(maxTokens * 4 * 0.9);
+    let truncated = content.slice(0, targetChars);
+
+    // 在尾部 20% 范围内找最后一个句子结尾
+    const searchWindow = Math.floor(targetChars * 0.2);
+    const searchStart = Math.max(0, truncated.length - searchWindow);
+    const searchSlice = truncated.slice(searchStart);
+    const sentenceEndChars = [".", "。", "!", "?"];
+    const relativeEnd = Math.max(
+      ...sentenceEndChars.map((char) => searchSlice.lastIndexOf(char)),
+    );
+
+    if (relativeEnd >= 0) {
+      const newLength = searchStart + relativeEnd + 1;
+      if (newLength < truncated.length) {
+        truncated = truncated.slice(0, newLength);
       }
     }
+
     return truncated;
   }
 }
