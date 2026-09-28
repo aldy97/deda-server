@@ -19,6 +19,9 @@ describe("LearningStatsService", () => {
             deviceConfig: {
               findMany: jest.fn(),
             },
+            childProfile: {
+              findMany: jest.fn().mockResolvedValue([]),
+            },
             message: {
               findMany: jest.fn(),
               count: jest.fn(),
@@ -115,6 +118,48 @@ describe("LearningStatsService", () => {
       expect(result.devices).toEqual([]);
 
       process.env.NODE_ENV = originalNodeEnv;
+    });
+
+    it("should include childName and childEnglishName from childProfile", async () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.deviceConfig.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          mode: "locked_unit",
+          textbookId: "book-a",
+          unitId: "unit-1",
+        },
+      ]);
+      prisma.childProfile.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          name: "二狗",
+          englishName: "Lebron",
+        },
+      ]);
+      prisma.message.findMany.mockResolvedValue([]);
+
+      const result = await service.getDashboard("user-001");
+
+      expect(result.devices[0].childName).toBe("二狗");
+      expect(result.devices[0].childEnglishName).toBe("Lebron");
+    });
+
+    it("should expose maxContinuousDays across devices", async () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.deviceConfig.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          mode: "locked_unit",
+          textbookId: "book-a",
+          unitId: "unit-1",
+        },
+      ]);
+      prisma.message.findMany.mockResolvedValue([]);
+
+      const result = await service.getDashboard("user-001");
+
+      expect(result.maxContinuousDays).toBeGreaterThanOrEqual(0);
     });
 
     it("should scope dashboard to the requested deviceId", async () => {
@@ -896,6 +941,113 @@ describe("LearningStatsService", () => {
       );
       expect(result.total).toBe(1);
       expect(result.items[0].date).toBe("2026-09-20");
+    });
+  });
+
+  describe("getInsights", () => {
+    beforeEach(() => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.deviceConfig.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          mode: "locked_unit",
+          textbookId: "book-a",
+          unitId: "unit-1",
+        },
+      ]);
+      prisma.textbook.findMany.mockResolvedValue([]);
+      prisma.unit.findMany.mockResolvedValue([]);
+      prisma.conversationMode.findMany.mockResolvedValue([]);
+    });
+
+    it("should return insights based on dashboard and topics", async () => {
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1-u", "t1", "Hello"),
+        makeUserMessage("m2-u", "t2", "World"),
+      ]);
+
+      const result = await service.getInsights("user-001", undefined, "week");
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(result[0]).toEqual(
+        expect.objectContaining({
+          id: expect.any(String),
+          type: expect.any(String),
+          title: expect.any(String),
+          content: expect.any(String),
+        }),
+      );
+    });
+
+    it("should limit insights to at most 3 items", async () => {
+      // 连续 3 天 + 多主题 + 设备离线可产生超过 3 条,应截断
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1-u", "t1", "Hello", {
+          spokeAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+        }),
+        makeUserMessage("m2-u", "t2", "World", {
+          spokeAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        }),
+        makeUserMessage("m3-u", "t3", "Today", {
+          spokeAt: new Date(),
+        }),
+      ]);
+
+      const result = await service.getInsights("user-001", undefined, "week");
+
+      expect(result.length).toBeLessThanOrEqual(3);
+    });
+  });
+
+  describe("getHealth", () => {
+    beforeEach(() => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.deviceConfig.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          mode: "locked_unit",
+          textbookId: "book-a",
+          unitId: "unit-1",
+        },
+      ]);
+      prisma.textbook.findMany.mockResolvedValue([]);
+      prisma.unit.findMany.mockResolvedValue([]);
+      prisma.conversationMode.findMany.mockResolvedValue([]);
+    });
+
+    it("should return health score with dimensions and suggestion", async () => {
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1-u", "t1", "Hello"),
+      ]);
+
+      const result = await service.getHealth("user-001", undefined, "week");
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          score: expect.any(Number),
+          level: expect.any(String),
+          dimensions: expect.objectContaining({
+            activity: expect.any(Number),
+            consistency: expect.any(Number),
+            balance: expect.any(Number),
+            engagement: expect.any(Number),
+          }),
+          suggestion: expect.any(String),
+        }),
+      );
+    });
+
+    it("should cap score when there is no learning today", async () => {
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1-u", "t1", "Hello", {
+          spokeAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        }),
+      ]);
+
+      const result = await service.getHealth("user-001", undefined, "week");
+
+      expect(result.score).toBeLessThanOrEqual(54);
+      expect(result.suggestion).toContain("今天还没有学习记录");
     });
   });
 });

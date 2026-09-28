@@ -18,6 +18,8 @@ describe("LearningStatsController", () => {
             getTopicBreakdown: jest.fn(),
             getTimeline: jest.fn(),
             getUnitProgress: jest.fn(),
+            getInsights: jest.fn(),
+            getHealth: jest.fn(),
           },
         },
       ],
@@ -166,6 +168,46 @@ describe("LearningStatsController", () => {
         },
       );
       expect(result).toBe(page);
+    });
+  });
+
+  describe("insights", () => {
+    it("should call service.getInsights with userId, deviceId and range", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      const insights = [{ id: "i1", type: "strength", title: "学习活跃" }];
+      service.getInsights.mockResolvedValue(insights);
+
+      const result = await controller.insights(req, {
+        deviceId: "dev-001",
+        range: "week",
+      });
+
+      expect(service.getInsights).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "week",
+      );
+      expect(result).toBe(insights);
+    });
+  });
+
+  describe("health", () => {
+    it("should call service.getHealth with userId, deviceId and range", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      const health = { score: 75, level: "good" };
+      service.getHealth.mockResolvedValue(health);
+
+      const result = await controller.health(req, {
+        deviceId: "dev-001",
+        range: "week",
+      });
+
+      expect(service.getHealth).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "week",
+      );
+      expect(result).toBe(health);
     });
   });
 });

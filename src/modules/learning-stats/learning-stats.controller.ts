@@ -128,4 +128,36 @@ export class LearningStatsController {
       },
     );
   }
+
+  @Get("insights")
+  async insights(
+    @Req() req: RequestWithUser,
+    @Query()
+    query: {
+      deviceId?: string;
+      range?: "today" | "week" | "month";
+    },
+  ) {
+    return this.learningStatsService.getInsights(
+      req.user.userId,
+      query.deviceId,
+      query.range,
+    );
+  }
+
+  @Get("health")
+  async health(
+    @Req() req: RequestWithUser,
+    @Query()
+    query: {
+      deviceId?: string;
+      range?: "today" | "week" | "month";
+    },
+  ) {
+    return this.learningStatsService.getHealth(
+      req.user.userId,
+      query.deviceId,
+      query.range,
+    );
+  }
 }

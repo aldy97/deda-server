@@ -10,6 +10,8 @@ import {
   ActivitiesPageDto,
   StatsRange,
   StatsContext,
+  LearningStatsInsightDto,
+  LearningStatsHealthDto,
 } from "./dto/learning-stats.dto";
 import { ConversationMetricsCalculator } from "./calculators/conversation-metrics.calculator";
 import { StreakCalculator } from "./calculators/streak.calculator";
@@ -64,6 +66,7 @@ export class LearningStatsService {
     }
 
     const activeConfigs = await this.getActiveConfigs(internalIds);
+    const childProfiles = await this.getChildProfiles(internalIds);
     const conversations = await this.getConversations(
       internalIds,
       activeConfigs,
@@ -81,11 +84,13 @@ export class LearningStatsService {
       const streak = this.streakCalculator.calculate(deviceConversations);
       const topics = this.topicCalculator.calculate(deviceConversations);
       const activeConfig = activeConfigs.find((c) => c.deviceId === internalId);
+      const childProfile = childProfiles.get(internalId);
 
       devices.push({
         deviceId: externalId,
         deviceName: "DEV001", // TODO: 从 device 表读取 name
-        childName: null, // TODO: 从 childProfile 读取
+        childName: childProfile?.name ?? null,
+        childEnglishName: childProfile?.englishName ?? null,
         status: "offline",
         totalDurationMinutes: metrics.totalDurationMinutes,
         totalSessions: metrics.totalSessions,
@@ -102,6 +107,7 @@ export class LearningStatsService {
       activeDeviceCount: devices.filter((d) => d.status === "online").length,
       boundDeviceCount: devices.length,
       continuousDays: this.streakCalculator.calculate(conversations),
+      maxContinuousDays: Math.max(0, ...devices.map((d) => d.continuousDays)),
       topicCount: topicCoverage.topicCount,
       devices,
     };
@@ -370,6 +376,237 @@ export class LearningStatsService {
       }));
   }
 
+  /**
+   * 生成 AI 学习洞察（家庭维度或单设备维度）
+   * 基于 dashboard / daily / topics 实时计算，后端未接入 LLM 时提供规则兜底。
+   */
+  async getInsights(
+    userId: string,
+    deviceId?: string,
+    range?: StatsRange,
+  ): Promise<LearningStatsInsightDto[]> {
+    const dashboard = await this.getDashboard(userId, deviceId, range);
+    const topics = await this.getTopicBreakdown(userId, deviceId);
+    const days = range === "today" ? 1 : range === "week" ? 7 : 30;
+    const trend = await this.getDailyTrend(userId, deviceId, days);
+
+    const insights: LearningStatsInsightDto[] = [];
+
+    // 1. 里程碑：连续学习
+    if (dashboard.continuousDays >= 3) {
+      insights.push({
+        id: "milestone-streak",
+        type: "milestone",
+        title: "坚持学习",
+        content: `家庭已连续学习 ${dashboard.continuousDays} 天，再坚持一下就能养成好习惯！`,
+        metricValue: dashboard.continuousDays,
+        metricUnit: "天",
+      });
+    }
+
+    // 2. 活跃度
+    if (dashboard.totalDurationMinutes > 0) {
+      const rangeText =
+        range === "today" ? "今天" : range === "week" ? "本周" : "本月";
+      insights.push({
+        id: "strength-activity",
+        type: "strength",
+        title: "学习活跃",
+        content: `${rangeText}累计学习 ${dashboard.totalDurationMinutes} 分钟，共完成 ${dashboard.totalSessions} 次练习。`,
+        metricValue: dashboard.totalDurationMinutes,
+        metricUnit: "分钟",
+      });
+    }
+
+    // 3. 设备级洞察
+    for (const device of dashboard.devices) {
+      if (device.status === "offline") {
+        insights.push({
+          id: `alert-offline-${device.deviceId}`,
+          type: "alert",
+          title: "设备离线",
+          content: `${device.childName || device.deviceName} 的设备当前离线，请检查网络连接。`,
+          deviceId: device.deviceId,
+          deviceName: device.childName || device.deviceName,
+        });
+      }
+
+      if (device.todayDurationMinutes === 0 && device.status !== "offline") {
+        insights.push({
+          id: `alert-no-today-${device.deviceId}`,
+          type: "alert",
+          title: "今日未学习",
+          content: `${device.childName || device.deviceName} 今天还没有学习记录。`,
+          deviceId: device.deviceId,
+          deviceName: device.childName || device.deviceName,
+        });
+      }
+    }
+
+    // 4. 内容均衡度
+    const balance = this.calculateBalanceScore(topics);
+    if (topics.length > 1 && balance < 50) {
+      const dominant = topics.reduce(
+        (max, t) => (t.count > max.count ? t : max),
+        topics[0],
+      );
+      insights.push({
+        id: "weakness-balance",
+        type: "weakness",
+        title: "内容偏科",
+        content: `${this.formatTopicName(dominant)} 占比过高，建议适当补充其他主题内容。`,
+        metricValue: balance,
+        metricUnit: "分",
+      });
+    }
+
+    // 5. 趋势对比
+    if (trend.length >= 7) {
+      const mid = Math.floor(trend.length / 2);
+      const firstHalf = trend.slice(0, mid);
+      const secondHalf = trend.slice(mid);
+      const firstSum = firstHalf.reduce((s, p) => s + p.durationMinutes, 0);
+      const secondSum = secondHalf.reduce((s, p) => s + p.durationMinutes, 0);
+
+      if (firstSum > 0) {
+        const change = Math.round(((secondSum - firstSum) / firstSum) * 100);
+        if (Math.abs(change) >= 20) {
+          insights.push({
+            id: "suggestion-trend",
+            type: change > 0 ? "strength" : "suggestion",
+            title: "趋势变化",
+            content:
+              change > 0
+                ? `学习时长较上半段增长 ${change}%，势头不错，继续保持。`
+                : `学习时长较上半段下降 ${Math.abs(change)}%，建议关注学习安排。`,
+            metricValue: change,
+            metricUnit: "%",
+          });
+        }
+      }
+    }
+
+    return insights.slice(0, 3);
+  }
+
+  /**
+   * 计算学习健康度（家庭维度或单设备维度）
+   */
+  async getHealth(
+    userId: string,
+    deviceId?: string,
+    range?: StatsRange,
+  ): Promise<LearningStatsHealthDto> {
+    const dashboard = await this.getDashboard(userId, deviceId, range);
+    const topics = await this.getTopicBreakdown(userId, deviceId);
+    const days = range === "today" ? 1 : range === "week" ? 7 : 30;
+    const trend = await this.getDailyTrend(userId, deviceId, days);
+
+    const referenceDuration =
+      range === "today" ? 30 : range === "week" ? 180 : 600;
+    const activity = Math.min(
+      100,
+      Math.round((dashboard.totalDurationMinutes / referenceDuration) * 100),
+    );
+
+    const todayMinutes = dashboard.devices.reduce(
+      (sum, d) => sum + (d.todayDurationMinutes || 0),
+      0,
+    );
+    const consistency = Math.min(
+      100,
+      Math.round(
+        (Math.min(dashboard.continuousDays, 7) / 7) * 70 +
+          (todayMinutes > 0 ? 30 : 0),
+      ),
+    );
+
+    const balance = this.calculateBalanceScore(topics);
+
+    const avgSessionDuration =
+      dashboard.totalSessions > 0
+        ? dashboard.totalDurationMinutes / dashboard.totalSessions
+        : 0;
+    const engagement = Math.min(
+      100,
+      Math.round((avgSessionDuration / 20) * 100),
+    );
+
+    let score = Math.round(
+      activity * 0.3 + consistency * 0.3 + balance * 0.2 + engagement * 0.2,
+    );
+
+    if (todayMinutes === 0) {
+      score = Math.min(score, 54);
+    }
+
+    const level = this.getHealthLevel(score);
+    const suggestion = this.buildHealthSuggestion(
+      level,
+      todayMinutes,
+      dashboard.continuousDays,
+    );
+
+    return {
+      score,
+      level,
+      dimensions: { activity, consistency, balance, engagement },
+      suggestion,
+    };
+  }
+
+  private getHealthLevel(score: number): LearningStatsHealthDto["level"] {
+    const normalized = Math.max(0, Math.min(100, score));
+    if (normalized >= 85) return "excellent";
+    if (normalized >= 70) return "good";
+    if (normalized >= 55) return "average";
+    return "attention";
+  }
+
+  private calculateBalanceScore(topics: TopicBreakdownItem[]): number {
+    if (topics.length <= 1) return 100;
+
+    const total = topics.reduce((sum, t) => sum + t.count, 0);
+    if (total === 0) return 100;
+
+    const entropy = topics.reduce((sum, t) => {
+      const p = t.count / total;
+      return p > 0 ? sum - p * Math.log(p) : sum;
+    }, 0);
+
+    const maxEntropy = Math.log(topics.length);
+    const ratio = maxEntropy > 0 ? entropy / maxEntropy : 1;
+    return Math.round(ratio * 100);
+  }
+
+  private buildHealthSuggestion(
+    level: LearningStatsHealthDto["level"],
+    todayMinutes: number,
+    continuousDays: number,
+  ): string {
+    if (todayMinutes === 0) {
+      return "今天还没有学习记录，建议提醒孩子开始今天的练习。";
+    }
+    if (level === "excellent") {
+      return `学习状态很棒，已连续学习 ${continuousDays} 天，继续保持！`;
+    }
+    if (level === "good") {
+      return "学习状态良好，可以适当增加练习频次或尝试新主题。";
+    }
+    if (level === "average") {
+      return "学习状态一般，建议制定固定学习计划，提升连续性。";
+    }
+    return "学习投入不足，建议关注孩子的学习时间和内容分布。";
+  }
+
+  private formatTopicName(topic: TopicBreakdownItem): string {
+    return (
+      topic.conversationModeName ||
+      [topic.textbookName, topic.unitName].filter(Boolean).join(" · ") ||
+      topic.mode
+    );
+  }
+
   private async getUserDevices(userId: string, deviceId?: string) {
     const bindings = await this.prisma.userDeviceBinding.findMany({
       where: { userId },
@@ -413,6 +650,29 @@ export class LearningStatsService {
         isActive: true,
       },
     }) as Promise<ActiveConfig[]>;
+  }
+
+  private async getChildProfiles(
+    deviceInternalIds: string[],
+  ): Promise<Map<string, { name: string | null; englishName: string | null }>> {
+    const result = new Map<
+      string,
+      { name: string | null; englishName: string | null }
+    >();
+    if (deviceInternalIds.length === 0) return result;
+
+    const profiles = await this.prisma.childProfile.findMany({
+      where: { deviceId: { in: deviceInternalIds } },
+      select: { deviceId: true, name: true, englishName: true },
+    });
+
+    for (const profile of profiles) {
+      result.set(profile.deviceId, {
+        name: profile.name,
+        englishName: profile.englishName,
+      });
+    }
+    return result;
   }
 
   private async getConversations(
