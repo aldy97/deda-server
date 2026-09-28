@@ -1,5 +1,6 @@
 import {
   Injectable,
+  BadRequestException,
   ForbiddenException,
   NotFoundException,
 } from "@nestjs/common";
@@ -8,6 +9,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { SwitchModeDto } from "./dto/switch-mode.dto";
 import { ApplyDeviceConfigDto } from "./dto/apply-device-config.dto";
 import { DeviceConfigResponseDto } from "./dto/device-config-response.dto";
+import { DEVICE_MODES, DeviceMode } from "./device-config.constants";
 
 @Injectable()
 export class DeviceConfigsService {
@@ -70,36 +72,9 @@ export class DeviceConfigsService {
     deviceId: string,
     dto: ApplyDeviceConfigDto,
   ): Promise<DeviceConfigResponseDto> {
-    const deviceInternalId = await this.ensureDeviceOwnership(
-      userId,
-      deviceId,
-    );
+    const deviceInternalId = await this.ensureDeviceOwnership(userId, deviceId);
 
-    if (dto.textbookId && dto.unitId) {
-      const textbook = await this.prisma.textbook.findUnique({
-        where: { textbookId: dto.textbookId },
-        select: { id: true },
-      });
-
-      if (!textbook) {
-        throw new NotFoundException(`Textbook not found: ${dto.textbookId}`);
-      }
-
-      const unit = await this.prisma.unit.findUnique({
-        where: {
-          textbookId_unitId: {
-            textbookId: textbook.id,
-            unitId: dto.unitId,
-          },
-        },
-      });
-
-      if (!unit) {
-        throw new NotFoundException(
-          `Unit not found: textbookId=${dto.textbookId}, unitId=${dto.unitId}`,
-        );
-      }
-    }
+    await this.validateModePayload(dto);
 
     const newConfig = await this.createActiveConfig(deviceInternalId, {
       mode: dto.mode,
@@ -122,10 +97,9 @@ export class DeviceConfigsService {
     deviceId: string,
     dto: SwitchModeDto,
   ): Promise<DeviceConfigResponseDto> {
-    const deviceInternalId = await this.ensureDeviceOwnership(
-      userId,
-      deviceId,
-    );
+    const deviceInternalId = await this.ensureDeviceOwnership(userId, deviceId);
+
+    await this.validateModePayload(dto);
 
     const newConfig = await this.createActiveConfig(deviceInternalId, {
       mode: dto.mode,
@@ -138,6 +112,101 @@ export class DeviceConfigsService {
     });
 
     return await this.mapToResponseDto(newConfig, deviceId);
+  }
+
+  /**
+   * 校验 mode 与 textbookId / unitId / conversationModeKey 的组合规则：
+   * - free_chat：禁止 textbookId/unitId，必须提供 free_chat 分类的启用子模式
+   * - textbook_learning：必须提供 textbookId，unitId 可选
+   * - locked_unit：必须提供 textbookId + unitId
+   * - free_textbook：必须提供 textbookId，禁止 unitId
+   * - textbook 类 mode 的 conversationModeKey 可选，但须属于 textbook_learning 分类
+   */
+  private async validateModePayload(dto: {
+    mode: string;
+    textbookId?: string;
+    unitId?: string;
+    conversationModeKey?: string;
+  }): Promise<void> {
+    const { mode, textbookId, unitId, conversationModeKey } = dto;
+
+    if (!DEVICE_MODES.includes(mode as DeviceMode)) {
+      throw new BadRequestException(`Invalid mode: ${mode}`);
+    }
+
+    if (mode === "free_chat") {
+      if (textbookId || unitId) {
+        throw new BadRequestException(
+          "free_chat mode does not accept textbookId/unitId",
+        );
+      }
+      if (!conversationModeKey) {
+        throw new BadRequestException(
+          "free_chat mode requires conversationModeKey",
+        );
+      }
+    } else {
+      if (!textbookId) {
+        throw new BadRequestException(`${mode} mode requires textbookId`);
+      }
+      if (mode === "locked_unit" && !unitId) {
+        throw new BadRequestException("locked_unit mode requires unitId");
+      }
+      if (mode === "free_textbook" && unitId) {
+        throw new BadRequestException(
+          "free_textbook mode does not accept unitId",
+        );
+      }
+    }
+
+    if (textbookId) {
+      const textbook = await this.prisma.textbook.findUnique({
+        where: { textbookId },
+        select: { id: true },
+      });
+
+      if (!textbook) {
+        throw new NotFoundException(`Textbook not found: ${textbookId}`);
+      }
+
+      if (unitId) {
+        const unit = await this.prisma.unit.findUnique({
+          where: {
+            textbookId_unitId: {
+              textbookId: textbook.id,
+              unitId,
+            },
+          },
+        });
+
+        if (!unit) {
+          throw new NotFoundException(
+            `Unit not found: textbookId=${textbookId}, unitId=${unitId}`,
+          );
+        }
+      }
+    }
+
+    if (conversationModeKey) {
+      const expectedCategory =
+        mode === "free_chat" ? "free_chat" : "textbook_learning";
+      const conversationMode = await this.prisma.conversationMode.findFirst({
+        where: { key: conversationModeKey, isActive: true },
+        include: { category: true },
+      });
+
+      if (!conversationMode) {
+        throw new BadRequestException(
+          `Unknown or inactive conversationModeKey: ${conversationModeKey}`,
+        );
+      }
+
+      if (conversationMode.category.key !== expectedCategory) {
+        throw new BadRequestException(
+          `conversationModeKey ${conversationModeKey} does not belong to category ${expectedCategory}`,
+        );
+      }
+    }
   }
 
   /**
@@ -157,9 +226,7 @@ export class DeviceConfigsService {
     });
 
     if (!binding) {
-      throw new ForbiddenException(
-        "Device not bound to current user",
-      );
+      throw new ForbiddenException("Device not bound to current user");
     }
 
     return binding.device.id;
