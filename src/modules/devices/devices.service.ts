@@ -16,7 +16,7 @@ export class DevicesService {
 
   async bind(userId: string, dto: BindDeviceDto) {
     if (!dto.deviceId && !dto.deviceCode) {
-      throw new Error('deviceId or deviceCode is required');
+      throw new Error("deviceId or deviceCode is required");
     }
 
     let device;
@@ -37,10 +37,12 @@ export class DevicesService {
         where: { deviceCode: dto.deviceCode },
       });
       if (!device) {
-        throw new NotFoundException(`Device with code ${dto.deviceCode} not found`);
+        throw new NotFoundException(
+          `Device with code ${dto.deviceCode} not found`,
+        );
       }
     } else {
-      throw new Error('deviceId or deviceCode is required');
+      throw new Error("deviceId or deviceCode is required");
     }
 
     // 检查是否已绑定
@@ -72,7 +74,7 @@ export class DevicesService {
   async list(userId: string) {
     const bindings = await this.prisma.userDeviceBinding.findMany({
       where: { userId },
-      include: { device: true },
+      include: { device: { include: { childProfile: true } } },
     });
     return bindings.map((b) => ({
       id: b.device.deviceId,
@@ -81,6 +83,12 @@ export class DevicesService {
       deviceCode: b.device.deviceCode,
       networkType: b.device.networkType,
       firmwareVersion: b.device.firmwareVersion,
+      childProfile: b.device.childProfile
+        ? {
+            name: b.device.childProfile.name,
+            englishName: b.device.childProfile.englishName,
+          }
+        : null,
     }));
   }
 
@@ -97,7 +105,7 @@ export class DevicesService {
     // 当前为硬编码状态，仅用于 wechat-app 联调验证设备状态展示。
     return {
       deviceId: id,
-      status: 'online' as const,
+      status: "online" as const,
       battery: 78,
       isCharging: true,
       lastActiveAt: new Date().toISOString(),
