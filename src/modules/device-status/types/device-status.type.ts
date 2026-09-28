@@ -3,7 +3,7 @@
  */
 export interface OnlineStatus {
   /** 当前在线状态 */
-  status: 'ONLINE' | 'OFFLINE' | 'UNKNOWN';
+  status: "ONLINE" | "OFFLINE" | "UNKNOWN";
 
   /** 本次连接建立时间，Unix 毫秒时间戳 */
   connectedAt?: number;
@@ -23,7 +23,7 @@ export interface BatteryStatus {
   percent: number;
 
   /** 当前充电状态 */
-  chargingStatus: 'NOT_CHARGING' | 'CHARGING' | 'FULL' | 'UNKNOWN';
+  chargingStatus: "NOT_CHARGING" | "CHARGING" | "FULL" | "UNKNOWN";
 
   /** 是否低电量：0 否，1 是 */
   lowBattery: number;

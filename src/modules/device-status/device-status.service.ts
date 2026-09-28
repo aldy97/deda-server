@@ -1,13 +1,13 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { MqttService } from '@/common/mqtt/mqtt.service';
-import { RedisService } from '@/common/redis/redis.service';
-import { DeviceStatusDto } from './dto/device-status.dto';
-import { MqttMessage, MessageType } from './types/mqtt-message.type';
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { MqttService } from "@/common/mqtt/mqtt.service";
+import { RedisService } from "@/common/redis/redis.service";
+import { DeviceStatusDto } from "./dto/device-status.dto";
+import { MqttMessage, MessageType } from "./types/mqtt-message.type";
 import {
   DeviceStatusData,
   ConversationRecordData,
-} from './types/device-status.type';
+} from "./types/device-status.type";
 
 /**
  * 设备状态服务
@@ -29,8 +29,9 @@ export class DeviceStatusService implements OnModuleInit {
     private readonly config: ConfigService,
   ) {
     this.statusTopic =
-      this.config.get<string>('MQTT_STATUS_TOPIC') || 'zhianxin/event/report';
-    this.statusTtlSeconds = this.config.get<number>('MQTT_STATUS_TTL_SECONDS') || 300;
+      this.config.get<string>("MQTT_STATUS_TOPIC") || "zhianxin/event/report";
+    this.statusTtlSeconds =
+      this.config.get<number>("MQTT_STATUS_TTL_SECONDS") || 300;
   }
 
   onModuleInit(): void {
@@ -61,12 +62,12 @@ export class DeviceStatusService implements OnModuleInit {
     try {
       message = JSON.parse(payload.toString());
     } catch (err) {
-      this.logger.warn('Failed to parse MQTT payload as JSON', err);
+      this.logger.warn("Failed to parse MQTT payload as JSON", err);
       return;
     }
 
     if (!message.messageId) {
-      this.logger.warn('MQTT message missing messageId');
+      this.logger.warn("MQTT message missing messageId");
       return;
     }
 
@@ -80,10 +81,14 @@ export class DeviceStatusService implements OnModuleInit {
         this.handleDeviceStatus(message as MqttMessage<DeviceStatusData>);
         break;
       case MessageType.CONVERSATION_RECORD:
-        this.handleConversationRecord(message as MqttMessage<ConversationRecordData>);
+        this.handleConversationRecord(
+          message as MqttMessage<ConversationRecordData>,
+        );
         break;
       default:
-        this.logger.debug(`Ignoring unknown messageType: ${message.messageType}`);
+        this.logger.debug(
+          `Ignoring unknown messageType: ${message.messageType}`,
+        );
     }
   }
 
@@ -113,22 +118,30 @@ export class DeviceStatusService implements OnModuleInit {
    */
   async cacheStatus(deviceId: string, status: DeviceStatusDto): Promise<void> {
     const key = this.statusKey(deviceId);
-    await this.redisService.setValue(key, JSON.stringify(status), this.statusTtlSeconds);
+    await this.redisService.setValue(
+      key,
+      JSON.stringify(status),
+      this.statusTtlSeconds,
+    );
   }
 
   private handleDeviceStatus(message: MqttMessage<DeviceStatusData>): void {
     const deviceId = message.deviceId;
     if (!deviceId) {
-      this.logger.warn('DEVICE_STATUS message missing deviceId');
+      this.logger.warn("DEVICE_STATUS message missing deviceId");
       return;
     }
 
-    this.mergeStatus(deviceId, message.data, message.occurredAt).catch((err) => {
-      this.logger.error(`Failed to merge status for ${deviceId}`, err);
-    });
+    this.mergeStatus(deviceId, message.data, message.occurredAt).catch(
+      (err) => {
+        this.logger.error(`Failed to merge status for ${deviceId}`, err);
+      },
+    );
   }
 
-  private handleConversationRecord(message: MqttMessage<ConversationRecordData>): void {
+  private handleConversationRecord(
+    message: MqttMessage<ConversationRecordData>,
+  ): void {
     // TODO: 如需持久化会话记录，可在此写入 Conversation 表
     this.logger.debug(
       `Received conversation record for ${message.deviceId}: sessionId=${message.data.sessionId}`,
@@ -152,7 +165,10 @@ export class DeviceStatusService implements OnModuleInit {
       updated.online = data.online;
     }
     if (data.battery) {
-      updated.battery = this.isNewer(data.battery.reportedAt, current.battery?.reportedAt)
+      updated.battery = this.isNewer(
+        data.battery.reportedAt,
+        current.battery?.reportedAt,
+      )
         ? data.battery
         : current.battery;
     }

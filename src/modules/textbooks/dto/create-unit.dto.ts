@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber, IsInt } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsInt } from "class-validator";
 
 export class CreateUnitDto {
   @IsString()

@@ -1,6 +1,11 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as mqtt from 'mqtt';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import * as mqtt from "mqtt";
 
 /**
  * MQTT 客户端服务（signature 阶段）
@@ -18,11 +23,13 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit(): void {
-    const url = this.config.get<string>('MQTT_URL');
+    const url = this.config.get<string>("MQTT_URL");
     if (url) {
       this.connect(url);
     } else {
-      this.logger.warn('MQTT_URL is not configured. MQTT client will remain disconnected.');
+      this.logger.warn(
+        "MQTT_URL is not configured. MQTT client will remain disconnected.",
+      );
     }
   }
 
@@ -41,24 +48,24 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
       clean: true,
     });
 
-    this.client.on('connect', () => {
+    this.client.on("connect", () => {
       this.logger.log(`MQTT connected to ${url}`);
     });
 
-    this.client.on('message', (topic: string, payload: Buffer) => {
+    this.client.on("message", (topic: string, payload: Buffer) => {
       this.messageHandlers.forEach((handler) => handler(topic, payload));
     });
 
-    this.client.on('error', (err: Error) => {
-      this.logger.error('MQTT client error', err);
+    this.client.on("error", (err: Error) => {
+      this.logger.error("MQTT client error", err);
     });
 
-    this.client.on('close', () => {
-      this.logger.warn('MQTT connection closed');
+    this.client.on("close", () => {
+      this.logger.warn("MQTT connection closed");
     });
 
-    this.client.on('reconnect', () => {
-      this.logger.log('MQTT reconnecting');
+    this.client.on("reconnect", () => {
+      this.logger.log("MQTT reconnecting");
     });
   }
 
@@ -79,7 +86,9 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
    */
   subscribe(topic: string, qos: 0 | 1 | 2 = 1): void {
     if (!this.client) {
-      this.logger.warn(`Cannot subscribe to ${topic}: MQTT client not connected`);
+      this.logger.warn(
+        `Cannot subscribe to ${topic}: MQTT client not connected`,
+      );
       return;
     }
     this.client.subscribe(topic, { qos }, (err?: Error) => {

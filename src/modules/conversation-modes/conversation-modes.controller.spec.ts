@@ -1,8 +1,8 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { ConversationModesController } from './conversation-modes.controller';
-import { ConversationModesService } from './conversation-modes.service';
+import { Test, TestingModule } from "@nestjs/testing";
+import { ConversationModesController } from "./conversation-modes.controller";
+import { ConversationModesService } from "./conversation-modes.service";
 
-describe('ConversationModesController', () => {
+describe("ConversationModesController", () => {
   let controller: ConversationModesController;
   let service: any;
 
@@ -21,17 +21,27 @@ describe('ConversationModesController', () => {
       ],
     }).compile();
 
-    controller = module.get<ConversationModesController>(ConversationModesController);
+    controller = module.get<ConversationModesController>(
+      ConversationModesController,
+    );
     service = module.get(ConversationModesService);
   });
 
-  it('should be defined', () => {
+  it("should be defined", () => {
     expect(controller).toBeDefined();
   });
 
-  describe('findCategories', () => {
-    it('should return categories from service', async () => {
-      const expected = [{ id: 'cat-1', key: 'free_chat', name: '自由对话', sortOrder: 0, isActive: true }];
+  describe("findCategories", () => {
+    it("should return categories from service", async () => {
+      const expected = [
+        {
+          id: "cat-1",
+          key: "free_chat",
+          name: "自由对话",
+          sortOrder: 0,
+          isActive: true,
+        },
+      ];
       service.findCategories.mockResolvedValue(expected);
 
       const result = await controller.findCategories();
@@ -41,21 +51,39 @@ describe('ConversationModesController', () => {
     });
   });
 
-  describe('findModes', () => {
-    it('should return modes from service', async () => {
-      const expected = [{ id: 'mode-1', categoryId: 'cat-1', key: 'free_chat_casual', name: '自由闲聊', sortOrder: 0, isActive: true }];
+  describe("findModes", () => {
+    it("should return modes from service", async () => {
+      const expected = [
+        {
+          id: "mode-1",
+          categoryId: "cat-1",
+          key: "free_chat_casual",
+          name: "自由闲聊",
+          sortOrder: 0,
+          isActive: true,
+        },
+      ];
       service.findModes.mockResolvedValue(expected);
 
-      const result = await controller.findModes('free_chat');
+      const result = await controller.findModes("free_chat");
 
-      expect(service.findModes).toHaveBeenCalledWith('free_chat');
+      expect(service.findModes).toHaveBeenCalledWith("free_chat");
       expect(result).toEqual(expected);
     });
   });
 
-  describe('findTree', () => {
-    it('should return tree from service', async () => {
-      const expected = [{ id: 'cat-1', key: 'free_chat', name: '自由对话', sortOrder: 0, isActive: true, modes: [] }];
+  describe("findTree", () => {
+    it("should return tree from service", async () => {
+      const expected = [
+        {
+          id: "cat-1",
+          key: "free_chat",
+          name: "自由对话",
+          sortOrder: 0,
+          isActive: true,
+          modes: [],
+        },
+      ];
       service.findTree.mockResolvedValue(expected);
 
       const result = await controller.findTree();

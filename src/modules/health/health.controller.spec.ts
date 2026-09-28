@@ -1,8 +1,8 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { HealthController } from './health.controller';
-import { VendorService } from '../vendor/vendor.service';
+import { Test, TestingModule } from "@nestjs/testing";
+import { HealthController } from "./health.controller";
+import { VendorService } from "../vendor/vendor.service";
 
-describe('HealthController', () => {
+describe("HealthController", () => {
   let controller: HealthController;
   let vendorService: jest.Mocked<VendorService>;
 
@@ -23,13 +23,17 @@ describe('HealthController', () => {
     vendorService = module.get(VendorService);
   });
 
-  it('should be defined', () => {
+  it("should be defined", () => {
     expect(controller).toBeDefined();
   });
 
-  describe('GET /health', () => {
-    it('should return health status', async () => {
-      const expected = { status: 'up', timestamp: 1234567890, expectedRecovery: null };
+  describe("GET /health", () => {
+    it("should return health status", async () => {
+      const expected = {
+        status: "up",
+        timestamp: 1234567890,
+        expectedRecovery: null,
+      };
       vendorService.getHealth.mockReturnValue(expected);
 
       const result = controller.health();

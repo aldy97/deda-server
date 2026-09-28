@@ -1,12 +1,12 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { ChildProfilesController } from './child-profiles.controller';
-import { ChildProfilesService } from './child-profiles.service';
-import { JwtAuthGuard } from '@/modules/users/guards/jwt-auth.guard';
+import { Test, TestingModule } from "@nestjs/testing";
+import { ChildProfilesController } from "./child-profiles.controller";
+import { ChildProfilesService } from "./child-profiles.service";
+import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
 
 const mockReq = (userId: string) =>
-  ({ user: { userId, openid: `openid-${userId}` } } as any);
+  ({ user: { userId, openid: `openid-${userId}` } }) as any;
 
-describe('ChildProfilesController', () => {
+describe("ChildProfilesController", () => {
   let controller: ChildProfilesController;
   let service: jest.Mocked<ChildProfilesService>;
 
@@ -31,73 +31,83 @@ describe('ChildProfilesController', () => {
     service = module.get(ChildProfilesService);
   });
 
-  it('should be defined', () => {
+  it("should be defined", () => {
     expect(controller).toBeDefined();
   });
 
-  describe('GET /child-profiles/device/:deviceId', () => {
-    it('should return owner info with valid JWT', async () => {
+  describe("GET /child-profiles/device/:deviceId", () => {
+    it("should return owner info with valid JWT", async () => {
       const expected = {
-        id: 'child-001',
-        name: 'Alice',
-        birthday: '2018-05-20',
+        id: "child-001",
+        name: "Alice",
+        birthday: "2018-05-20",
       };
       service.getByDevice.mockResolvedValue(expected as any);
 
-      const result = await controller.getByDevice('dev-001', mockReq('user-001'));
+      const result = await controller.getByDevice(
+        "dev-001",
+        mockReq("user-001"),
+      );
 
-      expect(service.getByDevice).toHaveBeenCalledWith('user-001', 'dev-001');
+      expect(service.getByDevice).toHaveBeenCalledWith("user-001", "dev-001");
       expect(result).toEqual(expected);
     });
 
-    it('should return null when owner info not filled', async () => {
+    it("should return null when owner info not filled", async () => {
       service.getByDevice.mockResolvedValue(null);
 
-      const result = await controller.getByDevice('dev-001', mockReq('user-001'));
+      const result = await controller.getByDevice(
+        "dev-001",
+        mockReq("user-001"),
+      );
 
       expect(result).toBeNull();
     });
   });
 
-  describe('PATCH /child-profiles/device/:deviceId', () => {
-    it('should update owner info with valid JWT and dto', async () => {
-      const dto = { name: 'Alice', birthday: '2018-05-20' };
+  describe("PATCH /child-profiles/device/:deviceId", () => {
+    it("should update owner info with valid JWT and dto", async () => {
+      const dto = { name: "Alice", birthday: "2018-05-20" };
       const expected = {
-        id: 'child-001',
-        name: 'Alice',
-        birthday: '2018-05-20',
+        id: "child-001",
+        name: "Alice",
+        birthday: "2018-05-20",
       };
       service.upsertByDevice.mockResolvedValue(expected as any);
 
       const result = await controller.updateByDevice(
-        'dev-001',
+        "dev-001",
         dto,
-        mockReq('user-001'),
+        mockReq("user-001"),
       );
 
       expect(service.upsertByDevice).toHaveBeenCalledWith(
-        'user-001',
-        'dev-001',
+        "user-001",
+        "dev-001",
         dto,
       );
       expect(result).toEqual(expected);
     });
 
-    it('should accept englishName in addition to name and birthday', async () => {
-      const dto = { name: 'Alice', birthday: '2018-05-20', englishName: 'A' };
+    it("should accept englishName in addition to name and birthday", async () => {
+      const dto = { name: "Alice", birthday: "2018-05-20", englishName: "A" };
       const expected = {
-        id: 'child-001',
-        name: 'Alice',
-        birthday: '2018-05-20',
-        englishName: 'A',
+        id: "child-001",
+        name: "Alice",
+        birthday: "2018-05-20",
+        englishName: "A",
       };
       service.upsertByDevice.mockResolvedValue(expected as any);
 
-      const result = await controller.updateByDevice('dev-001', dto, mockReq('user-001'));
+      const result = await controller.updateByDevice(
+        "dev-001",
+        dto,
+        mockReq("user-001"),
+      );
 
       expect(service.upsertByDevice).toHaveBeenCalledWith(
-        'user-001',
-        'dev-001',
+        "user-001",
+        "dev-001",
         dto,
       );
       expect(result).toEqual(expected);

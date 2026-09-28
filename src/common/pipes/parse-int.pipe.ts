@@ -3,7 +3,7 @@ import {
   Injectable,
   ArgumentMetadata,
   BadRequestException,
-} from '@nestjs/common';
+} from "@nestjs/common";
 
 @Injectable()
 export class ParseIntPipe implements PipeTransform<string, number> {

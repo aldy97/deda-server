@@ -1,10 +1,10 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
 async function main() {
   // TODO: 初始化基础数据，如教材库、单元元数据等
-  console.log('Seeding database...');
+  console.log("Seeding database...");
 }
 
 main()

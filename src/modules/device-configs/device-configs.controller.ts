@@ -51,10 +51,6 @@ export class DeviceConfigsController {
     @Body() dto: SwitchModeDto,
     @Req() req: RequestWithUser,
   ) {
-    return this.deviceConfigsService.switchMode(
-      req.user.userId,
-      deviceId,
-      dto,
-    );
+    return this.deviceConfigsService.switchMode(req.user.userId, deviceId, dto);
   }
 }

@@ -1,9 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '@/common/prisma/prisma.service';
-import { CreateTextbookDto } from './dto/create-textbook.dto';
-import { UpdateTextbookDto } from './dto/update-textbook.dto';
-import { CreateUnitDto } from './dto/create-unit.dto';
-import { UpdateUnitDto } from './dto/update-unit.dto';
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import { CreateTextbookDto } from "./dto/create-textbook.dto";
+import { UpdateTextbookDto } from "./dto/update-textbook.dto";
+import { CreateUnitDto } from "./dto/create-unit.dto";
+import { UpdateUnitDto } from "./dto/update-unit.dto";
 
 @Injectable()
 export class TextbooksService {
@@ -11,7 +11,7 @@ export class TextbooksService {
 
   async list() {
     return this.prisma.textbook.findMany({
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: "asc" },
       select: {
         id: true,
         textbookId: true,
@@ -58,7 +58,7 @@ export class TextbooksService {
 
     return this.prisma.unit.findMany({
       where: { textbookId: textbook.id },
-      orderBy: { sortOrder: 'asc' },
+      orderBy: { sortOrder: "asc" },
       select: {
         id: true,
         unitId: true,

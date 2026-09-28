@@ -3,8 +3,8 @@
  * 对应《AI 玩具 MQTT 数据对接文档》中的 messageType
  */
 export enum MessageType {
-  DEVICE_STATUS = 'DEVICE_STATUS',
-  CONVERSATION_RECORD = 'CONVERSATION_RECORD',
+  DEVICE_STATUS = "DEVICE_STATUS",
+  CONVERSATION_RECORD = "CONVERSATION_RECORD",
 }
 
 /**

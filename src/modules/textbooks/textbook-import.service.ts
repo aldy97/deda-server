@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@/common/prisma/prisma.service';
-import * as fs from 'fs';
-import * as path from 'path';
+import { Injectable, Logger } from "@nestjs/common";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import * as fs from "fs";
+import * as path from "path";
 
 export interface ParsedUnit {
   unitId: string;
@@ -58,7 +58,7 @@ export class TextbookImportService {
       throw new Error(`Textbook file not found: ${resolvedPath}`);
     }
 
-    const raw = fs.readFileSync(resolvedPath, 'utf-8');
+    const raw = fs.readFileSync(resolvedPath, "utf-8");
     let parsed: ParsedTextbook;
     if (overrides.singleUnit) {
       parsed = this.parseMarkdownAsSingleUnit(raw, overrides);
@@ -95,8 +95,8 @@ export class TextbookImportService {
     const lines = raw.split(/\r?\n/);
 
     let name = overrides.name || overrides.textbookId;
-    let description = overrides.description || '';
-    let textbookCefrLevel = overrides.cefrLevel || '';
+    let description = overrides.description || "";
+    const textbookCefrLevel = overrides.cefrLevel || "";
 
     const contentLines: string[] = [];
 
@@ -116,15 +116,14 @@ export class TextbookImportService {
       contentLines.push(line);
     }
 
-    const content = contentLines.join('\n').trim();
+    const content = contentLines.join("\n").trim();
 
     if (!description) {
       description = this.generateDescription(content, name);
     }
 
     const unitName = overrides.singleUnitName || name;
-    const unitId =
-      overrides.singleUnitId || this.slugify(unitName) || 'unit-1';
+    const unitId = overrides.singleUnitId || this.slugify(unitName) || "unit-1";
 
     return {
       textbookId: overrides.textbookId,
@@ -167,8 +166,8 @@ export class TextbookImportService {
     const lines = raw.split(/\r?\n/);
 
     let name = overrides.name || overrides.textbookId;
-    let description = overrides.description || '';
-    let textbookCefrLevel = overrides.cefrLevel || '';
+    let description = overrides.description || "";
+    const textbookCefrLevel = overrides.cefrLevel || "";
 
     const units: ParsedUnit[] = [];
     let currentUnit: Partial<ParsedUnit> | null = null;
@@ -177,11 +176,14 @@ export class TextbookImportService {
 
     const flushUnit = () => {
       if (currentUnit && currentUnit.unitId) {
-        const content = currentContentLines.join('\n').trim();
+        const content = currentContentLines.join("\n").trim();
         units.push({
           unitId: currentUnit.unitId,
           name: currentUnit.name || currentUnit.unitId,
-          description: this.generateDescription(content, currentUnit.name || ''),
+          description: this.generateDescription(
+            content,
+            currentUnit.name || "",
+          ),
           cefrLevel:
             currentUnit.cefrLevel ||
             this.inferCefrLevelFromContent(content, textbookCefrLevel),
@@ -219,7 +221,7 @@ export class TextbookImportService {
             sortOrder: sortOrder++,
           };
         } else {
-          const cleanedName = heading.replace(/^\d+(\.\d+)*\s+/, '').trim();
+          const cleanedName = heading.replace(/^\d+(\.\d+)*\s+/, "").trim();
           currentUnit = {
             unitId: this.slugify(cleanedName || heading),
             name: cleanedName || heading,
@@ -236,7 +238,7 @@ export class TextbookImportService {
     flushUnit();
 
     if (!description) {
-      description = `共 ${units.length} 个单元，适合 ${textbookCefrLevel || '初学者'} 水平。`;
+      description = `共 ${units.length} 个单元，适合 ${textbookCefrLevel || "初学者"} 水平。`;
     }
 
     return {
@@ -270,8 +272,8 @@ export class TextbookImportService {
     const lines = raw.split(/\r?\n/);
 
     let name = overrides.name || overrides.textbookId;
-    let description = overrides.description || '';
-    const textbookCefrLevel = overrides.cefrLevel || '';
+    let description = overrides.description || "";
+    const textbookCefrLevel = overrides.cefrLevel || "";
 
     // 1. 提取教材级 H1 标题与描述注释，并在附录/脚本区前截断
     const bodyLines: string[] = [];
@@ -312,7 +314,7 @@ export class TextbookImportService {
     let nextSequentialNumber = 1;
 
     const flushUnit = () => {
-      const content = currentContentLines.join('\n').trim();
+      const content = currentContentLines.join("\n").trim();
       if (!content) {
         currentContentLines = [];
         currentStartedByUnitMarker = false;
@@ -345,7 +347,7 @@ export class TextbookImportService {
     for (let i = 0; i < bodyLines.length; i++) {
       const line = bodyLines[i];
       // 找到下一个非空行（用于判断主题 H2 后是否紧跟 UNLOCK YOUR KNOWLEDGE）
-      let nextNonEmptyLine = '';
+      let nextNonEmptyLine = "";
       for (let j = i + 1; j < bodyLines.length; j++) {
         if (bodyLines[j].trim()) {
           nextNonEmptyLine = bodyLines[j];
@@ -393,7 +395,11 @@ export class TextbookImportService {
       }
 
       const unlockMatch = line.match(/^##\s+UNLOCK\s+YOUR\s+KNOWLEDGE\s*$/i);
-      if (unlockMatch && !currentStartedByUnitMarker && !currentStartedByTheme) {
+      if (
+        unlockMatch &&
+        !currentStartedByUnitMarker &&
+        !currentStartedByTheme
+      ) {
         // 只有当前单元不是由主题 H2 或显式 UNIT X 开始时，UNLOCK YOUR KNOWLEDGE 才标志新单元
         flushUnit();
         currentUnitNumber = nextSequentialNumber;
@@ -408,12 +414,12 @@ export class TextbookImportService {
     }
 
     // 文件末尾剩余内容
-    if (currentContentLines.join('\n').trim().length > 0) {
+    if (currentContentLines.join("\n").trim().length > 0) {
       flushUnit();
     }
 
     if (!description) {
-      description = `共 ${units.length} 个单元，适合 ${textbookCefrLevel || '初学者'} 水平。`;
+      description = `共 ${units.length} 个单元，适合 ${textbookCefrLevel || "初学者"} 水平。`;
     }
 
     return {
@@ -538,8 +544,8 @@ export class TextbookImportService {
       .filter((s) => s.length > 0)[0];
 
     if (firstSentence && firstSentence.length > 10) {
-      const sentence = firstSentence.replace(/\s+/g, ' ').trim();
-      return sentence.length > 120 ? sentence.slice(0, 120) + '...' : sentence;
+      const sentence = firstSentence.replace(/\s+/g, " ").trim();
+      return sentence.length > 120 ? sentence.slice(0, 120) + "..." : sentence;
     }
 
     return `学习单元：${unitName}`;
@@ -556,23 +562,23 @@ export class TextbookImportService {
     if (textbookCefrLevel) return textbookCefrLevel;
 
     const trimmed = content.trim();
-    if (!trimmed) return 'A1';
+    if (!trimmed) return "A1";
 
     const sentences = trimmed
       .split(/[.!?。！？]\s*/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-    if (sentences.length === 0) return 'A1';
+    if (sentences.length === 0) return "A1";
 
     const totalWords = trimmed.split(/\s+/).length;
     const avgWordsPerSentence = totalWords / sentences.length;
 
-    if (avgWordsPerSentence < 6) return 'A1';
-    if (avgWordsPerSentence < 10) return 'A2';
-    if (avgWordsPerSentence < 15) return 'B1';
-    if (avgWordsPerSentence < 20) return 'B2';
-    return 'C1';
+    if (avgWordsPerSentence < 6) return "A1";
+    if (avgWordsPerSentence < 10) return "A2";
+    if (avgWordsPerSentence < 15) return "B1";
+    if (avgWordsPerSentence < 20) return "B2";
+    return "C1";
   }
 
   /**
@@ -592,8 +598,8 @@ export class TextbookImportService {
   private slugify(text: string): string {
     return text
       .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
-      .replace(/^-+|-+$/g, '')
+      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+      .replace(/^-+|-+$/g, "")
       .substring(0, 60);
   }
 }

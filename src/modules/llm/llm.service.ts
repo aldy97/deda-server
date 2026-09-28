@@ -12,6 +12,7 @@ export interface LlmCompleteOptions {
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  thinking?: { type: "disabled" };
 }
 
 export interface LlmCompleteResult {
@@ -26,7 +27,7 @@ export interface LlmCompleteResult {
 /**
  * LLM 服务
  * 通过 OpenAI 兼容的 chat completions API 调用模型。
- * MVP 阶段默认使用 DeepSeek-V3（deepseek-chat）。
+ * MVP 阶段默认使用 DeepSeek-Flash（deepseek-flash）。
  */
 @Injectable()
 export class LlmService {
@@ -42,7 +43,7 @@ export class LlmService {
       "https://api.deepseek.com/v1";
     this.apiKey = this.configService.get<string>("OPENAI_API_KEY") || "";
     this.model =
-      this.configService.get<string>("OPENAI_MODEL") || "deepseek-chat";
+      this.configService.get<string>("OPENAI_MODEL") || "deepseek-flash";
     this.defaultTimeoutMs =
       Number(this.configService.get<string>("LLM_TIMEOUT_MS")) || 30000;
   }
@@ -70,6 +71,7 @@ export class LlmService {
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 512,
+          thinking: options.thinking ?? { type: "disabled" },
         },
         {
           headers: {

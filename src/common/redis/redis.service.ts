@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import Redis from 'ioredis';
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import Redis from "ioredis";
 
 /**
  * Redis 服务（可选依赖）
@@ -13,17 +13,20 @@ import Redis from 'ioredis';
 export class RedisService {
   private readonly logger = new Logger(RedisService.name);
   private readonly client?: Redis;
-  private readonly memoryCache = new Map<string, { value: string; expiresAt: number }>();
+  private readonly memoryCache = new Map<
+    string,
+    { value: string; expiresAt: number }
+  >();
 
   constructor(private readonly configService: ConfigService) {
-    const redisUrl = this.configService.get<string>('redis.url');
+    const redisUrl = this.configService.get<string>("redis.url");
     if (redisUrl) {
       this.client = new Redis(redisUrl);
-      this.logger.log('Redis client connected');
+      this.logger.log("Redis client connected");
     } else {
       this.logger.warn(
-        'REDIS_URL is not configured. Running in MVP mode with in-memory cache. ' +
-          'For production, configure REDIS_URL to enable shared caching and rate limiting.',
+        "REDIS_URL is not configured. Running in MVP mode with in-memory cache. " +
+          "For production, configure REDIS_URL to enable shared caching and rate limiting.",
       );
     }
   }
@@ -46,7 +49,11 @@ export class RedisService {
     return item.value;
   }
 
-  async setValue(key: string, value: string, ttlSeconds?: number): Promise<void> {
+  async setValue(
+    key: string,
+    value: string,
+    ttlSeconds?: number,
+  ): Promise<void> {
     if (this.client) {
       if (ttlSeconds) {
         await this.client.setex(key, ttlSeconds, value);
@@ -56,7 +63,9 @@ export class RedisService {
       return;
     }
     // MVP fallback: in-memory cache with TTL
-    const expiresAt = ttlSeconds ? Date.now() + ttlSeconds * 1000 : Number.MAX_SAFE_INTEGER;
+    const expiresAt = ttlSeconds
+      ? Date.now() + ttlSeconds * 1000
+      : Number.MAX_SAFE_INTEGER;
     this.memoryCache.set(key, { value, expiresAt });
   }
 

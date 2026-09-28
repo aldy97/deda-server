@@ -1,6 +1,6 @@
-import { Injectable, ForbiddenException } from '@nestjs/common';
-import { PrismaService } from '@/common/prisma/prisma.service';
-import { UpsertChildProfileDto } from './dto/upsert-child-profile.dto';
+import { Injectable, ForbiddenException } from "@nestjs/common";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import { UpsertChildProfileDto } from "./dto/upsert-child-profile.dto";
 
 @Injectable()
 export class ChildProfilesService {
@@ -59,7 +59,7 @@ export class ChildProfilesService {
     });
 
     if (!binding) {
-      throw new ForbiddenException('Device not bound to current user');
+      throw new ForbiddenException("Device not bound to current user");
     }
 
     return binding;

@@ -1,9 +1,9 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { VendorController } from './vendor.controller';
-import { VendorService } from './vendor.service';
-import { VendorTextInDto } from './dto/vendor-text-in.dto';
+import { Test, TestingModule } from "@nestjs/testing";
+import { VendorController } from "./vendor.controller";
+import { VendorService } from "./vendor.service";
+import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 
-describe('VendorController', () => {
+describe("VendorController", () => {
   let controller: VendorController;
   let vendorService: jest.Mocked<VendorService>;
 
@@ -28,24 +28,24 @@ describe('VendorController', () => {
     vendorService = module.get(VendorService);
   });
 
-  it('should be defined', () => {
+  it("should be defined", () => {
     expect(controller).toBeDefined();
   });
 
-  describe('POST /vendor/text', () => {
-    it('should simulate vendor:text:in and return vendor:text:out structure', async () => {
+  describe("POST /vendor/text", () => {
+    it("should simulate vendor:text:in and return vendor:text:out structure", async () => {
       const dto: VendorTextInDto = {
-        deviceId: 'dev-001',
-        asrText: 'Hello',
-        textbookId: 'sample-textbook',
-        unitId: 'unit-1',
+        deviceId: "dev-001",
+        asrText: "Hello",
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
       };
       const reply = {
-        deviceId: 'dev-001',
-        responseText: 'Hi there!',
+        deviceId: "dev-001",
+        responseText: "Hi there!",
         context: {
-          textbookId: 'sample-textbook',
-          unitId: 'unit-1',
+          textbookId: "sample-textbook",
+          unitId: "unit-1",
           ragFound: true,
         },
         ttsOptions: {},
@@ -60,10 +60,10 @@ describe('VendorController', () => {
     });
   });
 
-  describe('POST /vendor/health', () => {
-    it('should return health status', () => {
+  describe("POST /vendor/health", () => {
+    it("should return health status", () => {
       const health = {
-        status: 'up',
+        status: "up",
         timestamp: Date.now(),
         expectedRecovery: null,
       };

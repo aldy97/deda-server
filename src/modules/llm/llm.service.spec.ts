@@ -20,7 +20,7 @@ describe("LlmService", () => {
               const map: Record<string, string> = {
                 OPENAI_BASE_URL: "https://api.deepseek.com/v1",
                 OPENAI_API_KEY: "sk-test",
-                OPENAI_MODEL: "deepseek-chat",
+                OPENAI_MODEL: "deepseek-flash",
                 LLM_TIMEOUT_MS: "30000",
               };
               return map[key];
@@ -76,13 +76,14 @@ describe("LlmService", () => {
       expect(mockedAxios.post).toHaveBeenCalledWith(
         "https://api.deepseek.com/v1/chat/completions",
         expect.objectContaining({
-          model: "deepseek-chat",
+          model: "deepseek-flash",
           messages: [
             { role: "system", content: "You are a tutor." },
             { role: "user", content: "How are you?" },
           ],
           temperature: 0.7,
           max_tokens: 512,
+          thinking: { type: "disabled" },
         }),
         expect.objectContaining({
           headers: expect.objectContaining({

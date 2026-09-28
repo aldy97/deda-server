@@ -1,9 +1,9 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { VendorGateway } from './vendor.gateway';
-import { VendorService } from './vendor.service';
-import { VendorTextInDto } from './dto/vendor-text-in.dto';
+import { Test, TestingModule } from "@nestjs/testing";
+import { VendorGateway } from "./vendor.gateway";
+import { VendorService } from "./vendor.service";
+import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 
-describe('VendorGateway', () => {
+describe("VendorGateway", () => {
   let gateway: VendorGateway;
   let vendorService: jest.Mocked<VendorService>;
 
@@ -14,7 +14,7 @@ describe('VendorGateway', () => {
     to: mockTo,
   } as any;
 
-  const createMockClient = (id = 'socket-001') =>
+  const createMockClient = (id = "socket-001") =>
     ({
       id,
       emit: jest.fn(),
@@ -50,31 +50,31 @@ describe('VendorGateway', () => {
     gateway.server = mockServer;
   });
 
-  it('should be defined', () => {
+  it("should be defined", () => {
     expect(gateway).toBeDefined();
   });
 
-  describe('handleConnection', () => {
-    it('should accept a vendor client connection', () => {
-      const client = createMockClient('socket-001');
+  describe("handleConnection", () => {
+    it("should accept a vendor client connection", () => {
+      const client = createMockClient("socket-001");
       gateway.handleConnection(client);
-      expect(gateway['deviceSocketMap'].has('socket-001')).toBe(false);
+      expect(gateway["deviceSocketMap"].has("socket-001")).toBe(false);
     });
   });
 
-  describe('handleDisconnect', () => {
-    it('should clean up device mapping on disconnect', () => {
-      const client = createMockClient('socket-002');
-      gateway['deviceSocketMap'].set('dev-002', 'socket-002');
+  describe("handleDisconnect", () => {
+    it("should clean up device mapping on disconnect", () => {
+      const client = createMockClient("socket-002");
+      gateway["deviceSocketMap"].set("dev-002", "socket-002");
 
       gateway.handleDisconnect(client);
 
-      expect(gateway['deviceSocketMap'].has('dev-002')).toBe(false);
+      expect(gateway["deviceSocketMap"].has("dev-002")).toBe(false);
     });
   });
 
-  describe('handlePing', () => {
-    it('should reply vendor:pong with timestamp', () => {
+  describe("handlePing", () => {
+    it("should reply vendor:pong with timestamp", () => {
       const client = createMockClient();
       const before = Date.now();
 
@@ -83,7 +83,7 @@ describe('VendorGateway', () => {
       const after = Date.now();
       expect(client.emit).toHaveBeenCalledTimes(1);
       expect(client.emit).toHaveBeenCalledWith(
-        'vendor:pong',
+        "vendor:pong",
         expect.objectContaining({
           timestamp: expect.any(Number),
         }),
@@ -95,16 +95,16 @@ describe('VendorGateway', () => {
     });
   });
 
-  describe('handleTextIn', () => {
-    it('should process text and emit vendor:text:out to the same client', async () => {
-      const client = createMockClient('socket-003');
+  describe("handleTextIn", () => {
+    it("should process text and emit vendor:text:out to the same client", async () => {
+      const client = createMockClient("socket-003");
       const dto: VendorTextInDto = {
-        deviceId: 'dev-003',
-        asrText: '你好',
+        deviceId: "dev-003",
+        asrText: "你好",
       };
       const reply = {
-        deviceId: 'dev-003',
-        responseText: '收到：你好',
+        deviceId: "dev-003",
+        responseText: "收到：你好",
         context: {},
         ttsOptions: {},
       };
@@ -114,43 +114,43 @@ describe('VendorGateway', () => {
       const result = await gateway.handleTextIn(client, dto);
 
       expect(vendorService.handleTextIn).toHaveBeenCalledWith(dto);
-      expect(client.emit).toHaveBeenCalledWith('vendor:text:out', reply);
+      expect(client.emit).toHaveBeenCalledWith("vendor:text:out", reply);
       expect(result).toEqual(reply);
-      expect(gateway['deviceSocketMap'].get('dev-003')).toBe('socket-003');
+      expect(gateway["deviceSocketMap"].get("dev-003")).toBe("socket-003");
     });
 
-    it('should emit vendor:error when service throws', async () => {
-      const client = createMockClient('socket-004');
+    it("should emit vendor:error when service throws", async () => {
+      const client = createMockClient("socket-004");
       const dto: VendorTextInDto = {
-        deviceId: 'dev-004',
-        asrText: '你好',
+        deviceId: "dev-004",
+        asrText: "你好",
       };
 
-      vendorService.handleTextIn.mockRejectedValue(new Error('LLM timeout'));
+      vendorService.handleTextIn.mockRejectedValue(new Error("LLM timeout"));
 
       const result = await gateway.handleTextIn(client, dto);
 
       expect(client.emit).toHaveBeenCalledWith(
-        'vendor:error',
+        "vendor:error",
         expect.objectContaining({
-          event: 'vendor:text:in',
-          message: 'LLM timeout',
+          event: "vendor:text:in",
+          message: "LLM timeout",
         }),
       );
       expect(result).toBeNull();
     });
 
-    it('should emit vendor:error for invalid payload', async () => {
-      const client = createMockClient('socket-005');
-      const invalidPayload = { deviceId: '', asrText: '' } as VendorTextInDto;
+    it("should emit vendor:error for invalid payload", async () => {
+      const client = createMockClient("socket-005");
+      const invalidPayload = { deviceId: "", asrText: "" } as VendorTextInDto;
 
       const result = await gateway.handleTextIn(client, invalidPayload);
 
       expect(client.emit).toHaveBeenCalledWith(
-        'vendor:error',
+        "vendor:error",
         expect.objectContaining({
-          event: 'vendor:text:in',
-          message: expect.stringContaining('deviceId'),
+          event: "vendor:text:in",
+          message: expect.stringContaining("deviceId"),
         }),
       );
       expect(vendorService.handleTextIn).not.toHaveBeenCalled();

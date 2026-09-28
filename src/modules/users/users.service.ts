@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
-import axios from 'axios';
-import { PrismaService } from '@/common/prisma/prisma.service';
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { JwtService } from "@nestjs/jwt";
+import axios from "axios";
+import { PrismaService } from "@/common/prisma/prisma.service";
 
 export interface WechatLoginDto {
   code: string;
@@ -34,22 +34,22 @@ export class UsersService {
    * 3. 创建或更新用户，签发 JWT
    */
   async wechatLogin(dto: WechatLoginDto): Promise<WechatLoginResult> {
-    const appid = this.configService.get<string>('WECHAT_APPID') || '';
-    const secret = this.configService.get<string>('WECHAT_SECRET') || '';
+    const appid = this.configService.get<string>("WECHAT_APPID") || "";
+    const secret = this.configService.get<string>("WECHAT_SECRET") || "";
 
     let openid: string;
 
-    if (appid && secret && !secret.includes('dev-') && secret.length >= 16) {
+    if (appid && secret && !secret.includes("dev-") && secret.length >= 16) {
       // 真实微信登录
       try {
         const res = await axios.get(
-          'https://api.weixin.qq.com/sns/jscode2session',
+          "https://api.weixin.qq.com/sns/jscode2session",
           {
             params: {
               appid,
               secret,
               js_code: dto.code,
-              grant_type: 'authorization_code',
+              grant_type: "authorization_code",
             },
             timeout: 10000,
           },
@@ -62,15 +62,15 @@ export class UsersService {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.error(`WeChat jscode2session failed: ${message}`);
-        throw new Error('WeChat login failed');
+        throw new Error("WeChat login failed");
       }
     } else {
       // 开发环境模拟微信 jscode2session：同一开发者工具用户返回同一 openid
       // 注意：这不是生产微信登录，仅用于本地联调时保持用户-设备关系稳定
       this.logger.warn(
-        'WECHAT_APPID/SECRET not configured, simulating WeChat jscode2session with stable openid',
+        "WECHAT_APPID/SECRET not configured, simulating WeChat jscode2session with stable openid",
       );
-      openid = 'dev-openid-stable';
+      openid = "dev-openid-stable";
     }
 
     const user = await this.prisma.user.upsert({
@@ -93,7 +93,7 @@ export class UsersService {
 
   async bindPhone(dto: any) {
     // TODO: 解密微信手机号并绑定
-    return { phone: 'mock-phone' };
+    return { phone: "mock-phone" };
   }
 
   async getProfile(userId: string) {

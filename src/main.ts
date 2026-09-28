@@ -1,11 +1,11 @@
-import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { Logger } from 'nestjs-pino';
-import { AppModule } from './app.module';
-import { ResponseInterceptor } from './common/interceptors/response.interceptor';
-import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { NestFactory } from "@nestjs/core";
+import { ValidationPipe } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
+import { Logger } from "nestjs-pino";
+import { AppModule } from "./app.module";
+import { ResponseInterceptor } from "./common/interceptors/response.interceptor";
+import { HttpExceptionFilter } from "./common/filters/http-exception.filter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
@@ -14,9 +14,9 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
 
   // CORS：本地开发允许小程序跨域请求
-  const corsOrigin = configService.get<string>('CORS_ORIGIN');
+  const corsOrigin = configService.get<string>("CORS_ORIGIN");
   app.enableCors({
-    origin: corsOrigin === '*' ? true : corsOrigin || true,
+    origin: corsOrigin === "*" ? true : corsOrigin || true,
     credentials: true,
   });
 
@@ -37,15 +37,15 @@ async function bootstrap() {
 
   // Swagger API 文档
   const config = new DocumentBuilder()
-    .setTitle('Deda Server API')
-    .setDescription('Deda 微信小程序后端服务接口文档')
-    .setVersion('0.0.1')
+    .setTitle("Deda Server API")
+    .setDescription("Deda 微信小程序后端服务接口文档")
+    .setVersion("0.0.1")
     .addBearerAuth()
     .build();
   const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document);
+  SwaggerModule.setup("api/docs", app, document);
 
-  const port = configService.get<number>('app.port', 3000);
+  const port = configService.get<number>("app.port", 3000);
 
   await app.listen(port);
   console.log(`Application is running on: http://localhost:${port}`);
