@@ -155,13 +155,23 @@ export class VendorService {
   /**
    * 获取同一设备、同一教材、同一单元的最近消息历史
    * 用于 prompt 拼接，保证多轮对话上下文连续且单元边界隔离
+   *
+   * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
+   * 边界结构化存 rawPayload { filler, answer }。
+   * - 大模型历史只取 answer 部分，filler 话术不进上下文
+   *   （避免大模型学着重复寒暄，与 prompt 规则 12 对齐）；
+   * - 无边界信息的旧 assistant 行整条跳过（用户决策：不做 backfill、不回落全文）；
+   * - recentFillers 返回最近 5 轮 filler 原文（时间正序），供小模型禁用清单。
    */
   private async getRecentHistory(
     deviceInternalId: string,
     textbookId: string,
     unitId: string,
     limit = 12, // 消息条数，约 6 轮问答
-  ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+  ): Promise<{
+    history: Array<{ role: "user" | "assistant"; content: string }>;
+    recentFillers: string[];
+  }> {
     const rows = await this.prisma.message.findMany({
       where: {
         deviceId: deviceInternalId,
@@ -170,14 +180,32 @@ export class VendorService {
       },
       orderBy: { spokeAt: "desc" },
       take: limit,
-      select: { role: true, content: true },
+      select: { role: true, content: true, rawPayload: true },
     });
 
     // 按时间正序排列，旧 → 新
-    return rows.reverse().map((row) => ({
-      role: row.role === "user" ? ("user" as const) : ("assistant" as const),
-      content: row.content,
-    }));
+    const chronological = rows.reverse();
+
+    const history: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const fillers: string[] = [];
+    for (const row of chronological) {
+      if (row.role === "user") {
+        history.push({ role: "user", content: row.content });
+        continue;
+      }
+      // assistant 行：无边界信息的旧行跳过
+      const answer = LlmService.extractAnswer(row.content, row.rawPayload);
+      if (answer === null) {
+        continue;
+      }
+      history.push({ role: "assistant", content: answer });
+      const filler = (row.rawPayload as { filler?: unknown } | null)?.filler;
+      if (typeof filler === "string" && filler.length > 0) {
+        fillers.push(filler);
+      }
+    }
+
+    return { history, recentFillers: fillers.slice(-5) };
   }
 
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
@@ -205,7 +233,11 @@ export class VendorService {
 
     // 获取同单元最近消息历史，用于 prompt 拼接
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt
-    const history = await this.getRecentHistory(device.id, textbookId, unitId);
+    const { history, recentFillers } = await this.getRecentHistory(
+      device.id,
+      textbookId,
+      unitId,
+    );
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
     const turnId = randomUUID();
@@ -264,6 +296,9 @@ export class VendorService {
 
     let responseText: string;
     let llmFailed = false;
+    // 落库边界（方案 3）：rawPayload { filler, answer }；非流式路径 filler=null
+    let filler: string | null = null;
+    let answer = "";
     if (streamEnabled) {
       const messages = this.llmService.buildEnglishTutorPrompt(
         dto.asrText,
@@ -272,11 +307,8 @@ export class VendorService {
         history,
         promptOptions,
       );
-      ({ responseText, llmFailed } = await this.generateStreamReply(
-        dto,
-        turnId,
-        messages,
-      ));
+      ({ responseText, llmFailed, filler, answer } =
+        await this.generateStreamReply(dto, turnId, messages, recentFillers));
     } else {
       try {
         const messages = this.llmService.buildEnglishTutorPrompt(
@@ -296,6 +328,7 @@ export class VendorService {
         );
         responseText = "Sorry, I didn't catch that. Could you say it again?";
       }
+      answer = responseText;
     }
 
     const reply: VendorTextOutDto = {
@@ -339,6 +372,9 @@ export class VendorService {
           unitId: stampUnitId,
           mode,
           conversationModeKey: activeConfig?.conversationModeKey ?? null,
+          // 边界标注（方案 3）：content 保持播报全文纯净，
+          // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
+          rawPayload: { filler, answer },
           spokeAt: new Date(),
         },
       });
@@ -376,7 +412,13 @@ export class VendorService {
     dto: VendorTextInDto,
     turnId: string,
     messages: LlmMessage[],
-  ): Promise<{ responseText: string; llmFailed: boolean }> {
+    recentFillers: string[] = [],
+  ): Promise<{
+    responseText: string;
+    llmFailed: boolean;
+    filler: string | null;
+    answer: string;
+  }> {
     let seq = 0;
     const emit = async (
       source: "filler" | "answer",
@@ -424,7 +466,7 @@ export class VendorService {
     let fillerText = "";
     try {
       const fillerStream = this.llmService.completeStream({
-        messages: this.llmService.buildFillerPrompt(dto.asrText),
+        messages: this.llmService.buildFillerPrompt(dto.asrText, recentFillers),
         model: this.llmService.smallModelName,
         maxTokens: 60,
       });
@@ -500,7 +542,12 @@ export class VendorService {
       ? `${fillerText}\n${answerText}`
       : answerText;
 
-    return { responseText, llmFailed };
+    return {
+      responseText,
+      llmFailed,
+      filler: fillerText || null,
+      answer: answerText,
+    };
   }
 
   async handleStatusReport(dto: VendorStatusDto) {

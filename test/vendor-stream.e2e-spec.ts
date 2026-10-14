@@ -309,6 +309,11 @@ describe("Vendor streaming pipeline (e2e)", () => {
     expect(assistantCall[0].data.content).toBe(
       "原来你喜欢上海呀\nI like Shanghai.",
     );
+    // 边界标注（方案 3）：rawPayload 结构化存 filler/answer
+    expect(assistantCall[0].data.rawPayload).toEqual({
+      filler: "原来你喜欢上海呀",
+      answer: "I like Shanghai.",
+    });
 
     // 入站兼容应答为播报全文
     expect(inboundReply.responseText).toBe(

@@ -972,6 +972,11 @@ describe("VendorService", () => {
         (call) => call[0].data.role === "assistant",
       );
       expect(assistantCall[0].data.content).toBe("Hi there!");
+      // 边界照常入库：filler 缺失记 null
+      expect(assistantCall[0].data.rawPayload).toEqual({
+        filler: null,
+        answer: "Hi there!",
+      });
     });
 
     it("should fall back to default reply when big model stream fails", async () => {
@@ -1031,6 +1036,118 @@ describe("VendorService", () => {
       expect(llmService.complete).toHaveBeenCalled();
       expect(llmService.completeStream).not.toHaveBeenCalled();
       expect(result.responseText).toBe("Hi!");
+    });
+  });
+
+  describe("history boundary & filler diversity", () => {
+    const setupBase = () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h1",
+        deviceId: "dev-h1",
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "locked_unit",
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
+        conversationModeKey: null,
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.textbook.findUnique.mockResolvedValue({
+        id: "book-uuid",
+        textbookId: "sample-textbook",
+        promptTemplate: null,
+      } as any);
+      prisma.unit.findUnique.mockResolvedValue({
+        id: "unit-uuid",
+        unitId: "unit-1",
+      } as any);
+      prisma.message.create.mockResolvedValue({ id: "conv-h1" } as any);
+      ragService.retrieve.mockResolvedValue({
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
+        unitName: "Greetings",
+        content: "Hello!",
+        found: true,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "hi" },
+      ] as any);
+    };
+
+    it("should strip fillers from history and skip legacy assistant rows", async () => {
+      setupBase();
+      // findMany 按 spokeAt desc 返回，service 内 reverse 成正序
+      prisma.message.findMany.mockResolvedValue([
+        { role: "user", content: "u2", rawPayload: null },
+        {
+          role: "assistant",
+          content: "嗯2\na2",
+          rawPayload: { filler: "嗯2", answer: "a2" },
+        },
+        { role: "assistant", content: "legacy-full", rawPayload: null },
+        { role: "user", content: "u1", rawPayload: null },
+      ] as any);
+      mockAnswerStream("ok");
+
+      await service.handleTextIn({ deviceId: "dev-h1", asrText: "hi" });
+
+      // 大模型历史：只含 answer，filler 被剥离；无边界信息的旧 assistant 行整条跳过
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "hi",
+        "Hello!",
+        "Greetings",
+        [
+          { role: "user", content: "u1" },
+          { role: "assistant", content: "a2" },
+          { role: "user", content: "u2" },
+        ],
+        expect.anything(),
+      );
+      // 近期 filler 清单只收集有边界的行
+      expect(llmService.buildFillerPrompt).toHaveBeenCalledWith("hi", ["嗯2"]);
+    });
+
+    it("should pass only the last 5 recent fillers in chronological order", async () => {
+      setupBase();
+      // 6 条带边界的 assistant 行（desc：f6 最新 … f1 最旧）
+      prisma.message.findMany.mockResolvedValue(
+        [6, 5, 4, 3, 2, 1].map((n) => ({
+          role: "assistant",
+          content: `f${n}\na${n}`,
+          rawPayload: { filler: `f${n}`, answer: `a${n}` },
+        })) as any,
+      );
+      mockAnswerStream("ok");
+
+      await service.handleTextIn({ deviceId: "dev-h1", asrText: "hi" });
+
+      // 只取最近 5 轮，且按时间正序（旧 → 新）
+      expect(llmService.buildFillerPrompt).toHaveBeenCalledWith("hi", [
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+      ]);
+    });
+
+    it("should persist filler/answer boundary into assistant rawPayload", async () => {
+      setupBase();
+      prisma.message.findMany.mockResolvedValue([]);
+      mockAnswerStream("Hello! I'm fine.");
+
+      await service.handleTextIn({ deviceId: "dev-h1", asrText: "hi" });
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      // content 仍为播报全文（观感不变），边界结构化存入 rawPayload
+      expect(assistantCall[0].data.content).toBe("嗯\nHello! I'm fine.");
+      expect(assistantCall[0].data.rawPayload).toEqual({
+        filler: "嗯",
+        answer: "Hello! I'm fine.",
+      });
     });
   });
 

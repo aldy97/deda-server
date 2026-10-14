@@ -296,5 +296,10 @@ describe("Vendor streaming pipeline (live LLM)", () => {
     );
     expect(assistantCall).toBeDefined();
     expect(assistantCall[0].data.content).toBe(`${fillerText}\n${answerText}`);
+    // 边界标注（方案 3）：rawPayload 结构化存 filler/answer
+    expect(assistantCall[0].data.rawPayload).toEqual({
+      filler: fillerText,
+      answer: answerText,
+    });
   }, 30000);
 });

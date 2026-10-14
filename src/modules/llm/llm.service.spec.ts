@@ -560,5 +560,54 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain("at least 10 characters");
       expect(messages[0].content).toContain("at least 6 words");
     });
+
+    it("should list recent fillers as banned openers when provided", () => {
+      const messages = service.buildFillerPrompt("我喜欢上海的天气", [
+        "原来你喜欢上海的天气呀",
+        "Wow, that sounds fun!",
+      ]);
+
+      // 跨轮次多样性：最近用过的 filler 原文进入禁用清单
+      expect(messages[0].content).toContain("do NOT reuse");
+      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
+      expect(messages[0].content).toContain("Wow, that sounds fun!");
+      // 用户输入仍在 user 消息，不被历史污染
+      expect(messages).toHaveLength(2);
+      expect(messages[1].content).toBe("我喜欢上海的天气");
+    });
+
+    it("should not add a banned-openers section when recent fillers are absent", () => {
+      // 首轮对话 / 旧数据无 filler：prompt 保持原样（向后兼容）
+      for (const recent of [undefined, [] as string[]]) {
+        const messages = service.buildFillerPrompt("Hello", recent);
+        expect(messages[0].content).not.toContain("do NOT reuse");
+      }
+    });
+  });
+
+  describe("extractAnswer", () => {
+    it("should return the answer from rawPayload boundary info", () => {
+      const rawPayload = {
+        filler: "原来你喜欢上海呀",
+        answer: "I like Shanghai.",
+      };
+
+      expect(
+        LlmService.extractAnswer(
+          "原来你喜欢上海呀\nI like Shanghai.",
+          rawPayload,
+        ),
+      ).toBe("I like Shanghai.");
+    });
+
+    it("should return null when rawPayload has no boundary info (legacy row)", () => {
+      // 旧行无边界信息：返回 null，由调用方决定跳过（不进大模型历史）
+      expect(LlmService.extractAnswer("I like Shanghai.", null)).toBeNull();
+      expect(LlmService.extractAnswer("I like Shanghai.", {})).toBeNull();
+      expect(
+        LlmService.extractAnswer("I like Shanghai.", { filler: "嗯" }),
+      ).toBeNull();
+      expect(LlmService.extractAnswer("x", { answer: 123 })).toBeNull();
+    });
   });
 });

@@ -224,8 +224,10 @@ export class LlmService {
    * 业内 filler 写法要点：明确角色定位（只为正式回答争取时间）、
    * 语言跟随用户、极短、禁止实质回答、措辞多样化，并给 few-shot 示例。
    * 不带教材上下文与历史，避免小模型展开真正回答。
+   * @param recentFillers 最近若干轮本方用过的 filler 原文，
+   * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
    */
-  buildFillerPrompt(asrText: string): LlmMessage[] {
+  buildFillerPrompt(asrText: string, recentFillers?: string[]): LlmMessage[] {
     const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
 
 Rules:
@@ -243,10 +245,27 @@ Child: Why is the sky blue? → That is such a fun question!
 Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
 Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
 
+    const bannedSection =
+      recentFillers && recentFillers.length > 0
+        ? `\n\nRecently used openers (do NOT reuse or closely imitate any of them):\n${recentFillers
+            .map((filler) => `- "${filler}"`)
+            .join("\n")}`
+        : "";
+
     return [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: systemPrompt + bannedSection },
       { role: "user", content: asrText },
     ];
+  }
+
+  /**
+   * 从落库 assistant 行解析大模型 answer（边界标注方案 3）
+   * rawPayload.answer 为唯一权威来源；无边界信息的旧行返回 null，
+   * 由调用方决定跳过（旧行不进大模型历史上下文）。
+   */
+  static extractAnswer(_content: string, rawPayload: unknown): string | null {
+    const answer = (rawPayload as { answer?: unknown } | null)?.answer;
+    return typeof answer === "string" && answer.length > 0 ? answer : null;
   }
 
   /**
