@@ -1,10 +1,12 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { VendorService } from "./vendor.service";
+import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RagService } from "@/modules/rag/rag.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
+import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
 import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
@@ -14,6 +16,44 @@ describe("VendorService", () => {
   let prisma: any;
   let ragService: jest.Mocked<RagService>;
   let llmService: jest.Mocked<LlmService>;
+  let configService: jest.Mocked<ConfigService>;
+  let replyUploader: { sendChunk: jest.Mock; sendFullReply: jest.Mock };
+
+  async function* streamOf(
+    deltas: string[],
+    opts?: { initialDelayMs?: number },
+  ): AsyncGenerator<string> {
+    if (opts?.initialDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, opts.initialDelayMs));
+    }
+    for (const delta of deltas) {
+      yield delta;
+    }
+  }
+
+  async function* failingStreamOf(error: Error): AsyncGenerator<string> {
+    throw error;
+  }
+
+  /** 小模型固定产出「嗯」，大模型产出指定答案全文 */
+  const mockAnswerStream = (answerText: string) => {
+    llmService.completeStream.mockImplementation((options: any) =>
+      options.model === "small-llm" ? streamOf(["嗯"]) : streamOf([answerText]),
+    );
+  };
+
+  /** 小模型正常，大模型流失败 */
+  const mockAnswerFailure = (error: Error) => {
+    llmService.completeStream.mockImplementation((options: any) =>
+      options.model === "small-llm" ? streamOf(["嗯"]) : failingStreamOf(error),
+    );
+  };
+
+  /** 本轮经出站 WS 上传的全部 chunk（按调用顺序） */
+  const uploadedChunks = (): VendorTextChunkDto[] =>
+    replyUploader.sendChunk.mock.calls.map(
+      (call) => call[0] as VendorTextChunkDto,
+    );
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -71,6 +111,21 @@ describe("VendorService", () => {
           useValue: {
             buildEnglishTutorPrompt: jest.fn(),
             complete: jest.fn(),
+            buildFillerPrompt: jest.fn().mockReturnValue([
+              { role: "system", content: "filler prompt" },
+              { role: "user", content: "placeholder" },
+            ]),
+            completeStream: jest.fn(),
+            get smallModelName() {
+              return "small-llm";
+            },
+          },
+        },
+        {
+          provide: VendorReplyUploader,
+          useValue: {
+            sendChunk: jest.fn(),
+            sendFullReply: jest.fn(),
           },
         },
       ],
@@ -80,6 +135,11 @@ describe("VendorService", () => {
     prisma = module.get(PrismaService);
     ragService = module.get(RagService);
     llmService = module.get(LlmService);
+    configService = module.get(ConfigService);
+    replyUploader = module.get(VendorReplyUploader) as any;
+
+    replyUploader.sendChunk.mockResolvedValue(undefined);
+    replyUploader.sendFullReply.mockResolvedValue(undefined);
   });
 
   it("should be defined", () => {
@@ -127,10 +187,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "你好" },
       ] as any);
-      llmService.complete.mockResolvedValue({
-        text: "Hello! I'm fine, thank you.",
-        usage: { totalTokens: 50 },
-      });
+      mockAnswerStream("Hello! I'm fine, thank you.");
 
       const result = await service.handleTextIn(dto);
 
@@ -153,7 +210,7 @@ describe("VendorService", () => {
         "unit-1",
         "你好",
       );
-      expect(llmService.complete).toHaveBeenCalled();
+      expect(llmService.completeStream).toHaveBeenCalled();
 
       // 细颗粒度：user 消息先于 LLM 调用落库,assistant 消息后补
       expect(prisma.message.create).toHaveBeenCalledTimes(2);
@@ -169,11 +226,12 @@ describe("VendorService", () => {
           unitId: "unit-1",
         }),
       );
+      // 落库为用户实际播报全文：小模型 filler + 大模型答案
       expect(assistantCall[0].data).toEqual(
         expect.objectContaining({
           deviceId: "uuid-001",
           role: "assistant",
-          content: "Hello! I'm fine, thank you.",
+          content: "嗯\nHello! I'm fine, thank you.",
           turnId: userCall[0].data.turnId,
           status: "completed",
           textbookId: "sample-textbook",
@@ -182,11 +240,11 @@ describe("VendorService", () => {
       );
       // user 消息必须在 LLM 调用之前写入
       const userWriteOrder = prisma.message.create.mock.invocationCallOrder[0];
-      const llmOrder = llmService.complete.mock.invocationCallOrder[0];
+      const llmOrder = llmService.completeStream.mock.invocationCallOrder[0];
       expect(userWriteOrder).toBeLessThan(llmOrder);
       expect(result).toEqual({
         deviceId: "dev-001",
-        responseText: "Hello! I'm fine, thank you.",
+        responseText: "嗯\nHello! I'm fine, thank you.",
         context: {
           textbookId: "sample-textbook",
           unitId: "unit-1",
@@ -195,6 +253,17 @@ describe("VendorService", () => {
         },
         ttsOptions: {},
       });
+
+      // 全量回复在全部 chunk 之后上传
+      expect(replyUploader.sendFullReply).toHaveBeenCalledTimes(1);
+      expect(replyUploader.sendFullReply).toHaveBeenCalledWith(result);
+      const lastChunkOrder =
+        replyUploader.sendChunk.mock.invocationCallOrder[
+          replyUploader.sendChunk.mock.invocationCallOrder.length - 1
+        ];
+      expect(
+        replyUploader.sendFullReply.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(lastChunkOrder);
     });
 
     it("should use payload textbookId/unitId when provided", async () => {
@@ -222,7 +291,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "What color is it?" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "It's red." });
+      mockAnswerStream("It's red.");
 
       const result = await service.handleTextIn(dto);
 
@@ -237,6 +306,7 @@ describe("VendorService", () => {
         unitName: "Colors",
         ragFound: true,
       });
+      expect(result.responseText).toBe("嗯\nIt's red.");
     });
 
     it("should return fallback reply when LLM fails", async () => {
@@ -277,12 +347,13 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockRejectedValue(new Error("LLM timeout"));
+      mockAnswerFailure(new Error("LLM timeout"));
 
       const result = await service.handleTextIn(dto);
 
+      // 大模型失败：播报全文 = filler + 兜底文案
       expect(result.responseText).toBe(
-        "Sorry, I didn't catch that. Could you say it again?",
+        "嗯\nSorry, I didn't catch that. Could you say it again?",
       );
       expect(result.context).toEqual({
         textbookId: "sample-textbook",
@@ -332,13 +403,13 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi there!" });
+      mockAnswerStream("Hi there!");
 
       const result = await service.handleTextIn(dto);
 
       expect(prisma.device.create).not.toHaveBeenCalled();
       expect(result.deviceId).toBe("dev-abc-123");
-      expect(result.responseText).toBe("Hi there!");
+      expect(result.responseText).toBe("嗯\nHi there!");
     });
 
     it("should pass child profile and textbook prompt template to prompt builder", async () => {
@@ -382,7 +453,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi Alice!" });
+      mockAnswerStream("Hi Alice!");
 
       await service.handleTextIn(dto);
 
@@ -437,7 +508,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hi" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hey there!" });
+      mockAnswerStream("Hey there!");
 
       await service.handleTextIn(dto);
 
@@ -493,7 +564,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi!" });
+      mockAnswerStream("Hi!");
 
       await service.handleTextIn(dto);
 
@@ -545,7 +616,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi!" });
+      mockAnswerStream("Hi!");
 
       await service.handleTextIn(dto);
 
@@ -595,12 +666,12 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi!" });
+      mockAnswerStream("Hi!");
 
       const result = await service.handleTextIn(dto);
 
       expect(prisma.message.create).not.toHaveBeenCalled();
-      expect(result.responseText).toBe("Hi!");
+      expect(result.responseText).toBe("嗯\nHi!");
     });
 
     it("should not persist conversation when unit does not exist for locked_unit", async () => {
@@ -637,12 +708,12 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hello" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hi!" });
+      mockAnswerStream("Hi!");
 
       const result = await service.handleTextIn(dto);
 
       expect(prisma.message.create).not.toHaveBeenCalled();
-      expect(result.responseText).toBe("Hi!");
+      expect(result.responseText).toBe("嗯\nHi!");
     });
 
     it("should persist free_chat conversation without textbook/unit validation", async () => {
@@ -678,7 +749,7 @@ describe("VendorService", () => {
         { role: "system", content: "prompt" },
         { role: "user", content: "Hi" },
       ] as any);
-      llmService.complete.mockResolvedValue({ text: "Hey!" });
+      mockAnswerStream("Hey!");
 
       await service.handleTextIn(dto);
 
@@ -696,11 +767,12 @@ describe("VendorService", () => {
           conversationModeKey: "free_chat_casual",
         }),
       );
+      // assistant 落库 = 播报全文（filler + answer）
       expect(assistantCall[0].data).toEqual(
         expect.objectContaining({
           deviceId: "uuid-001",
           role: "assistant",
-          content: "Hey!",
+          content: "嗯\nHey!",
           status: "completed",
           mode: "free_chat",
           conversationModeKey: "free_chat_casual",
@@ -712,6 +784,253 @@ describe("VendorService", () => {
       expect(userCall[0].data.unitId).toBeNull();
       expect(assistantCall[0].data.textbookId).toBeNull();
       expect(assistantCall[0].data.unitId).toBeNull();
+    });
+  });
+
+  // TODO(可用性): 以下用例默认两个 LLM API 均可用且速度正常；小模型超时但
+  // 大模型正常、大模型流中途断开、小模型限流(429) 等可用性组合用例待补。
+  describe("handleTextIn streaming upload", () => {
+    const setupStreamingBase = () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-s1",
+        deviceId: "dev-s1",
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "locked_unit",
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
+        conversationModeKey: null,
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.textbook.findUnique.mockResolvedValue({
+        id: "book-uuid",
+        textbookId: "sample-textbook",
+        promptTemplate: null,
+      } as any);
+      prisma.unit.findUnique.mockResolvedValue({
+        id: "unit-uuid",
+        unitId: "unit-1",
+      } as any);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-s1" } as any);
+      ragService.retrieve.mockResolvedValue({
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
+        unitName: "Greetings",
+        content: "Hello!",
+        found: true,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "我喜欢上海的天气" },
+      ] as any);
+    };
+
+    it("should upload filler chunks before answer chunks with contiguous seq", async () => {
+      setupStreamingBase();
+      // 大模型立即完成、小模型延迟产出：大模型 chunk 必须先缓冲，不得抢跑
+      llmService.completeStream.mockImplementation((options: any) =>
+        options.model === "small-llm"
+          ? streamOf(["原来", "你喜欢上海呀"], { initialDelayMs: 10 })
+          : streamOf(["I ", "like ", "Shanghai."]),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "我喜欢上海的天气",
+      });
+
+      const chunks = uploadedChunks();
+      expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      expect(chunks[0]).toMatchObject({
+        deviceId: "dev-s1",
+        source: "filler",
+        delta: "原来",
+        isFinal: false,
+      });
+      expect(chunks[1]).toMatchObject({
+        source: "filler",
+        delta: "你喜欢上海呀",
+        isFinal: false,
+      });
+      expect(chunks[2]).toMatchObject({
+        source: "filler",
+        delta: "",
+        isFinal: true,
+      });
+      expect(chunks[3]).toMatchObject({
+        source: "answer",
+        delta: "I ",
+        isFinal: false,
+      });
+      expect(chunks[5]).toMatchObject({
+        source: "answer",
+        delta: "Shanghai.",
+        isFinal: false,
+      });
+      expect(chunks[6]).toMatchObject({
+        source: "answer",
+        delta: "",
+        isFinal: true,
+      });
+      // 全部 chunk 共享同一 turnId
+      expect(new Set(chunks.map((c) => c.turnId)).size).toBe(1);
+
+      // 小模型请求走 small-llm，大模型请求不带 model 覆盖
+      expect(llmService.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "small-llm" }),
+      );
+
+      // 返回值与落库均为用户实际播报全文：filler + 大模型答案
+      expect(result.responseText).toBe("原来你喜欢上海呀\nI like Shanghai.");
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.content).toBe(
+        "原来你喜欢上海呀\nI like Shanghai.",
+      );
+      expect(assistantCall[0].data.status).toBe("completed");
+    });
+
+    it("should await each chunk ack before uploading the next one", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockImplementation((options: any) =>
+        options.model === "small-llm" ? streamOf(["A", "B"]) : streamOf(["X"]),
+      );
+      const sentSeqs: number[] = [];
+      let resolveFirstAck: () => void = () => undefined;
+      replyUploader.sendChunk.mockImplementation(
+        (chunk: VendorTextChunkDto) => {
+          sentSeqs.push(chunk.seq);
+          if (chunk.seq === 0) {
+            return new Promise<void>((resolve) => {
+              resolveFirstAck = resolve;
+            });
+          }
+          return Promise.resolve();
+        },
+      );
+
+      const done = service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // 第一个 chunk 的 ack 未返回前，不得调用 WS 接口发送下一个
+      expect(sentSeqs).toEqual([0]);
+
+      resolveFirstAck();
+      await done;
+      expect(sentSeqs).toEqual([0, 1, 2, 3, 4]);
+    });
+
+    it("should continue uploading remaining chunks when one chunk upload fails", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockImplementation((options: any) =>
+        options.model === "small-llm"
+          ? streamOf(["嗯"])
+          : streamOf(["Hi ", "there!"]),
+      );
+      replyUploader.sendChunk.mockImplementation((chunk: VendorTextChunkDto) =>
+        chunk.source === "answer" && chunk.delta === "Hi "
+          ? Promise.reject(new Error("ws disconnected"))
+          : Promise.resolve(),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      const chunks = uploadedChunks();
+      expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3, 4]);
+      expect(result.responseText).toBe("嗯\nHi there!");
+      expect(replyUploader.sendFullReply).toHaveBeenCalledTimes(1);
+    });
+
+    it("should skip filler and upload answer when small model fails", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockImplementation((options: any) =>
+        options.model === "small-llm"
+          ? failingStreamOf(new Error("small model down"))
+          : streamOf(["Hi ", "there!"]),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      const chunks = uploadedChunks();
+      expect(chunks.every((c) => c.source === "answer")).toBe(true);
+      expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2]);
+      expect(chunks[2]).toMatchObject({ source: "answer", isFinal: true });
+      // 小模型失败：播报全文只含大模型答案
+      expect(result.responseText).toBe("Hi there!");
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.content).toBe("Hi there!");
+    });
+
+    it("should fall back to default reply when big model stream fails", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockImplementation((options: any) =>
+        options.model === "small-llm"
+          ? streamOf(["嗯哼"])
+          : failingStreamOf(new Error("boom")),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      const fallback = "Sorry, I didn't catch that. Could you say it again?";
+      // 播报全文 = filler + 兜底文案
+      expect(result.responseText).toBe(`嗯哼\n${fallback}`);
+      const chunks = uploadedChunks();
+      // filler 正常发出，随后兜底文案作为 answer chunk 对齐收尾
+      expect(chunks[0]).toMatchObject({ source: "filler", delta: "嗯哼" });
+      const answerChunks = chunks.filter((c) => c.source === "answer");
+      expect(answerChunks[0]).toMatchObject({
+        delta: fallback,
+        isFinal: false,
+      });
+      expect(answerChunks[answerChunks.length - 1]).toMatchObject({
+        isFinal: true,
+      });
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.content).toBe(`嗯哼\n${fallback}`);
+      expect(assistantCall[0].data.status).toBe("failed");
+    });
+
+    it("should fall back to non-streaming path when LLM_STREAM_ENABLED=false", async () => {
+      setupStreamingBase();
+      configService.get.mockImplementation((key: string) => {
+        const map: Record<string, string> = {
+          DEFAULT_TEXTBOOK_ID: "sample-textbook",
+          DEFAULT_UNIT_ID: "unit-1",
+          LLM_STREAM_ENABLED: "false",
+        };
+        return map[key];
+      });
+      llmService.complete.mockResolvedValue({ text: "Hi!" });
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      expect(replyUploader.sendChunk).not.toHaveBeenCalled();
+      expect(replyUploader.sendFullReply).not.toHaveBeenCalled();
+      expect(llmService.complete).toHaveBeenCalled();
+      expect(llmService.completeStream).not.toHaveBeenCalled();
+      expect(result.responseText).toBe("Hi!");
     });
   });
 

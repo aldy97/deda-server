@@ -73,6 +73,9 @@ describe("Vendor WebSocket (e2e)", () => {
   };
 
   beforeAll(async () => {
+    // 本套件锁定非流式（单模型）契约；流式全链路见 vendor-stream.e2e-spec.ts
+    process.env.LLM_STREAM_ENABLED = "false";
+
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
