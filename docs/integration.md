@@ -72,6 +72,34 @@
 
 前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts`、`pages/textbook-learning/textbook-learning.ts`、`pages/choose-textbook-unit/choose-textbook-unit.ts` 需保证按上表带齐必填字段、不带禁止字段，否则会被 400 拒绝。
 
+## 机芯厂 WS 流式协议（vendor namespace）
+
+语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端双模型流式生成 → **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
+
+**首响加速**：后端并行调用小模型（filler，打哈哈承接话题，如"原来你喜欢上海的天气呀"）与大模型（answer，正式回答）。两者均为 `stream: true`；filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
+
+**上传保序**：后端对每个 chunk 的发送等待机芯厂 WS ack 后再发下一个（`src/modules/vendor/vendor-reply.uploader.ts`），因此 WS 接口调用顺序与 `seq` 严格一致；单个 chunk 上传失败只记日志、不阻断本轮剩余回复。上传地址走 `VENDOR_WS_UPLOAD_URL`，未配置时不连真实云服务（内部编排照常运行，发送仅记 debug 日志）；鉴权接入时在 uploader 内补充。
+
+`vendor:text:chunk` 载荷：
+
+| 字段       | 类型                  | 说明                                          |
+| ---------- | --------------------- | --------------------------------------------- |
+| deviceId   | string                | 设备唯一标识                                  |
+| turnId     | string                | 本轮对话 ID，与同轮 `vendor:text:out` 一致     |
+| seq        | number                | 轮内全局递增序号，从 0 开始，filler/answer 共用 |
+| source     | "filler" \| "answer"  | filler=小模型首响；answer=大模型正式回答       |
+| delta      | string                | 增量文字；`isFinal=true` 时为空串             |
+| isFinal    | boolean               | 该来源是否结束；filler 结束后才开始发 answer  |
+
+约定：
+
+- 顺序保证：一轮内 `seq` 严格递增；所有 `source=filler` 的 chunk 先于所有 `source=answer` 的 chunk；filler 与 answer 各以一个 `isFinal=true` 的空 delta chunk 收尾；最后上传一次 `vendor:text:out` 全量兜底。
+- 小模型失败：跳过 filler 阶段，answer 从 `seq=0` 开始；大模型失败：answer 阶段发单条兜底文案 chunk。
+- 落库口径：对话记录只保存大模型 answer 全文，filler 话术不入库、不进多轮上下文。
+- 兼容：`LLM_STREAM_ENABLED=false` 时后端整体回落到非流式单模型路径，只经入站连接回 `vendor:text:out`。
+- 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
+- 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。

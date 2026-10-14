@@ -13,6 +13,11 @@ export interface LlmCompleteOptions {
   maxTokens?: number;
   timeoutMs?: number;
   thinking?: { type: "disabled" };
+  /**
+   * 覆盖默认模型（如小模型首响场景）。
+   * 不传则使用 OPENAI_MODEL。
+   */
+  model?: string;
 }
 
 export interface LlmCompleteResult {
@@ -35,6 +40,9 @@ export class LlmService {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly smallModel: string;
+  private readonly smallBaseUrl: string;
+  private readonly smallApiKey: string;
   private readonly defaultTimeoutMs: number;
 
   constructor(private readonly configService: ConfigService) {
@@ -44,8 +52,24 @@ export class LlmService {
     this.apiKey = this.configService.get<string>("OPENAI_API_KEY") || "";
     this.model =
       this.configService.get<string>("OPENAI_MODEL") || "deepseek-flash";
+    // 首响「打哈哈」小模型；未配置时回落到主模型
+    this.smallModel =
+      this.configService.get<string>("SMALL_LLM_MODEL") || this.model;
+    // 小模型独立端点与 key（如百炼 DashScope）；未配置时回落主凭证，
+    // 保证本地无小模型 key 时主链路仍可跑通
+    this.smallBaseUrl =
+      this.configService.get<string>("SMALL_LLM_BASE_URL") || this.baseUrl;
+    this.smallApiKey =
+      this.configService.get<string>("SMALL_LLM_API_KEY") || this.apiKey;
     this.defaultTimeoutMs =
       Number(this.configService.get<string>("LLM_TIMEOUT_MS")) || 30000;
+  }
+
+  /**
+   * 小模型名称（首响场景使用）
+   */
+  get smallModelName(): string {
+    return this.smallModel;
   }
 
   /**
@@ -67,7 +91,7 @@ export class LlmService {
       const response = await axios.post(
         url,
         {
-          model: this.model,
+          model: options.model ?? this.model,
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 512,
@@ -104,6 +128,144 @@ export class LlmService {
       this.logger.error(`LLM request failed: ${message}`);
       throw new Error(`LLM request failed: ${message}`);
     }
+  }
+
+  /**
+   * 流式调用 LLM chat completions（stream: true）
+   * 逐个 yield choices[0].delta.content；调用方负责并发与排序。
+   * 兼容 OpenAI SSE：跳过 keep-alive 注释与无法解析的行，[DONE] 结束。
+   */
+  async *completeStream(options: LlmCompleteOptions): AsyncGenerator<string> {
+    const model = options.model ?? this.model;
+    // 小模型走独立端点与 key（如百炼 DashScope；未配置时已回落主凭证）
+    const isSmallModel = model === this.smallModel;
+    const effectiveBaseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
+    const effectiveApiKey = isSmallModel ? this.smallApiKey : this.apiKey;
+
+    if (!effectiveApiKey) {
+      this.logger.error(
+        isSmallModel
+          ? "SMALL_LLM_API_KEY is not configured"
+          : "OPENAI_API_KEY is not configured",
+      );
+      throw new Error("LLM API key is not configured");
+    }
+
+    const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
+    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
+
+    let response;
+    try {
+      this.logger.debug(
+        `LLM stream request: model=${model}, messages=${JSON.stringify(options.messages)}`,
+      );
+      response = await axios.post(
+        url,
+        {
+          model,
+          messages: options.messages,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 512,
+          thinking: options.thinking ?? { type: "disabled" },
+          stream: true,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${effectiveApiKey}`,
+            "Content-Type": "application/json",
+          },
+          timeout: timeoutMs,
+          responseType: "stream",
+        },
+      );
+    } catch (error) {
+      const axiosError = error as AxiosError;
+      const message = axiosError.response?.data
+        ? JSON.stringify(axiosError.response.data)
+        : axiosError.message;
+      this.logger.error(`LLM stream request failed: ${message}`);
+      throw new Error(`LLM request failed: ${message}`);
+    }
+
+    // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
+    const stream = response.data as AsyncIterable<Buffer | string>;
+    let pending = "";
+    for await (const chunk of stream) {
+      pending += chunk.toString();
+      let newlineIndex: number;
+      while ((newlineIndex = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newlineIndex).trim();
+        pending = pending.slice(newlineIndex + 1);
+
+        if (!line.startsWith("data:")) {
+          continue;
+        }
+        const data = line.slice("data:".length).trim();
+        if (data === "[DONE]") {
+          return;
+        }
+
+        let delta: unknown;
+        try {
+          delta = JSON.parse(data)?.choices?.[0]?.delta?.content;
+        } catch {
+          // 半行 / 心跳等无法解析的数据直接跳过
+          continue;
+        }
+        if (typeof delta === "string" && delta.length > 0) {
+          yield delta;
+        }
+      }
+    }
+  }
+
+  /**
+   * 构建首响「打哈哈」prompt（小模型用）
+   * 业内 filler 写法要点：明确角色定位（只为正式回答争取时间）、
+   * 语言跟随用户、极短、禁止实质回答、措辞多样化，并给 few-shot 示例。
+   * 不带教材上下文与历史，避免小模型展开真正回答。
+   * @param recentFillers 最近若干轮本方用过的 filler 原文，
+   * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
+   */
+  buildFillerPrompt(asrText: string, recentFillers?: string[]): LlmMessage[] {
+    const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
+
+Rules:
+1. Reply in the same language the child just used.
+2. Keep it under 20 words, in a natural spoken style.
+3. Never answer the question or provide real content — the main reply comes later.
+4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row.
+5. No lists, no emojis, no questions.
+6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
+7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.
+
+Examples:
+Child: 我喜欢上海的天气 → 原来你喜欢上海的天气呀
+Child: Why is the sky blue? → That is such a fun question!
+Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
+Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
+
+    const bannedSection =
+      recentFillers && recentFillers.length > 0
+        ? `\n\nRecently used openers (do NOT reuse or closely imitate any of them):\n${recentFillers
+            .map((filler) => `- "${filler}"`)
+            .join("\n")}`
+        : "";
+
+    return [
+      { role: "system", content: systemPrompt + bannedSection },
+      { role: "user", content: asrText },
+    ];
+  }
+
+  /**
+   * 从落库 assistant 行解析大模型 answer（边界标注方案 3）
+   * rawPayload.answer 为唯一权威来源；无边界信息的旧行返回 null，
+   * 由调用方决定跳过（旧行不进大模型历史上下文）。
+   */
+  static extractAnswer(_content: string, rawPayload: unknown): string | null {
+    const answer = (rawPayload as { answer?: unknown } | null)?.answer;
+    return typeof answer === "string" && answer.length > 0 ? answer : null;
   }
 
   /**
@@ -149,7 +311,8 @@ Rules:
 8. Always end your reply with a question that is relevant to the unit topic, especially those topics that are not covered yet in the conversation, encouraging the child to respond in English.
 9. If the child does not answer your engaging question, smoothly shift to another aspect of the same unit. For example, ask about different jobs, describe what people do, or invite the child to imagine their own future job.
 10. IMPORTANT: If the child's answer seems off-topic, do NOT just say "let's go back." Instead, make a friendly, creative bridge back to the unit. For example, if the unit is about jobs and the child says "I want to play football," you can say "Playing football is fun! Do you want to be a football player when you grow up?" This keeps the conversation in the unit while honoring what the child said.
-11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.`;
+11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.
+12. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel). Do NOT repeat greetings or acknowledgments (e.g. "Oh, you like...") — go straight into your reply content so the two parts sound like one natural utterance.`;
 
     const rulesSection = promptTemplate
       ? `In addition, always follow these general rules:\n${defaultRules}`

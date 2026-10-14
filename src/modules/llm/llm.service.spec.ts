@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmService } from "./llm.service";
 import axios from "axios";
+import { Readable } from "stream";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -264,6 +265,349 @@ describe("LlmService", () => {
       expect(messagesWithOptions[0].content).toBe(
         messagesWithoutOptions[0].content,
       );
+    });
+
+    it("should tell the model to skip repeated acknowledgments after the filler", () => {
+      const messages = service.buildEnglishTutorPrompt("我喜欢上海的天气", "");
+
+      // 衔接丝滑：filler 寒暄已先行播报，正式回答直接进入正题、不得重复承接
+      expect(messages[0].content).toContain(
+        "just heard a short warm acknowledgment",
+      );
+      expect(messages[0].content).toContain("go straight into your reply");
+    });
+  });
+
+  describe("completeStream", () => {
+    const collectStream = async (
+      gen: AsyncGenerator<string>,
+    ): Promise<string[]> => {
+      const deltas: string[] = [];
+      for await (const delta of gen) {
+        deltas.push(delta);
+      }
+      return deltas;
+    };
+
+    it("should yield delta content from SSE chunks in order", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"你喜欢上海"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"的天气呀"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const deltas = await collectStream(
+        service.completeStream({
+          messages: [{ role: "user", content: "我喜欢上海的天气" }],
+        }),
+      );
+
+      expect(deltas).toEqual(["原来", "你喜欢上海", "的天气呀"]);
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        "https://api.deepseek.com/v1/chat/completions",
+        expect.objectContaining({
+          model: "deepseek-flash",
+          stream: true,
+          messages: [{ role: "user", content: "我喜欢上海的天气" }],
+        }),
+        expect.objectContaining({ responseType: "stream" }),
+      );
+    });
+
+    it("should use the overridden model when provided", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        service.completeStream({
+          messages: [{ role: "user", content: "Hi" }],
+          model: "small-model",
+        }),
+      );
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ model: "small-model", stream: true }),
+        expect.any(Object),
+      );
+    });
+
+    it("should call the small-model base URL with its own API key when configured", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          {
+            provide: ConfigService,
+            useValue: {
+              get: jest.fn((key: string) => {
+                const map: Record<string, string> = {
+                  OPENAI_BASE_URL: "https://api.deepseek.com/v1",
+                  OPENAI_API_KEY: "sk-primary",
+                  OPENAI_MODEL: "deepseek-flash",
+                  SMALL_LLM_BASE_URL:
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                  SMALL_LLM_API_KEY: "sk-qwen",
+                  SMALL_LLM_MODEL: "qwen-flash",
+                };
+                return map[key];
+              }),
+            },
+          },
+        ],
+      }).compile();
+      const dualModelService = module.get<LlmService>(LlmService);
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        dualModelService.completeStream({
+          messages: [{ role: "user", content: "我喜欢上海的天气" }],
+          model: "qwen-flash",
+        }),
+      );
+
+      // 小模型请求路由到百炼端点并使用独立 key
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        expect.objectContaining({ model: "qwen-flash", stream: true }),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer sk-qwen",
+          }),
+        }),
+      );
+    });
+
+    it("should fall back to primary credentials when small-model env is not set", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          {
+            provide: ConfigService,
+            useValue: {
+              get: jest.fn((key: string) => {
+                const map: Record<string, string> = {
+                  OPENAI_BASE_URL: "https://api.deepseek.com/v1",
+                  OPENAI_API_KEY: "sk-test",
+                  OPENAI_MODEL: "deepseek-flash",
+                  SMALL_LLM_MODEL: "qwen-flash",
+                };
+                return map[key];
+              }),
+            },
+          },
+        ],
+      }).compile();
+      const fallbackService = module.get<LlmService>(LlmService);
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"嗯"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        fallbackService.completeStream({
+          messages: [{ role: "user", content: "Hi" }],
+          model: "qwen-flash",
+        }),
+      );
+
+      // 未配置 SMALL_LLM_BASE_URL/API_KEY 时回落主端点与主 key
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        "https://api.deepseek.com/v1/chat/completions",
+        expect.objectContaining({ model: "qwen-flash" }),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer sk-test",
+          }),
+        }),
+      );
+    });
+
+    it("should reassemble SSE lines split across network chunks", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"del',
+          'ta":{"content":"He',
+          'llo"}}]}\n\nda',
+          'ta: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const deltas = await collectStream(
+        service.completeStream({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+
+      expect(deltas).toEqual(["Hello", " world"]);
+    });
+
+    it("should skip keep-alive comments and malformed lines", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          ": keep-alive\n\n",
+          "data: not-json\n\n",
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: {"choices":[{"delta":{}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const deltas = await collectStream(
+        service.completeStream({
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+
+      expect(deltas).toEqual(["ok"]);
+    });
+
+    it("should throw when API key is missing", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          {
+            provide: ConfigService,
+            useValue: {
+              get: jest.fn().mockReturnValue(""),
+            },
+          },
+        ],
+      }).compile();
+      const noKeyService = module.get<LlmService>(LlmService);
+
+      const gen = noKeyService.completeStream({
+        messages: [{ role: "user", content: "Hi" }],
+      });
+
+      await expect(gen.next()).rejects.toThrow("LLM API key is not configured");
+    });
+
+    it("should throw when the streaming request fails", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        message: "Network error",
+        response: { data: { error: "rate limited" } },
+      } as any);
+
+      const gen = service.completeStream({
+        messages: [{ role: "user", content: "Hi" }],
+      });
+
+      await expect(gen.next()).rejects.toThrow("LLM request failed");
+    });
+  });
+
+  describe("buildFillerPrompt", () => {
+    it("should build a first-response prompt echoing the user input", () => {
+      const messages = service.buildFillerPrompt("我喜欢上海的天气");
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0].role).toBe("system");
+      expect(messages[0].content).toContain("first-response");
+      expect(messages[0].content).toContain("same language");
+      expect(messages[0].content).toContain("Never answer");
+      expect(messages[1]).toEqual({
+        role: "user",
+        content: "我喜欢上海的天气",
+      });
+    });
+
+    it("should not carry textbook context or history into the filler prompt", () => {
+      const messages = service.buildFillerPrompt("Hello");
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0].content).not.toContain("textbook context");
+    });
+
+    it("should include few-shot examples and a variety constraint", () => {
+      const messages = service.buildFillerPrompt("我喜欢上海的天气");
+
+      // 业内 filler prompt 标配：few-shot 示例 + 措辞多样性约束
+      expect(messages[0].content).toContain("Examples:");
+      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
+      expect(messages[0].content).toContain("That is such a fun question!");
+      expect(messages[0].content).toContain("vary");
+    });
+
+    it("should require a trailing transitional tone for a smooth handover", () => {
+      const messages = service.buildFillerPrompt("Hello");
+
+      // 衔接丝滑：filler 以承接语气收尾，让大模型回答自然接棒
+      expect(messages[0].content).toContain("transitional tone");
+    });
+
+    it("should enforce a minimum length so the filler audio covers the answer TTFT", () => {
+      const messages = service.buildFillerPrompt("Hello");
+
+      // 防死空气：filler 音频是等待大模型首 chunk 的天然缓冲，
+      // 过短的 filler（如「嗯嗯」）音频不足 1 秒，缓冲失效——故约束下限
+      expect(messages[0].content).toContain("at least 10 characters");
+      expect(messages[0].content).toContain("at least 6 words");
+    });
+
+    it("should list recent fillers as banned openers when provided", () => {
+      const messages = service.buildFillerPrompt("我喜欢上海的天气", [
+        "原来你喜欢上海的天气呀",
+        "Wow, that sounds fun!",
+      ]);
+
+      // 跨轮次多样性：最近用过的 filler 原文进入禁用清单
+      expect(messages[0].content).toContain("do NOT reuse");
+      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
+      expect(messages[0].content).toContain("Wow, that sounds fun!");
+      // 用户输入仍在 user 消息，不被历史污染
+      expect(messages).toHaveLength(2);
+      expect(messages[1].content).toBe("我喜欢上海的天气");
+    });
+
+    it("should not add a banned-openers section when recent fillers are absent", () => {
+      // 首轮对话 / 旧数据无 filler：prompt 保持原样（向后兼容）
+      for (const recent of [undefined, [] as string[]]) {
+        const messages = service.buildFillerPrompt("Hello", recent);
+        expect(messages[0].content).not.toContain("do NOT reuse");
+      }
+    });
+  });
+
+  describe("extractAnswer", () => {
+    it("should return the answer from rawPayload boundary info", () => {
+      const rawPayload = {
+        filler: "原来你喜欢上海呀",
+        answer: "I like Shanghai.",
+      };
+
+      expect(
+        LlmService.extractAnswer(
+          "原来你喜欢上海呀\nI like Shanghai.",
+          rawPayload,
+        ),
+      ).toBe("I like Shanghai.");
+    });
+
+    it("should return null when rawPayload has no boundary info (legacy row)", () => {
+      // 旧行无边界信息：返回 null，由调用方决定跳过（不进大模型历史）
+      expect(LlmService.extractAnswer("I like Shanghai.", null)).toBeNull();
+      expect(LlmService.extractAnswer("I like Shanghai.", {})).toBeNull();
+      expect(
+        LlmService.extractAnswer("I like Shanghai.", { filler: "嗯" }),
+      ).toBeNull();
+      expect(LlmService.extractAnswer("x", { answer: 123 })).toBeNull();
     });
   });
 });

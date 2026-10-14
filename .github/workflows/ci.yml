@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Prisma Client 生成物（不入库），单测/e2e 的类型与运行时均依赖
+      - run: npx prisma generate --schema=src/prisma/schema.prisma
+
+      - run: npm run lint
+
+      # 仓库无 typecheck 脚本，直接调 tsc（与 pre-commit 钩子一致）
+      - run: npx tsc --noEmit
+
+      - run: npm run build
+
+      - run: npm run test
+
+      # e2e 全部 mock Prisma/LLM，无需真实 DB 与外部服务；
+      # --forceExit 规避既有句柄泄漏导致的 worker 不退出
+      - run: npm run test:e2e -- --forceExit

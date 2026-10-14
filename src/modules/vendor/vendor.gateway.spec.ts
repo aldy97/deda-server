@@ -1,7 +1,9 @@
 import { Test, TestingModule } from "@nestjs/testing";
+import { validate } from "class-validator";
 import { VendorGateway } from "./vendor.gateway";
 import { VendorService } from "./vendor.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
+import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
 
 describe("VendorGateway", () => {
   let gateway: VendorGateway;
@@ -155,6 +157,37 @@ describe("VendorGateway", () => {
       );
       expect(vendorService.handleTextIn).not.toHaveBeenCalled();
       expect(result).toBeNull();
+    });
+  });
+
+  describe("VendorTextChunkDto", () => {
+    const buildChunk = () =>
+      Object.assign(new VendorTextChunkDto(), {
+        deviceId: "dev-001",
+        turnId: "turn-1",
+        seq: 0,
+        source: "filler",
+        delta: "嗯",
+        isFinal: false,
+      });
+
+    it("should pass validation for a valid chunk", async () => {
+      const errors = await validate(buildChunk());
+      expect(errors).toHaveLength(0);
+    });
+
+    it("should reject a source outside filler/answer", async () => {
+      const chunk = buildChunk();
+      (chunk as any).source = "other";
+      const errors = await validate(chunk);
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    it("should reject negative-seq-like non-number values", async () => {
+      const chunk = buildChunk();
+      (chunk as any).seq = "0";
+      const errors = await validate(chunk);
+      expect(errors.length).toBeGreaterThan(0);
     });
   });
 });
