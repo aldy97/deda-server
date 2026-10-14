@@ -36,6 +36,15 @@ describe("LearningStats (e2e)", () => {
         },
       ]),
     },
+    childProfile: {
+      findMany: jest.fn().mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          name: "二狗",
+          englishName: "Lebron",
+        },
+      ]),
+    },
     message: {
       findMany: jest.fn().mockImplementation((args: any = {}) => {
         // timeline 第二次调用按 turnId 取 assistant 回复

@@ -30,7 +30,7 @@
   "lint-staged": {
     "*.{ts,tsx}": [
       "prettier --write",
-      "jest --bail --findRelatedTests --no-coverage"
+      "jest --bail --findRelatedTests --no-coverage --passWithNoTests"
     ]
   },
   "dependencies": {
