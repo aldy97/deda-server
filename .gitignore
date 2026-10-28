@@ -42,3 +42,6 @@ lerna-debug.log*
 
 # docker volumes
 /docker/data
+
+# vendor traffic recorder 录制文件（本地对账用，永不进 git）
+/records/
