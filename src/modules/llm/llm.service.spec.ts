@@ -130,6 +130,43 @@ describe("LlmService", () => {
     });
   });
 
+  describe("buildAdventureInteractionPrompt", () => {
+    it("should inject the persona and interaction context without allowing story generation", () => {
+      const messages = service.buildAdventureInteractionPrompt({
+        characterPersona: "小象 Elly：温暖好奇，喜欢用「呀」结尾。",
+        segmentText: "你觉得 Elly 会怎么做呢？",
+        childReply: "它会请小松鼠帮忙",
+        kind: "open_question",
+      });
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0].role).toBe("system");
+      expect(messages[0].content).toContain("小象 Elly");
+      expect(messages[0].content).toContain("你觉得 Elly 会怎么做呢？");
+      expect(messages[0].content).toContain("1-2 句");
+      expect(messages[0].content).toContain("禁止续写、改写或剧透主线");
+      expect(messages[0].content).toContain("禁止连续追问");
+      expect(messages[0].content).toContain("禁止批评");
+      expect(messages[1]).toEqual({
+        role: "user",
+        content: "它会请小松鼠帮忙",
+      });
+    });
+
+    it("should require an off-topic redirect to acknowledge before returning to the question", () => {
+      const messages = service.buildAdventureInteractionPrompt({
+        characterPersona: "小象 Elly",
+        segmentText: "我们去森林还是去河边？",
+        childReply: "我想吃冰淇淋",
+        kind: "redirect",
+      });
+
+      expect(messages[0].content).toContain("先接住孩子的话题");
+      expect(messages[0].content).toContain("再自然引回当前互动问题");
+      expect(messages[0].content).toContain("我们去森林还是去河边？");
+    });
+  });
+
   describe("buildEnglishTutorPrompt", () => {
     it("should include context and user message", () => {
       const messages = service.buildEnglishTutorPrompt(
@@ -382,6 +419,50 @@ describe("LlmService", () => {
       expect(mockedAxios.post).toHaveBeenCalledWith(
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         expect.objectContaining({ model: "qwen-flash", stream: true }),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer sk-qwen",
+          }),
+        }),
+      );
+    });
+
+    it("should use small-model credentials for non-streaming adventure bridges", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          {
+            provide: ConfigService,
+            useValue: {
+              get: jest.fn((key: string) => {
+                const map: Record<string, string> = {
+                  OPENAI_BASE_URL: "https://api.deepseek.com/v1",
+                  OPENAI_API_KEY: "sk-primary",
+                  OPENAI_MODEL: "deepseek-flash",
+                  SMALL_LLM_BASE_URL:
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                  SMALL_LLM_API_KEY: "sk-qwen",
+                  SMALL_LLM_MODEL: "qwen-flash",
+                };
+                return map[key];
+              }),
+            },
+          },
+        ],
+      }).compile();
+      const dualModelService = module.get<LlmService>(LlmService);
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "我们继续冒险吧！" } }] },
+      } as any);
+
+      await dualModelService.complete({
+        messages: [{ role: "user", content: "我想吃冰淇淋" }],
+        model: "qwen-flash",
+      });
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        expect.objectContaining({ model: "qwen-flash" }),
         expect.objectContaining({
           headers: expect.objectContaining({
             Authorization: "Bearer sk-qwen",

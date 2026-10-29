@@ -30,6 +30,7 @@ model User {
 model Device {
   id              String   @id @default(uuid())
   deviceId        String   @unique // 厂商侧设备唯一编号
+  characterKey    String   @default("elly") // 默认 IP：elly / polly
   deviceCode      String?  @unique // 设备编码（展示用）
   firmwareVersion String?  // 固件版本
   wifiName        String?  // WiFi 名称
@@ -49,6 +50,9 @@ model Device {
   messages        Message[]
   learningStats   LearningStat[]
   childProfile    ChildProfile?
+  adventureProgresses AdventureProgress[]
+  adventureDailyRecords AdventureDailyRecord[]
+  adventureEvents AdventureEvent[]
 
   @@map("devices")
 }
@@ -252,4 +256,114 @@ model WebhookLog {
 
   @@index([processed, createdAt])
   @@map("webhook_logs")
+}
+
+// 冒险故事：集元数据（主线人写定稿，见 docs/adventure-story-mode.md）
+model AdventureEpisode {
+  id            String   @id @default(uuid())
+  characterKey  String   @default("elly") // 专属 IP：elly / polly
+  season        Int      @default(1) // 季号，MVP=1
+  episodeNumber Int      // 集号
+  title         String   // 集标题
+  recap         String?  // 前情回顾（每集开头）
+  published     Boolean  @default(false) // 是否可播
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  segments  AdventureSegment[]
+  progresses AdventureProgress[]
+  dailyRecords AdventureDailyRecord[]
+  events AdventureEvent[]
+
+  @@unique([characterKey, season, episodeNumber])
+  @@map("adventure_episodes")
+}
+
+// 冒险故事：段落/交互点切片
+model AdventureSegment {
+  id              String   @id @default(uuid())
+  episodeId       String
+  order           Int      // 集内顺序，从 0 递增
+  kind            String   // narration / interaction
+  text            String   // 旁白原文，或交互点引导词
+  interactionType String?  // open_question / two_choice / repeat_after_me / reward
+  options         Json?    // 二选一：{ choices: [{key, text, reply}] }，回应预生成
+  fallbackText    String?  // 兜底话术（跑题/沉默/不配合）
+  exitText        String?  // 明确拒绝时的温柔收尾
+  rewardStar      Boolean  @default(false) // 通过该交互点奖励一颗星光
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@unique([episodeId, order])
+  @@map("adventure_segments")
+}
+
+// 冒险故事：每个设备、每一集的可变进度；跨天未完成仍续玩同一集。
+model AdventureProgress {
+  id               String    @id @default(uuid())
+  deviceId         String
+  episodeId        String
+  nextSegmentOrder Int       @default(0) // 下一段待播 order
+  status           String    // in_progress / awaiting_reply / completed / exited
+  waitingSince     DateTime? // 引导词最后一个 chunk ack 的服务器时间（10s 超时起点）
+  stars            Int       @default(0) // 本集已收集星光
+  offTopicCount    Int       @default(0) // 当前交互点连续跑题次数（引回一次后兜底）
+  completedAt      DateTime? // 实际完集时间
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  device  Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, episodeId])
+  @@index([status, waitingSince])
+  @@index([deviceId, status, completedAt])
+  @@map("adventure_progresses")
+}
+
+// 冒险故事：每日分配档案。assignedDate 不变，completedDate 记录实际完集日。
+model AdventureDailyRecord {
+  id            String    @id @default(uuid())
+  deviceId      String
+  episodeId     String
+  assignedDate  String    // 首次分配日（服务器本地时区）
+  status        String    // in_progress / completed
+  assignedAt    DateTime  @default(now())
+  completedAt   DateTime?
+  completedDate String?   // 实际完集日；每日完成门禁以此字段判断
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  device  Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  events  AdventureEvent[]
+
+  @@unique([deviceId, assignedDate])
+  @@index([deviceId, completedDate])
+  @@index([deviceId, status])
+  @@map("adventure_daily_records")
+}
+
+// 冒险故事：不可变审计事件；全文仍在 Message，避免重复保存 ASR/播报文本。
+model AdventureEvent {
+  id            String   @id @default(uuid())
+  eventKey      String   @unique // 幂等键，如 daily:{dailyId}:completed
+  deviceId      String
+  episodeId     String
+  dailyRecordId String
+  turnId        String?
+  eventType     String
+  segmentOrder  Int?
+  payload       Json?
+  createdAt     DateTime @default(now())
+
+  device      Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  episode     AdventureEpisode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  dailyRecord AdventureDailyRecord @relation(fields: [dailyRecordId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, createdAt])
+  @@index([dailyRecordId, createdAt])
+  @@map("adventure_events")
 }

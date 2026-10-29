@@ -21,6 +21,9 @@ CREATE TABLE "messages" (
     CONSTRAINT "messages_pkey" PRIMARY KEY ("id")
 );
 
+-- 旧 conversations 表在初始迁移中没有该列；回放 backfill 前补齐，NULL 表示旧记录无模式键。
+ALTER TABLE "conversations" ADD COLUMN "conversationModeKey" TEXT;
+
 -- Backfill: 每条 conversation 拆成 user + assistant 两条消息,turnId = 原行 id
 INSERT INTO "messages" ("id", "deviceId", "turnId", "role", "content", "status", "conversationId", "hitUnitIds", "textbookId", "unitId", "mode", "conversationModeKey", "cefrLevel", "rawPayload", "spokeAt", "createdAt")
 SELECT gen_random_uuid()::text, c."deviceId", c."id", 'user', c."asrText", 'completed', c."conversationId", c."hitUnitIds", c."textbookId", c."unitId", c."mode", c."conversationModeKey", c."cefrLevel", c."rawPayload", c."spokeAt", c."createdAt"

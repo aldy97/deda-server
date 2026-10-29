@@ -6,12 +6,22 @@ import { RagService } from "@/modules/rag/rag.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
-import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
 import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { LlmMessage } from "@/modules/llm/llm.service";
+import {
+  AdventureReply,
+  AdventureService,
+} from "@/modules/adventure/adventure.service";
+
+type StoryIntent =
+  | "adventure_story"
+  | "english_story"
+  | "idiom_story"
+  | "free_story"
+  | "not_story";
 
 /**
  * 机芯厂-facing 业务服务
@@ -29,12 +39,28 @@ export class VendorService {
     private readonly ragService: RagService,
     private readonly llmService: LlmService,
     private readonly replyUploader: VendorReplyUploader,
+    private readonly adventureService: AdventureService,
   ) {
     this.defaultTextbookId =
       this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
       "sample-textbook";
     this.defaultUnitId =
       this.configService.get<string>("DEFAULT_UNIT_ID") || "unit-1";
+
+    this.adventureService.registerTimeoutListener(
+      async (deviceInternalId, adventureReply) => {
+        const device = await this.prisma.device.findUnique({
+          where: { id: deviceInternalId },
+        });
+        if (!device) {
+          this.logger.warn(
+            `Adventure timeout skipped, device not found: ${deviceInternalId}`,
+          );
+          return;
+        }
+        await this.sendAdventureReply(device, adventureReply);
+      },
+    );
   }
 
   async ensureDeviceExists(deviceId: string) {
@@ -208,9 +234,121 @@ export class VendorService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
+  private isStoryCandidate(asrText: string): boolean {
+    return /故事|冒险|风铃树|再听一遍|继续讲|接着讲|story|adventure/i.test(
+      asrText,
+    );
+  }
+
+  private fallbackStoryIntent(asrText: string): StoryIntent {
+    if (/英语|英文|english/i.test(asrText)) {
+      return "english_story";
+    }
+    if (/成语|idiom/i.test(asrText)) {
+      return "idiom_story";
+    }
+    if (/冒险|风铃树|再听一遍|继续.*故事|接着.*故事/i.test(asrText)) {
+      return "adventure_story";
+    }
+    return this.isStoryCandidate(asrText) ? "free_story" : "not_story";
+  }
+
+  /** 小模型只做语义分类；每日状态与路由权限始终由后端决定。 */
+  private async classifyStoryIntent(asrText: string): Promise<StoryIntent> {
+    // TODO(可用性)：灰度补充分类模型超时、限流与非法输出的真实指标。
+    try {
+      const result = await this.llmService.complete({
+        model: this.llmService.smallModelName,
+        temperature: 0,
+        maxTokens: 10,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是儿童语音产品的故事意图分类器。只输出一个标签，禁止解释：" +
+              "adventure_story（每日互动冒险、续听或重听已播冒险）；" +
+              "english_story（英语故事或英语口语陪练）；" +
+              "idiom_story（成语故事）；free_story（泛化的听故事或自由创作故事）；" +
+              "not_story（不是故事请求）。孩子表达含糊时按字面选择最接近标签。",
+          },
+          { role: "user", content: `孩子的话：${asrText}` },
+        ],
+      });
+      const text = result.text.trim().toLowerCase();
+      const intents: StoryIntent[] = [
+        "adventure_story",
+        "english_story",
+        "idiom_story",
+        "free_story",
+        "not_story",
+      ];
+      return (
+        intents.find((intent) => text.includes(intent)) ||
+        this.fallbackStoryIntent(asrText)
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Story intent classification failed, keyword fallback used: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return this.fallbackStoryIntent(asrText);
+    }
+  }
+
+  private storyPrompt(intent: StoryIntent): string | undefined {
+    switch (intent) {
+      case "english_story":
+        return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
+      case "idiom_story":
+        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
+      case "adventure_story":
+      case "free_story":
+        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。";
+      default:
+        return undefined;
+    }
+  }
+
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
+
+    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
+    const adventureReply = await this.adventureService.handleChildReply(
+      device.id,
+      dto.asrText,
+    );
+    if (adventureReply) {
+      return this.sendAdventureReply(device, adventureReply, dto.asrText);
+    }
+
+    let storyIntent: StoryIntent | null = null;
+    if (this.isStoryCandidate(dto.asrText)) {
+      storyIntent = await this.classifyStoryIntent(dto.asrText);
+      const completedToday = await this.adventureService.isCompletedToday(
+        device.id,
+      );
+      if (
+        !completedToday &&
+        (storyIntent === "adventure_story" || storyIntent === "free_story")
+      ) {
+        // 泛化“我想听故事”在今日冒险未完成时优先进入冒险。
+        const startedAdventure = await this.adventureService.startToday(
+          device.id,
+          true,
+        );
+        if (startedAdventure) {
+          return this.sendAdventureReply(device, startedAdventure, dto.asrText);
+        }
+      }
+      if (completedToday) {
+        await this.adventureService.recordEntryBlocked(
+          device.id,
+          storyIntent === "adventure_story" ? "free_story" : storyIntent,
+        );
+      }
+    }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
     const { textbookId, unitId } = await this.resolveTextbookAndUnit(
@@ -218,7 +356,10 @@ export class VendorService {
       device.id,
     );
 
-    const mode = activeConfig?.mode ?? "locked_unit";
+    const storyMode = storyIntent && storyIntent !== "not_story";
+    const mode = storyMode
+      ? "free_chat"
+      : (activeConfig?.mode ?? "locked_unit");
 
     // free_chat 不涉及教材：快照置空,避免 .env 默认教材/单元污染统计口径
     const stampTextbookId = mode === "free_chat" ? null : textbookId;
@@ -261,11 +402,13 @@ export class VendorService {
 
     // 读取孩子档案与当前模式对应的 prompt 模板
     const childProfile = await this.getChildProfile(device.id);
-    const promptTemplate = await this.resolvePromptTemplate(
-      activeConfig?.mode,
-      textbookId,
-      activeConfig?.conversationModeKey,
-    );
+    const promptTemplate = storyMode
+      ? this.storyPrompt(storyIntent)
+      : await this.resolvePromptTemplate(
+          mode,
+          textbookId,
+          activeConfig?.conversationModeKey,
+        );
 
     // RAG 检索教材内容
     const retrieveResult = await this.ragService.retrieve(
@@ -286,7 +429,7 @@ export class VendorService {
           }
         : undefined,
       promptTemplate,
-      mode: activeConfig?.mode ?? undefined,
+      mode,
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
@@ -383,6 +526,110 @@ export class VendorService {
         `Invalid conversation context skipped: mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
       );
     }
+
+    return reply;
+  }
+
+  /**
+   * 冒险回复复用既有 chunk 通道：每个定稿段落一个 answer chunk，
+   * 逐次 await 对端 ack，最后显式收尾并发送全量兜底。
+   */
+  private async sendAdventureReply(
+    device: { id: string; deviceId: string },
+    adventureReply: AdventureReply,
+    asrText?: string,
+  ): Promise<VendorTextOutDto> {
+    const turnId = randomUUID();
+    const responseText = adventureReply.texts.join("\n");
+    const reply: VendorTextOutDto = {
+      deviceId: device.deviceId,
+      responseText,
+      context: { adventure: true },
+      ttsOptions: {},
+    };
+
+    if (asrText) {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: asrText,
+          status: "completed",
+          textbookId: null,
+          unitId: null,
+          mode: "adventure_story",
+          conversationModeKey: null,
+          rawPayload: { asrText },
+          spokeAt: new Date(),
+        },
+      });
+    }
+
+    let seq = 0;
+    const emit = async (delta: string, isFinal: boolean) => {
+      try {
+        await this.replyUploader.sendChunk({
+          deviceId: device.deviceId,
+          turnId,
+          seq: seq++,
+          source: "answer",
+          delta,
+          isFinal,
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to upload adventure chunk for deviceId=${device.deviceId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+
+    for (const text of adventureReply.texts) {
+      await emit(text, false);
+    }
+    await emit("", true);
+
+    // 计时从引导词最后一个 chunk 的上传 ack 后开始，而非 LLM 生成时开始。
+    if (adventureReply.action === "await_reply") {
+      await this.adventureService.markPromptPlaybackComplete(device.id);
+    }
+
+    try {
+      await this.replyUploader.sendFullReply(reply);
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload full adventure reply for deviceId=${device.deviceId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "assistant",
+        content: responseText,
+        status: "completed",
+        textbookId: null,
+        unitId: null,
+        mode: "adventure_story",
+        conversationModeKey: null,
+        rawPayload: {
+          filler: null,
+          answer: responseText,
+          interactionResult: adventureReply.result ?? null,
+        },
+        spokeAt: new Date(),
+      },
+    });
+    await this.adventureService.recordPresented(
+      device.id,
+      turnId,
+      adventureReply,
+    );
 
     return reply;
   }

@@ -10,6 +10,7 @@ import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
 import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
+import { AdventureService } from "@/modules/adventure/adventure.service";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -17,6 +18,15 @@ describe("VendorService", () => {
   let ragService: jest.Mocked<RagService>;
   let llmService: jest.Mocked<LlmService>;
   let configService: jest.Mocked<ConfigService>;
+  let adventureService: {
+    handleChildReply: jest.Mock;
+    startToday: jest.Mock;
+    isCompletedToday: jest.Mock;
+    recordPresented: jest.Mock;
+    recordEntryBlocked: jest.Mock;
+    markPromptPlaybackComplete: jest.Mock;
+    registerTimeoutListener: jest.Mock;
+  };
   let replyUploader: { sendChunk: jest.Mock; sendFullReply: jest.Mock };
 
   async function* streamOf(
@@ -128,6 +138,18 @@ describe("VendorService", () => {
             sendFullReply: jest.fn(),
           },
         },
+        {
+          provide: AdventureService,
+          useValue: {
+            handleChildReply: jest.fn().mockResolvedValue(null),
+            startToday: jest.fn().mockResolvedValue(null),
+            isCompletedToday: jest.fn().mockResolvedValue(false),
+            recordPresented: jest.fn().mockResolvedValue(undefined),
+            recordEntryBlocked: jest.fn().mockResolvedValue(undefined),
+            markPromptPlaybackComplete: jest.fn().mockResolvedValue(undefined),
+            registerTimeoutListener: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -136,6 +158,7 @@ describe("VendorService", () => {
     ragService = module.get(RagService);
     llmService = module.get(LlmService);
     configService = module.get(ConfigService);
+    adventureService = module.get(AdventureService) as any;
     replyUploader = module.get(VendorReplyUploader) as any;
 
     replyUploader.sendChunk.mockResolvedValue(undefined);
@@ -826,6 +849,88 @@ describe("VendorService", () => {
       ] as any);
     };
 
+    it("should prioritize adventure for a generic story request while today's adventure is incomplete", async () => {
+      setupStreamingBase();
+      adventureService.isCompletedToday.mockResolvedValue(false);
+      adventureService.startToday.mockResolvedValue(null);
+      llmService.complete.mockResolvedValue({ text: "adventure_story" } as any);
+      mockAnswerStream("A free story.");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "我想听故事",
+      });
+
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: "small-llm",
+          temperature: 0,
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              content: expect.stringContaining("adventure_story"),
+            }),
+          ]),
+        }),
+      );
+      expect(adventureService.startToday).toHaveBeenCalledWith("uuid-s1", true);
+    });
+
+    it("should block adventure replay after completion and route to a free story", async () => {
+      setupStreamingBase();
+      adventureService.isCompletedToday.mockResolvedValue(true);
+      llmService.complete.mockResolvedValue({ text: "adventure_story" } as any);
+      mockAnswerStream("A brand new free story.");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "再听一遍风铃树",
+      });
+
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+      expect(adventureService.recordEntryBlocked).toHaveBeenCalledWith(
+        "uuid-s1",
+        "free_story",
+      );
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "free_chat",
+          promptTemplate: expect.stringContaining("自由创作"),
+        }),
+      );
+    });
+
+    it("should honor an explicit English story request after adventure completion", async () => {
+      setupStreamingBase();
+      adventureService.isCompletedToday.mockResolvedValue(true);
+      llmService.complete.mockResolvedValue({ text: "english_story" } as any);
+      mockAnswerStream("An English story.");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "我想听英语故事",
+      });
+
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+      expect(adventureService.recordEntryBlocked).toHaveBeenCalledWith(
+        "uuid-s1",
+        "english_story",
+      );
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "free_chat",
+          promptTemplate: expect.stringContaining("English"),
+        }),
+      );
+    });
+
     it("should upload filler chunks before answer chunks with contiguous seq", async () => {
       setupStreamingBase();
       // 大模型立即完成、小模型延迟产出：大模型 chunk 必须先缓冲，不得抢跑
@@ -1148,6 +1253,107 @@ describe("VendorService", () => {
         filler: "嗯",
         answer: "Hello! I'm fine.",
       });
+    });
+
+    it("should stream an adventure reply in order and persist the full narrated text", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h1",
+        deviceId: "dev-h1",
+      });
+      prisma.message.create.mockResolvedValue({ id: "message-h1" });
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["好呀，我们去森林！", "森林里有一只小松鼠。"],
+        action: "await_reply",
+      });
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-h1",
+        asrText: "森林",
+      });
+
+      const chunks = uploadedChunks();
+      expect(chunks.map((chunk) => chunk.seq)).toEqual([0, 1, 2]);
+      expect(chunks.map((chunk) => chunk.delta)).toEqual([
+        "好呀，我们去森林！",
+        "森林里有一只小松鼠。",
+        "",
+      ]);
+      expect(chunks.every((chunk) => chunk.source === "answer")).toBe(true);
+      expect(chunks[2].isFinal).toBe(true);
+      expect(result.responseText).toBe(
+        "好呀，我们去森林！\n森林里有一只小松鼠。",
+      );
+      expect(ragService.retrieve).not.toHaveBeenCalled();
+      expect(llmService.completeStream).not.toHaveBeenCalled();
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+
+      const lastChunkOrder =
+        replyUploader.sendChunk.mock.invocationCallOrder[2];
+      const timerOrder =
+        adventureService.markPromptPlaybackComplete.mock.invocationCallOrder[0];
+      const fullReplyOrder =
+        replyUploader.sendFullReply.mock.invocationCallOrder[0];
+      expect(lastChunkOrder).toBeLessThan(timerOrder);
+      expect(timerOrder).toBeLessThan(fullReplyOrder);
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data).toMatchObject({
+        mode: "adventure_story",
+        content: "好呀，我们去森林！\n森林里有一只小松鼠。",
+        rawPayload: {
+          filler: null,
+          answer: "好呀，我们去森林！\n森林里有一只小松鼠。",
+          interactionResult: null,
+        },
+      });
+    });
+
+    it("should start today's adventure before entering the free-chat pipeline", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h1",
+        deviceId: "dev-h1",
+      });
+      prisma.message.create.mockResolvedValue({ id: "message-h1" });
+      adventureService.startToday.mockResolvedValue({
+        texts: ["今天 Elly 要出门啦。"],
+        action: "completed",
+      });
+
+      await service.handleTextIn({ deviceId: "dev-h1", asrText: "讲故事" });
+
+      expect(adventureService.startToday).toHaveBeenCalledWith("uuid-h1", true);
+      expect(ragService.retrieve).not.toHaveBeenCalled();
+      expect(
+        adventureService.markPromptPlaybackComplete,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("should upload and persist a timeout reply without creating a user message", async () => {
+      const timeoutListener =
+        adventureService.registerTimeoutListener.mock.calls[0][0];
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid",
+        deviceId: "dev-h1",
+      });
+
+      await timeoutListener("device-uuid", {
+        texts: ["没关系，我们继续吧。"],
+        action: "completed",
+      });
+
+      expect(prisma.device.findUnique).toHaveBeenCalledWith({
+        where: { id: "device-uuid" },
+      });
+      expect(uploadedChunks().map((chunk) => chunk.delta)).toEqual([
+        "没关系，我们继续吧。",
+        "",
+      ]);
+      expect(prisma.message.create).toHaveBeenCalledTimes(1);
+      expect(prisma.message.create.mock.calls[0][0].data.role).toBe(
+        "assistant",
+      );
     });
   });
 
