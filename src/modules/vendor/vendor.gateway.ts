@@ -9,6 +9,7 @@ import { Server, Socket } from "socket.io";
 import { Logger } from "@nestjs/common";
 import { VendorService } from "./vendor.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
+import { VendorTrafficRecorder } from "./traffic-recorder";
 
 /**
  * 机芯厂 ↔ 我方服务器 WebSocket 文字通道
@@ -32,7 +33,10 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   private readonly deviceSocketMap = new Map<string, string>();
 
-  constructor(private readonly vendorService: VendorService) {}
+  constructor(
+    private readonly vendorService: VendorService,
+    private readonly trafficRecorder: VendorTrafficRecorder,
+  ) {}
 
   handleConnection(client: Socket) {
     this.logger.log(`Vendor connected: ${client.id}`);
@@ -55,6 +59,12 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage("vendor:text:in")
   async handleTextIn(client: Socket, payload: VendorTextInDto) {
+    // 原始报文先行录制（含校验失败的情况），联调追责时证明乙方到底发了什么
+    void this.trafficRecorder.record("in", payload, {
+      event: "vendor:text:in",
+      deviceId: payload?.deviceId,
+    });
+
     const validationError = this.validateTextIn(payload);
     if (validationError) {
       this.emitError(client, "vendor:text:in", validationError);
@@ -67,11 +77,23 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const reply = await this.vendorService.handleTextIn(payload);
       client.emit("vendor:text:out", reply);
+      void this.trafficRecorder.record("out", reply, {
+        event: "vendor:text:out",
+        deviceId: payload.deviceId,
+      });
       return reply;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(
         `Failed to handle text in from ${payload.deviceId}: ${message}`,
+      );
+      void this.trafficRecorder.record(
+        "in",
+        { error: message },
+        {
+          event: "vendor:text:in:error",
+          deviceId: payload.deviceId,
+        },
       );
       this.emitError(client, "vendor:text:in", message);
       return null;

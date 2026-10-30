@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { io, Socket } from "socket.io-client";
 import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
+import { VendorTrafficRecorder } from "./traffic-recorder";
 
 /**
  * 机芯厂回复上传通道（出站 WS 客户端）
@@ -24,7 +25,10 @@ export class VendorReplyUploader implements OnModuleDestroy {
   private socket: Socket | null = null;
   private connecting: Promise<Socket> | null = null;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly trafficRecorder: VendorTrafficRecorder,
+  ) {
     this.uploadUrl =
       this.configService.get<string>("VENDOR_WS_UPLOAD_URL") || undefined;
     this.ackTimeoutMs =
@@ -52,6 +56,13 @@ export class VendorReplyUploader implements OnModuleDestroy {
     data: unknown,
     label: string,
   ): Promise<void> {
+    // 录制我方上行原文（含未配置 VENDOR_WS_UPLOAD_URL 的本地调试发送），
+    // 与 gateway 的 vendor:text:out 录制互补，构成完整 in/out 对账链
+    void this.trafficRecorder.record("out", data, {
+      event,
+      deviceId: (data as { deviceId?: string })?.deviceId,
+    });
+
     if (!this.uploadUrl) {
       this.logger.debug(
         `Uploader disabled (no VENDOR_WS_UPLOAD_URL), skip ${event} ${label}`,

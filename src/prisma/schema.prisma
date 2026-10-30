@@ -53,6 +53,7 @@ model Device {
   adventureProgresses AdventureProgress[]
   adventureDailyRecords AdventureDailyRecord[]
   adventureEvents AdventureEvent[]
+  childMemories   ChildMemory[]
 
   @@map("devices")
 }
@@ -366,4 +367,36 @@ model AdventureEvent {
   @@index([deviceId, createdAt])
   @@index([dailyRecordId, createdAt])
   @@map("adventure_events")
+}
+
+// 儿童长期记忆：值不可覆盖；纠正通过新版本保留历史。
+model ChildMemory {
+  id               String    @id @default(uuid())
+  deviceId         String
+  key              String    // 代码白名单槽位，如 favorite_color
+  valueText        String?   // 撤回墓碑为 null
+  normalizedValue  String?
+  changeType       String    // initial / supersede / retract
+  status           String    // active / superseded / retracted
+  version          Int
+  sourceTurnId     String
+  sourceOccurredAt DateTime
+  confidence       Float
+  extractorModel   String
+  validFrom        DateTime
+  validTo          DateTime?
+  supersededById   String?
+  lastConfirmedAt  DateTime
+  lastInjectedAt   DateTime? // 提供给模型的时间，不代表孩子已听到
+  injectionCount   Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, key, version])
+  @@unique([deviceId, sourceTurnId, key])
+  @@index([deviceId, status, key, lastInjectedAt])
+  @@index([deviceId, key, validFrom])
+  @@map("child_memories")
 }

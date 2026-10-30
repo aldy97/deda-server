@@ -4,10 +4,12 @@ import { VendorGateway } from "./vendor.gateway";
 import { VendorService } from "./vendor.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextChunkDto } from "./dto/vendor-text-chunk.dto";
+import { VendorTrafficRecorder } from "./traffic-recorder";
 
 describe("VendorGateway", () => {
   let gateway: VendorGateway;
   let vendorService: jest.Mocked<VendorService>;
+  let trafficRecorder: { record: jest.Mock };
 
   const mockEmit = jest.fn();
   const mockTo = jest.fn().mockReturnValue({ emit: mockEmit });
@@ -43,11 +45,16 @@ describe("VendorGateway", () => {
             getHealth: jest.fn(),
           },
         },
+        {
+          provide: VendorTrafficRecorder,
+          useValue: { record: jest.fn() },
+        },
       ],
     }).compile();
 
     gateway = module.get<VendorGateway>(VendorGateway);
     vendorService = module.get(VendorService);
+    trafficRecorder = module.get(VendorTrafficRecorder) as any;
 
     gateway.server = mockServer;
   });
@@ -119,6 +126,50 @@ describe("VendorGateway", () => {
       expect(client.emit).toHaveBeenCalledWith("vendor:text:out", reply);
       expect(result).toEqual(reply);
       expect(gateway["deviceSocketMap"].get("dev-003")).toBe("socket-003");
+    });
+
+    it("should record in/out traffic for a successful turn", async () => {
+      const client = createMockClient("socket-003b");
+      const dto: VendorTextInDto = { deviceId: "dev-003", asrText: "你好" };
+      const reply = {
+        deviceId: "dev-003",
+        responseText: "收到：你好",
+        context: {},
+        ttsOptions: {},
+      };
+      vendorService.handleTextIn.mockResolvedValue(reply);
+
+      await gateway.handleTextIn(client, dto);
+
+      expect(trafficRecorder.record).toHaveBeenCalledWith(
+        "in",
+        dto,
+        expect.objectContaining({
+          event: "vendor:text:in",
+          deviceId: "dev-003",
+        }),
+      );
+      expect(trafficRecorder.record).toHaveBeenCalledWith(
+        "out",
+        reply,
+        expect.objectContaining({
+          event: "vendor:text:out",
+          deviceId: "dev-003",
+        }),
+      );
+    });
+
+    it("should record the raw payload even when validation fails", async () => {
+      const client = createMockClient("socket-005b");
+      const invalidPayload = { deviceId: "", asrText: "" } as VendorTextInDto;
+
+      await gateway.handleTextIn(client, invalidPayload);
+
+      expect(trafficRecorder.record).toHaveBeenCalledWith(
+        "in",
+        invalidPayload,
+        expect.objectContaining({ event: "vendor:text:in" }),
+      );
     });
 
     it("should emit vendor:error when service throws", async () => {

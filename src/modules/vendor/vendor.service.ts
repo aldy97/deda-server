@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RagService } from "@/modules/rag/rag.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
 import { VendorStatusDto } from "./dto/vendor-status.dto";
@@ -40,6 +41,7 @@ export class VendorService {
     private readonly llmService: LlmService,
     private readonly replyUploader: VendorReplyUploader,
     private readonly adventureService: AdventureService,
+    private readonly childMemoriesService: ChildMemoriesService,
   ) {
     this.defaultTextbookId =
       this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
@@ -382,6 +384,7 @@ export class VendorService {
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
     const turnId = randomUUID();
+    const sourceOccurredAt = new Date();
     if (contextValid) {
       await this.prisma.message.create({
         data: {
@@ -395,9 +398,29 @@ export class VendorService {
           mode,
           conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: dto as any,
-          spokeAt: new Date(),
+          spokeAt: sourceOccurredAt,
         },
       });
+
+      // 长期记忆异步提取，不阻塞 filler 首音；失败只影响记忆写入。
+      const previousAssistant = [...history]
+        .reverse()
+        .find((message) => message.role === "assistant")?.content;
+      void this.childMemoriesService
+        .extractAndStore({
+          deviceId: device.id,
+          turnId,
+          asrText: dto.asrText,
+          previousAssistant,
+          sourceOccurredAt,
+        })
+        .catch((error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Child memory extraction failed for deviceId=${dto.deviceId}: ${message}`,
+          );
+        });
     }
 
     // 读取孩子档案与当前模式对应的 prompt 模板
@@ -433,6 +456,36 @@ export class VendorService {
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
+    // 只在自由对话主回答中注入相关记忆；filler 和其他对话模式不使用。
+    let memoryPrompt: { text: string; memoryIds: string[] } = {
+      text: "",
+      memoryIds: [],
+    };
+    if (mode === "free_chat") {
+      try {
+        memoryPrompt = await this.childMemoriesService.buildPromptBlock(
+          device.id,
+          dto.asrText,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Child memory recall failed for deviceId=${dto.deviceId}: ${message}`,
+        );
+      }
+    }
+
+    const baseMessages = this.llmService.buildEnglishTutorPrompt(
+      dto.asrText,
+      context,
+      retrieveResult.unitName,
+      history,
+      promptOptions,
+    );
+    const messages: LlmMessage[] = memoryPrompt.text
+      ? [{ role: "system", content: memoryPrompt.text }, ...baseMessages]
+      : baseMessages;
+
     // 流式开关：LLM_STREAM_ENABLED=false 时整体回落到非流式单模型路径
     const streamEnabled =
       this.configService.get<string>("LLM_STREAM_ENABLED") !== "false";
@@ -443,24 +496,10 @@ export class VendorService {
     let filler: string | null = null;
     let answer = "";
     if (streamEnabled) {
-      const messages = this.llmService.buildEnglishTutorPrompt(
-        dto.asrText,
-        context,
-        retrieveResult.unitName,
-        history,
-        promptOptions,
-      );
       ({ responseText, llmFailed, filler, answer } =
         await this.generateStreamReply(dto, turnId, messages, recentFillers));
     } else {
       try {
-        const messages = this.llmService.buildEnglishTutorPrompt(
-          dto.asrText,
-          context,
-          retrieveResult.unitName,
-          history,
-          promptOptions,
-        );
         const llmResult = await this.llmService.complete({ messages });
         responseText = llmResult.text;
       } catch (error) {
@@ -525,6 +564,17 @@ export class VendorService {
       this.logger.warn(
         `Invalid conversation context skipped: mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
       );
+    }
+
+    if (!llmFailed && memoryPrompt.memoryIds.length > 0) {
+      try {
+        await this.childMemoriesService.markInjected(memoryPrompt.memoryIds);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Failed to mark child memories injected for deviceId=${dto.deviceId}: ${message}`,
+        );
+      }
     }
 
     return reply;

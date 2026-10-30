@@ -85,6 +85,18 @@ Deda 微信小程序后端服务，负责家长 App 设备管理、学习数据�
 | 健康检查（可选） | `GET /health` | 供机芯厂商云或负载均衡探活；机芯厂如不需要，可由业务接口响应替代 |
 | 厂商 Webhook（备用） | `POST /vendor/health` | 现有备用 HTTP 接口 |
 
+### 乙方云流量录制与对账（联调追责）
+
+设置 `VENDOR_TRAFFIC_RECORD=on` 后，vendor 通道的每条上行/下行原文会带时间戳落盘为
+`records/vendor-YYYY-MM-DD.jsonl`（按天轮转，默认保留 7 天，文件不进 git）：
+
+- `direction=in`：乙方下行到我方的原文（`vendor:text:in`，含校验失败和报错的情况）
+- `direction=out`：我方上行到乙方的原文（`vendor:text:chunk` / `vendor:text:out`）
+
+对账时按时间排序即可复现完整时间线，例如核对"孩子说完话 → 乙方 `text:in` 到达我方"
+的延迟：`cat records/vendor-*.jsonl | sort` 后逐行比对时间戳。录制写盘失败只打 warn，
+不影响真实对话链路；开关关闭时零开销。
+
 ### 家长 App 可以期望 deda-server 提供的接口
 
 | 能力 | 路径 | 说明 |

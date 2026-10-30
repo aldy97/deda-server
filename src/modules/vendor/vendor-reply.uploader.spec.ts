@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { io } from "socket.io-client";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
+import { VendorTrafficRecorder } from "./traffic-recorder";
 
 jest.mock("socket.io-client");
 const mockedIo = io as jest.MockedFunction<typeof io>;
@@ -24,6 +25,7 @@ describe("VendorReplyUploader", () => {
   };
 
   const buildModule = async (env: Record<string, string>) => {
+    const recordMock = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         VendorReplyUploader,
@@ -33,9 +35,16 @@ describe("VendorReplyUploader", () => {
             get: jest.fn((key: string) => env[key]),
           },
         },
+        {
+          provide: VendorTrafficRecorder,
+          useValue: { record: recordMock },
+        },
       ],
     }).compile();
-    return module.get<VendorReplyUploader>(VendorReplyUploader);
+    return {
+      uploader: module.get<VendorReplyUploader>(VendorReplyUploader),
+      recordMock,
+    };
   };
 
   const chunk = {
@@ -52,7 +61,7 @@ describe("VendorReplyUploader", () => {
   });
 
   it("should skip sending when VENDOR_WS_UPLOAD_URL is not configured", async () => {
-    const uploader = await buildModule({});
+    const { uploader } = await buildModule({});
 
     await uploader.sendChunk(chunk);
     await uploader.sendFullReply({
@@ -63,6 +72,21 @@ describe("VendorReplyUploader", () => {
     expect(mockedIo).not.toHaveBeenCalled();
   });
 
+  it("should record outbound traffic even when uploader is not configured", async () => {
+    const { uploader, recordMock } = await buildModule({});
+
+    await uploader.sendChunk(chunk);
+
+    expect(recordMock).toHaveBeenCalledWith(
+      "out",
+      chunk,
+      expect.objectContaining({
+        event: "vendor:text:chunk",
+        deviceId: "dev-001",
+      }),
+    );
+  });
+
   it("should connect lazily and emit chunk with ack", async () => {
     const socket = createMockSocket();
     socket.emit.mockImplementation(
@@ -71,7 +95,7 @@ describe("VendorReplyUploader", () => {
     );
     mockedIo.mockReturnValue(socket);
 
-    const uploader = await buildModule({
+    const { uploader } = await buildModule({
       VENDOR_WS_UPLOAD_URL: "http://vendor-cloud/ws",
     });
     const sendPromise = uploader.sendChunk(chunk);
@@ -100,7 +124,7 @@ describe("VendorReplyUploader", () => {
     );
     mockedIo.mockReturnValue(socket);
 
-    const uploader = await buildModule({
+    const { uploader } = await buildModule({
       VENDOR_WS_UPLOAD_URL: "http://vendor-cloud/ws",
     });
     const first = uploader.sendChunk(chunk);
@@ -127,7 +151,7 @@ describe("VendorReplyUploader", () => {
     );
     mockedIo.mockReturnValue(socket);
 
-    const uploader = await buildModule({
+    const { uploader } = await buildModule({
       VENDOR_WS_UPLOAD_URL: "http://vendor-cloud/ws",
     });
     const sendPromise = uploader.sendChunk(chunk);
@@ -141,7 +165,7 @@ describe("VendorReplyUploader", () => {
     const socket = createMockSocket();
     mockedIo.mockReturnValue(socket);
 
-    const uploader = await buildModule({
+    const { uploader } = await buildModule({
       VENDOR_WS_UPLOAD_URL: "http://vendor-cloud/ws",
     });
     socket.emit.mockImplementation(

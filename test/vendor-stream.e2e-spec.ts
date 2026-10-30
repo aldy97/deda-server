@@ -8,6 +8,7 @@ import { AppModule } from "./../src/app.module";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
 import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
+import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
 
 /**
  * 流式全链路 e2e（TDD：模拟机芯厂云，不依赖真实外部服务）
@@ -203,6 +204,14 @@ describe("Vendor streaming pipeline (e2e)", () => {
       .useValue(mockRagService)
       .overrideProvider(LlmService)
       .useValue(mockLlmService)
+      .overrideProvider(ChildMemoriesService)
+      .useValue({
+        extractAndStore: jest.fn().mockResolvedValue(0),
+        buildPromptBlock: jest
+          .fn()
+          .mockResolvedValue({ text: "", memoryIds: [] }),
+        markInjected: jest.fn().mockResolvedValue(undefined),
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();
