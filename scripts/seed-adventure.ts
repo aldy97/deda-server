@@ -1,18 +1,10 @@
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
-const DEVICE_INTERNAL_ID = "d6652314-2a68-4893-9014-322bc938856a";
 
-/** Elly 专属首集：主线、选项回应和兜底均为人写定稿。 */
+/** Elly 专属首集：只写故事内容，不修改任何设备配置。 */
 async function main() {
-  const result = await prisma.$transaction(async (tx) => {
-    const device = await tx.device.findUnique({
-      where: { id: DEVICE_INTERNAL_ID },
-    });
-    if (!device) {
-      throw new Error(`Device not found: ${DEVICE_INTERNAL_ID}`);
-    }
-
+  const episode = await prisma.$transaction(async (tx) => {
     const episodeKey = {
       characterKey: "elly",
       season: 1,
@@ -118,15 +110,11 @@ async function main() {
       include: { segments: true },
     });
 
-    await tx.device.update({
-      where: { id: DEVICE_INTERNAL_ID },
-      data: { characterKey: "elly" },
-    });
-    return { episode, vendorDeviceId: device.deviceId };
+    return episode;
   });
 
   console.log(
-    `Seeded ${result.episode.title}: ${result.episode.segments.length} segments; device ${DEVICE_INTERNAL_ID} (${result.vendorDeviceId}) => elly`,
+    `Seeded ${episode.title}: ${episode.segments.length} segments for elly`,
   );
 }
 
