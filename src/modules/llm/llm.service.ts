@@ -76,22 +76,30 @@ export class LlmService {
    * 调用 LLM chat completions
    */
   async complete(options: LlmCompleteOptions): Promise<LlmCompleteResult> {
-    if (!this.apiKey) {
-      this.logger.error("OPENAI_API_KEY is not configured");
+    const model = options.model ?? this.model;
+    const isSmallModel = model === this.smallModel;
+    const baseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
+    const apiKey = isSmallModel ? this.smallApiKey : this.apiKey;
+    if (!apiKey) {
+      this.logger.error(
+        isSmallModel
+          ? "SMALL_LLM_API_KEY is not configured"
+          : "OPENAI_API_KEY is not configured",
+      );
       throw new Error("LLM API key is not configured");
     }
 
-    const url = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
 
     try {
       this.logger.debug(
-        `LLM request: model=${this.model}, messages=${JSON.stringify(options.messages)}`,
+        `LLM request: model=${model}, messages=${JSON.stringify(options.messages)}`,
       );
       const response = await axios.post(
         url,
         {
-          model: options.model ?? this.model,
+          model,
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 512,
@@ -99,7 +107,7 @@ export class LlmService {
         },
         {
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
           },
           timeout: timeoutMs,
@@ -255,6 +263,43 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
     return [
       { role: "system", content: systemPrompt + bannedSection },
       { role: "user", content: asrText },
+    ];
+  }
+
+  /**
+   * 构建冒险故事互动接话 prompt。
+   * 小模型只负责接住孩子并过渡，故事主线始终由引擎按定稿段落推进。
+   */
+  buildAdventureInteractionPrompt(params: {
+    characterPersona: string;
+    segmentText: string;
+    childReply: string;
+    kind: "open_question" | "redirect";
+  }): LlmMessage[] {
+    const redirectRule =
+      params.kind === "redirect"
+        ? "孩子的回答偏离了当前互动：先接住孩子的话题，再自然引回当前互动问题；只引回这一次，不责怪孩子。"
+        : "自然接住孩子的想法并鼓励表达，然后结束接话；后续故事原文会由系统继续播报，不要再提问。";
+
+    const systemPrompt = `你是儿童互动冒险故事中的角色接话层，只负责对孩子刚刚的回答作短暂回应。
+
+角色设定：
+${params.characterPersona}
+
+当前互动问题：
+${params.segmentText}
+
+硬约束：
+1. 只输出 1-2 句口语化中文，符合角色性格与口癖，适合直接语音播报。
+2. 禁止续写、改写或剧透主线，不确认孩子编出的新剧情，也不增加新人物、新场景或新任务。
+3. 禁止连续追问；禁止批评、纠正、说教或否定孩子。
+4. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
+5. 若孩子表达不适宜内容，只说「我们先回到故事里，好吗？」，不要复述不适宜内容。
+6. ${redirectRule}`;
+
+    return [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: params.childReply },
     ];
   }
 

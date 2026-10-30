@@ -73,6 +73,19 @@ describe("Vendor streaming pipeline (e2e)", () => {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
     },
+    adventureEpisode: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    adventureSegment: { findMany: jest.fn().mockResolvedValue([]) },
+    adventureDailyRecord: { findFirst: jest.fn().mockResolvedValue(null) },
+    adventureProgress: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      findUnique: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
 
   const mockRagService = {

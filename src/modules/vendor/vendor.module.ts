@@ -5,9 +5,10 @@ import { VendorService } from "./vendor.service";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { RagModule } from "@/modules/rag/rag.module";
 import { LlmModule } from "@/modules/llm/llm.module";
+import { AdventureModule } from "@/modules/adventure/adventure.module";
 
 @Module({
-  imports: [RagModule, LlmModule],
+  imports: [RagModule, LlmModule, AdventureModule],
   providers: [VendorGateway, VendorService, VendorReplyUploader],
   controllers: [VendorController],
   exports: [VendorService],

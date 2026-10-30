@@ -23,6 +23,7 @@ import { PrismaModule } from "./common/prisma/prisma.module";
 import { MqttModule } from "./common/mqtt/mqtt.module";
 import { DeviceStatusModule } from "./modules/device-status/device-status.module";
 import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
+import { AdventureModule } from "./modules/adventure/adventure.module";
 
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { ConversationModesModule } from "./modules/conversation-modes/conversati
     MusicModule,
     RagModule,
     LlmModule,
+    AdventureModule,
   ],
 })
 export class AppModule {}
