@@ -7,6 +7,7 @@ import { VendorReplyUploader } from "./../src/modules/vendor/vendor-reply.upload
 import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
+import { AdventureService } from "./../src/modules/adventure/adventure.service";
 
 const extraction = (value: string, operation = "assert") =>
   JSON.stringify([
@@ -186,6 +187,14 @@ describe("Child memories conversation pipeline (e2e)", () => {
         },
         { provide: LlmService, useValue: mockLlmService },
         { provide: VendorReplyUploader, useValue: mockReplyUploader },
+        {
+          provide: AdventureService,
+          useValue: {
+            handleChildReply: jest.fn().mockResolvedValue(null),
+            isCompletedToday: jest.fn().mockResolvedValue(false),
+            registerTimeoutListener: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
