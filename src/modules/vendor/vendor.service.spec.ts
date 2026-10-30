@@ -11,6 +11,7 @@ import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { AdventureService } from "@/modules/adventure/adventure.service";
+import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -26,6 +27,11 @@ describe("VendorService", () => {
     recordEntryBlocked: jest.Mock;
     markPromptPlaybackComplete: jest.Mock;
     registerTimeoutListener: jest.Mock;
+  };
+  let childMemoriesService: {
+    extractAndStore: jest.Mock;
+    buildPromptBlock: jest.Mock;
+    markInjected: jest.Mock;
   };
   let replyUploader: { sendChunk: jest.Mock; sendFullReply: jest.Mock };
 
@@ -132,6 +138,16 @@ describe("VendorService", () => {
           },
         },
         {
+          provide: ChildMemoriesService,
+          useValue: {
+            extractAndStore: jest.fn().mockResolvedValue(0),
+            buildPromptBlock: jest
+              .fn()
+              .mockResolvedValue({ text: "", memoryIds: [] }),
+            markInjected: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
           provide: VendorReplyUploader,
           useValue: {
             sendChunk: jest.fn(),
@@ -159,6 +175,7 @@ describe("VendorService", () => {
     llmService = module.get(LlmService);
     configService = module.get(ConfigService);
     adventureService = module.get(AdventureService) as any;
+    childMemoriesService = module.get(ChildMemoriesService);
     replyUploader = module.get(VendorReplyUploader) as any;
 
     replyUploader.sendChunk.mockResolvedValue(undefined);
@@ -928,6 +945,85 @@ describe("VendorService", () => {
           mode: "free_chat",
           promptTemplate: expect.stringContaining("English"),
         }),
+      );
+    });
+
+    it("should inject relevant memories only into the free-chat answer and extract asynchronously", async () => {
+      setupStreamingBase();
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+        textbookId: null,
+        unitId: null,
+        conversationModeKey: "companion",
+      } as any);
+      prisma.message.findMany.mockResolvedValue([
+        {
+          role: "assistant",
+          content: "嗯\n你最喜欢红色。",
+          rawPayload: { filler: "嗯", answer: "你最喜欢红色。" },
+        },
+      ]);
+      childMemoriesService.buildPromptBlock.mockResolvedValue({
+        text: "孩子当前最喜欢蓝色。",
+        memoryIds: ["memory-blue"],
+      });
+      mockAnswerStream("我记得你最喜欢蓝色！");
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "你还记得我喜欢什么颜色吗？",
+      });
+
+      expect(result.responseText).toContain("我记得你最喜欢蓝色！");
+      expect(childMemoriesService.buildPromptBlock).toHaveBeenCalledWith(
+        "uuid-s1",
+        "你还记得我喜欢什么颜色吗？",
+      );
+      const answerCall = llmService.completeStream.mock.calls.find(
+        ([options]) => options.model !== "small-llm",
+      );
+      expect(answerCall?.[0].messages[0]).toEqual({
+        role: "system",
+        content: "孩子当前最喜欢蓝色。",
+      });
+      const fillerCall = llmService.completeStream.mock.calls.find(
+        ([options]) => options.model === "small-llm",
+      );
+      expect(JSON.stringify(fillerCall?.[0].messages)).not.toContain(
+        "孩子当前最喜欢蓝色",
+      );
+      const userCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "user",
+      );
+      expect(childMemoriesService.extractAndStore).toHaveBeenCalledWith({
+        deviceId: "uuid-s1",
+        turnId: userCall[0].data.turnId,
+        asrText: "你还记得我喜欢什么颜色吗？",
+        previousAssistant: "你最喜欢红色。",
+        sourceOccurredAt: userCall[0].data.spokeAt,
+      });
+      expect(childMemoriesService.markInjected).toHaveBeenCalledWith([
+        "memory-blue",
+      ]);
+    });
+
+    it("should keep the streamed reply working when memory extraction fails", async () => {
+      setupStreamingBase();
+      childMemoriesService.extractAndStore.mockRejectedValue(
+        new Error("extractor unavailable"),
+      );
+      mockAnswerStream("I still answer.");
+
+      await expect(
+        service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "Hello",
+        }),
+      ).resolves.toMatchObject({ responseText: "嗯\nI still answer." });
+
+      expect(childMemoriesService.extractAndStore).toHaveBeenCalled();
+      expect(uploadedChunks().some((chunk) => chunk.source === "answer")).toBe(
+        true,
       );
     });
 

@@ -7,9 +7,10 @@ import { VendorTrafficRecorder } from "./traffic-recorder";
 import { RagModule } from "@/modules/rag/rag.module";
 import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
 
 @Module({
-  imports: [RagModule, LlmModule, AdventureModule],
+  imports: [RagModule, LlmModule, AdventureModule, ChildMemoriesModule],
   providers: [
     VendorGateway,
     VendorService,
