@@ -134,12 +134,76 @@ describe("MqttService", () => {
   });
 
   describe("disconnect", () => {
-    it("should end client when connected", () => {
+    it("should force close the client and wait for its close callback", async () => {
+      mockClient.end.mockImplementation(
+        (_force: boolean, _options: object, callback: () => void) => {
+          callback();
+        },
+      );
       service.connect("mqtt://localhost:1883");
-      service.disconnect();
 
-      expect(mockClient.end).toHaveBeenCalled();
+      await service.disconnect();
+
+      expect(mockClient.end).toHaveBeenCalledWith(
+        true,
+        {},
+        expect.any(Function),
+      );
       expect(service.getClient()).toBeUndefined();
+    });
+  });
+
+  describe("connection callbacks and shutdown", () => {
+    it("handles connection lifecycle events", () => {
+      service.connect("mqtt://localhost:1883");
+      const handlers = new Map<string, (...args: unknown[]) => void>(
+        mockClient.on.mock.calls,
+      );
+
+      handlers.get("connect")?.();
+      handlers.get("error")?.(new Error("connection failed"));
+      handlers.get("close")?.();
+      handlers.get("reconnect")?.();
+
+      expect(mockClient.on).toHaveBeenCalledTimes(5);
+    });
+
+    it("handles subscribe and publish callbacks", () => {
+      service.connect("mqtt://localhost:1883");
+      service.subscribe("device/+/status");
+      service.publish("device/dev-001/status", "payload");
+      const subscribeCallback = mockClient.subscribe.mock.calls[0][2] as (
+        error?: Error,
+      ) => void;
+      const publishCallback = mockClient.publish.mock.calls[0][3] as (
+        error?: Error,
+      ) => void;
+
+      subscribeCallback(new Error("subscribe failed"));
+      subscribeCallback();
+      publishCallback(new Error("publish failed"));
+      publishCallback();
+
+      expect(mockClient.subscribe).toHaveBeenCalledTimes(1);
+      expect(mockClient.publish).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for MQTT shutdown during module destruction", async () => {
+      mockClient.end.mockImplementation(
+        (_force: boolean, _options: object, callback: () => void) => {
+          callback();
+        },
+      );
+      service.connect("mqtt://localhost:1883");
+
+      await service.onModuleDestroy();
+
+      expect(mockClient.end).toHaveBeenCalledWith(
+        true,
+        {},
+        expect.any(Function),
+      );
+      await expect(service.onModuleDestroy()).resolves.toBeUndefined();
     });
   });
 

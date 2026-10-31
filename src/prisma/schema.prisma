@@ -54,8 +54,73 @@ model Device {
   adventureDailyRecords AdventureDailyRecord[]
   adventureEvents AdventureEvent[]
   childMemories   ChildMemory[]
+  parentReports   ParentReport[]
+  habitPlans      HabitPlan[]
 
   @@map("devices")
+}
+
+// 家长每日报告：使用时长和模式分布实时统计，本表只保存生成内容与反馈。
+model ParentReport {
+  id                   String    @id @default(uuid())
+  deviceId             String
+  reportDate           String    // 设备当地日期 YYYY-MM-DD
+  generationStatus     String    @default("pending") // pending / generating / completed / failed
+  generationStartedAt  DateTime?
+  generationAttempts   Int       @default(0)
+  generationError      String?
+  nextRetryAt          DateTime?
+  expressionObservation String?
+  emotionObservation   String?
+  thinkingObservation  String?
+  suggestion           String?
+  generatorModel       String?
+  promptVersion        String?
+  generatedAt          DateTime?
+  feedback             String?   // useful / not_useful
+  feedbackAt           DateTime?
+  feedbackUserId       String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, reportDate])
+  @@map("parent_reports")
+}
+
+// 家长端习惯培养计划，例如 21 天睡前刷牙计划。
+model HabitPlan {
+  id        String   @id @default(uuid())
+  deviceId  String
+  key       String
+  title     String
+  targetDays Int     @default(21)
+  startDate String   // YYYY-MM-DD
+  status    String   @default("active") // active / completed / archived
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  device       Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  dailyRecords HabitDailyRecord[]
+
+  @@unique([deviceId, key])
+  @@map("habit_plans")
+}
+
+model HabitDailyRecord {
+  id         String   @id @default(uuid())
+  planId     String
+  recordDate String   // YYYY-MM-DD
+  completed  Boolean  @default(false)
+  note       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  plan HabitPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, recordDate])
+  @@map("habit_daily_records")
 }
 
 // 家长与设备绑定关系（多对多）

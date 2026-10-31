@@ -33,8 +33,8 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  onModuleDestroy(): void {
-    this.disconnect();
+  async onModuleDestroy(): Promise<void> {
+    await this.disconnect();
   }
 
   /**
@@ -72,11 +72,14 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
   /**
    * 断开 MQTT 连接
    */
-  disconnect(): void {
-    if (this.client) {
-      this.client.end();
-      this.client = undefined;
-    }
+  disconnect(): Promise<void> {
+    const client = this.client;
+    this.client = undefined;
+    if (!client) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      client.end(true, {}, () => resolve());
+    });
   }
 
   /**

@@ -1,3 +1,61 @@
+import { IsBoolean, IsString, Matches } from "class-validator";
+
+export class ParentReportQueryDto {
+  @IsString()
+  deviceId!: string;
+
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: "date must use YYYY-MM-DD format",
+  })
+  date!: string;
+}
+
+export class ParentReportFeedbackDto {
+  @IsString()
+  deviceId!: string;
+
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: "reportDate must use YYYY-MM-DD format",
+  })
+  reportDate!: string;
+
+  @IsBoolean()
+  useful!: boolean;
+}
+
+export interface ParentReportModeUsageDto {
+  mode: string;
+  count: number;
+}
+
+export interface ParentReportHabitDto {
+  planId: string;
+  title: string;
+  targetDays: number;
+  completedDays: number;
+  todayCompleted: boolean;
+}
+
+export interface ParentReportDto {
+  deviceId: string;
+  reportDate: string;
+  durationMinutes: number;
+  modeUsage: ParentReportModeUsageDto[];
+  summary: {
+    expressionObservation: string | null;
+    emotionObservation: string | null;
+    thinkingObservation: string | null;
+    suggestion: string | null;
+  } | null;
+  habits: ParentReportHabitDto[];
+  feedback: "useful" | "not_useful" | null;
+}
+
+export interface ParentReportFeedbackResultDto {
+  reportDate: string;
+  feedback: "useful" | "not_useful";
+}
+
 export interface DeviceDashboardMetrics {
   deviceId: string;
   deviceName: string;

@@ -9,6 +9,22 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/deda_test?schema=public
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: deda_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d deda_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +38,11 @@ jobs:
       # Prisma Client 生成物（不入库），单测/e2e 的类型与运行时均依赖
       - run: npx prisma generate --schema=src/prisma/schema.prisma
 
+      - name: Apply migrations to the isolated e2e database
+        run: npx prisma migrate deploy --schema=src/prisma/schema.prisma
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/deda_test?schema=public
+
       - run: npm run lint
 
       # 仓库无 typecheck 脚本，直接调 tsc（与 pre-commit 钩子一致）
@@ -31,6 +52,5 @@ jobs:
 
       - run: npm run test
 
-      # e2e 全部 mock Prisma/LLM，无需真实 DB 与外部服务；
-      # --forceExit 规避既有句柄泄漏导致的 worker 不退出
-      - run: npm run test:e2e -- --forceExit
+      # e2e 使用独立 PostgreSQL；LLM 与外部服务保持 mock，禁止 forceExit 掩盖泄漏
+      - run: npm run test:e2e
