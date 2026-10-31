@@ -100,6 +100,15 @@
 - 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
 - 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
 
+## 家长每日报告
+
+- 查询：`GET /learning-stats/parent-report?deviceId=<厂商设备编号>&date=YYYY-MM-DD`；只读取已绑定设备，不触发生成。
+- 反馈：`POST /learning-stats/parent-report/feedback`，请求体为 `deviceId`、`reportDate`、`useful`。
+- 自动生成：配置 `PARENT_REPORT_GENERATION_ENABLED=true` 后，服务启动时补扫一次，之后每 15 分钟扫描；设备当地 01:15 后生成昨天报告，默认时区 `Asia/Shanghai`。
+- 空日无用户消息时不调用 LLM；有消息时只将 answer 部分送入主模型，filler 不进入报告 prompt。
+- 报告状态为 `pending / generating / completed / failed`；数据库抢占防止多实例重复生成，失败按 5/15/45 分钟退避，最多 3 次。
+- 本地数据库集成测试必须设置 `TEST_DATABASE_URL`，且数据库名必须包含 `test`；测试只写该隔离库并 mock LLM，不使用开发库或真实模型。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。

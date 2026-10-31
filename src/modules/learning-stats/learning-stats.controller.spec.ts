@@ -210,4 +210,44 @@ describe("LearningStatsController", () => {
       expect(result).toBe(health);
     });
   });
+
+  describe("parent reports", () => {
+    it("should return the requested daily parent report", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      const report = { deviceId: "dev-001", reportDate: "2026-10-30" };
+      service.getParentReport = jest.fn().mockResolvedValue(report);
+
+      const result = await controller.parentReport(req, {
+        deviceId: "dev-001",
+        date: "2026-10-30",
+      });
+
+      expect(service.getParentReport).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+      );
+      expect(result).toBe(report);
+    });
+
+    it("should submit useful or not-useful feedback", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      service.submitParentReportFeedback = jest
+        .fn()
+        .mockResolvedValue({ feedback: "useful" });
+
+      await controller.parentReportFeedback(req, {
+        deviceId: "dev-001",
+        reportDate: "2026-10-30",
+        useful: true,
+      });
+
+      expect(service.submitParentReportFeedback).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        true,
+      );
+    });
+  });
 });

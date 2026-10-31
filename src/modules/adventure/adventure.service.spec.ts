@@ -674,6 +674,36 @@ describe("AdventureService", () => {
     });
   });
 
+  it("should resume the same exited episode on a later day without assigning a new story", async () => {
+    const previouslyAssignedDaily = {
+      ...baseDaily,
+      assignedDate: "2026-10-29",
+    };
+    prisma.adventureDailyRecord.findFirst.mockImplementation((args) =>
+      Promise.resolve(
+        args.where.completedDate ? null : previouslyAssignedDaily,
+      ),
+    );
+    prisma.adventureProgress.findUnique.mockResolvedValue({
+      ...baseProgress,
+      status: "exited",
+      nextSegmentOrder: 3,
+    });
+
+    const reply = await service.startToday("dev-uuid-1", true);
+
+    expect(reply.texts[0]).toBe(segments[3].text);
+    expect(reply.texts).not.toContain(episode.recap);
+    expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    expect(prisma.adventureEpisode.findMany).not.toHaveBeenCalled();
+    expect(prisma.adventureEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        dailyRecordId: "daily-1",
+        eventType: "resumed",
+      }),
+    });
+  });
+
   it("should select the first personally unfinished episode without replaying a completed one", async () => {
     const episode2 = { ...episode, id: "ep2", episodeNumber: 2 };
     prisma.adventureEpisode.findMany.mockResolvedValue([episode, episode2]);

@@ -1050,4 +1050,128 @@ describe("LearningStatsService", () => {
       expect(result.suggestion).toContain("今天还没有学习记录");
     });
   });
+
+  describe("parent reports", () => {
+    beforeEach(() => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+    });
+
+    it("should combine daily usage, mode distribution, stored summary and habit progress", async () => {
+      prisma.device = {
+        findUnique: jest.fn().mockResolvedValue({ timezone: "Asia/Shanghai" }),
+      };
+      prisma.learningStat = {
+        findUnique: jest.fn().mockResolvedValue({ durationSeconds: 1200 }),
+      };
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1", "t1", "讲个故事", { mode: "free_chat" }),
+        makeUserMessage("m2", "t2", "继续聊", { mode: "free_chat" }),
+        makeUserMessage("m3", "t3", "继续冒险", {
+          mode: "adventure_story",
+        }),
+      ]);
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({
+          expressionObservation: "孩子主动发起了故事请求。",
+          emotionObservation: null,
+          thinkingObservation: null,
+          suggestion: "明天继续接住孩子的故事想象。",
+          feedback: "useful",
+        }),
+      };
+      prisma.habitPlan = {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: "habit-1",
+            title: "睡前主动刷牙洗脸",
+            targetDays: 21,
+            dailyRecords: [
+              { recordDate: "2026-10-29", completed: true },
+              { recordDate: "2026-10-30", completed: true },
+            ],
+          },
+        ]),
+      };
+
+      const result = await service.getParentReport(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+      );
+
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            spokeAt: {
+              gte: new Date("2026-10-29T16:00:00Z"),
+              lt: new Date("2026-10-30T16:00:00Z"),
+            },
+          }),
+        }),
+      );
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        reportDate: "2026-10-30",
+        durationMinutes: 20,
+        modeUsage: [
+          { mode: "free_chat", count: 2 },
+          { mode: "adventure_story", count: 1 },
+        ],
+        summary: {
+          expressionObservation: "孩子主动发起了故事请求。",
+          emotionObservation: null,
+          thinkingObservation: null,
+          suggestion: "明天继续接住孩子的故事想象。",
+        },
+        habits: [
+          {
+            planId: "habit-1",
+            title: "睡前主动刷牙洗脸",
+            targetDays: 21,
+            completedDays: 2,
+            todayCompleted: true,
+          },
+        ],
+        feedback: "useful",
+      });
+    });
+
+    it("should reject feedback when the device is not bound to the parent", async () => {
+      await expect(
+        service.submitParentReportFeedback(
+          "user-001",
+          "dev-999",
+          "2026-10-30",
+          true,
+        ),
+      ).rejects.toThrow("Device not bound");
+    });
+
+    it("should persist report feedback for the bound parent", async () => {
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({ id: "report-1" }),
+        update: jest.fn().mockResolvedValue({ feedback: "not_useful" }),
+      };
+
+      const result = await service.submitParentReportFeedback(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        false,
+      );
+
+      expect(prisma.parentReport.update).toHaveBeenCalledWith({
+        where: { id: "report-1" },
+        data: {
+          feedback: "not_useful",
+          feedbackAt: expect.any(Date),
+          feedbackUserId: "user-001",
+        },
+      });
+      expect(result).toEqual({
+        reportDate: "2026-10-30",
+        feedback: "not_useful",
+      });
+    });
+  });
 });

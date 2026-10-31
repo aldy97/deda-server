@@ -1,4 +1,8 @@
-import { Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import {
   DashboardDto,
@@ -12,11 +16,14 @@ import {
   StatsContext,
   LearningStatsInsightDto,
   LearningStatsHealthDto,
+  ParentReportDto,
+  ParentReportFeedbackResultDto,
 } from "./dto/learning-stats.dto";
 import { ConversationMetricsCalculator } from "./calculators/conversation-metrics.calculator";
 import { StreakCalculator } from "./calculators/streak.calculator";
 import { TopicCoverageCalculator } from "./calculators/topic-coverage.calculator";
 import { ScoreCalculator } from "./calculators/score.calculator";
+import { isValidReportDate, reportDayRange } from "./parent-report-date.util";
 
 interface ActiveConfig {
   deviceId: string;
@@ -41,6 +48,126 @@ export class LearningStatsService {
   private readonly scoreCalculator = new ScoreCalculator();
 
   constructor(private readonly prisma: PrismaService) {}
+
+  async getParentReport(
+    userId: string,
+    deviceId: string,
+    reportDate: string,
+  ): Promise<ParentReportDto> {
+    const { internalIds } = await this.getUserDevices(userId, deviceId);
+    if (internalIds.length === 0) {
+      throw new NotFoundException("Device not bound");
+    }
+    if (!isValidReportDate(reportDate)) {
+      throw new BadRequestException("Invalid report date");
+    }
+    const internalId = internalIds[0];
+    const device = await this.prisma.device.findUnique({
+      where: { id: internalId },
+      select: { timezone: true },
+    });
+    const { start, end } = reportDayRange(reportDate, device?.timezone);
+
+    const [learningStat, messages, report, habitPlans] = await Promise.all([
+      this.prisma.learningStat.findUnique({
+        where: {
+          deviceId_statDate: { deviceId: internalId, statDate: reportDate },
+        },
+        select: { durationSeconds: true },
+      }),
+      this.prisma.message.findMany({
+        where: {
+          deviceId: internalId,
+          role: "user",
+          spokeAt: { gte: start, lt: end },
+        },
+        select: { mode: true },
+      }),
+      this.prisma.parentReport.findUnique({
+        where: {
+          deviceId_reportDate: { deviceId: internalId, reportDate },
+        },
+      }),
+      this.prisma.habitPlan.findMany({
+        where: { deviceId: internalId, status: "active" },
+        select: {
+          id: true,
+          title: true,
+          targetDays: true,
+          dailyRecords: {
+            select: { recordDate: true, completed: true },
+          },
+        },
+      }),
+    ]);
+
+    const modeCounts = new Map<string, number>();
+    for (const message of messages) {
+      const mode = message.mode || "unknown";
+      modeCounts.set(mode, (modeCounts.get(mode) ?? 0) + 1);
+    }
+    const modeUsage = Array.from(modeCounts, ([mode, count]) => ({
+      mode,
+      count,
+    })).sort((a, b) => b.count - a.count || a.mode.localeCompare(b.mode));
+
+    return {
+      deviceId,
+      reportDate,
+      durationMinutes: Math.round((learningStat?.durationSeconds ?? 0) / 60),
+      modeUsage,
+      summary: report
+        ? {
+            expressionObservation: report.expressionObservation,
+            emotionObservation: report.emotionObservation,
+            thinkingObservation: report.thinkingObservation,
+            suggestion: report.suggestion,
+          }
+        : null,
+      habits: habitPlans.map((plan) => ({
+        planId: plan.id,
+        title: plan.title,
+        targetDays: plan.targetDays,
+        completedDays: plan.dailyRecords.filter((record) => record.completed)
+          .length,
+        todayCompleted: plan.dailyRecords.some(
+          (record) => record.recordDate === reportDate && record.completed,
+        ),
+      })),
+      feedback: (report?.feedback as "useful" | "not_useful" | null) ?? null,
+    };
+  }
+
+  async submitParentReportFeedback(
+    userId: string,
+    deviceId: string,
+    reportDate: string,
+    useful: boolean,
+  ): Promise<ParentReportFeedbackResultDto> {
+    const { internalIds } = await this.getUserDevices(userId, deviceId);
+    if (internalIds.length === 0) {
+      throw new NotFoundException("Device not bound");
+    }
+    const report = await this.prisma.parentReport.findUnique({
+      where: {
+        deviceId_reportDate: {
+          deviceId: internalIds[0],
+          reportDate,
+        },
+      },
+      select: { id: true },
+    });
+    if (!report) {
+      throw new NotFoundException("Parent report not found");
+    }
+
+    const feedback = useful ? "useful" : "not_useful";
+    await this.prisma.parentReport.update({
+      where: { id: report.id },
+      data: { feedback, feedbackAt: new Date(), feedbackUserId: userId },
+    });
+    return { reportDate, feedback };
+  }
 
   async getDashboard(
     userId: string,

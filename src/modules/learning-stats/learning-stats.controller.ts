@@ -1,8 +1,21 @@
-import { Controller, Get, Param, Query, Req, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { Request } from "express";
 import { LearningStatsService } from "./learning-stats.service";
 import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
+import {
+  ParentReportFeedbackDto,
+  ParentReportQueryDto,
+} from "./dto/learning-stats.dto";
 
 interface RequestWithUser extends Request {
   user: { userId: string; openid: string };
@@ -158,6 +171,31 @@ export class LearningStatsController {
       req.user.userId,
       query.deviceId,
       query.range,
+    );
+  }
+
+  @Get("parent-report")
+  async parentReport(
+    @Req() req: RequestWithUser,
+    @Query() query: ParentReportQueryDto,
+  ) {
+    return this.learningStatsService.getParentReport(
+      req.user.userId,
+      query.deviceId,
+      query.date,
+    );
+  }
+
+  @Post("parent-report/feedback")
+  async parentReportFeedback(
+    @Req() req: RequestWithUser,
+    @Body() body: ParentReportFeedbackDto,
+  ) {
+    return this.learningStatsService.submitParentReportFeedback(
+      req.user.userId,
+      body.deviceId,
+      body.reportDate,
+      body.useful,
     );
   }
 }
