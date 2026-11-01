@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { VendorGateway } from "./vendor.gateway";
 import { VendorController } from "./vendor.controller";
 import { VendorService } from "./vendor.service";
+import { ConversationSessionService } from "./conversation-session.service";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { VendorTrafficRecorder } from "./traffic-recorder";
 import { RagModule } from "@/modules/rag/rag.module";
@@ -14,6 +15,7 @@ import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.mod
   providers: [
     VendorGateway,
     VendorService,
+    ConversationSessionService,
     VendorReplyUploader,
     VendorTrafficRecorder,
   ],

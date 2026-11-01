@@ -16,13 +16,10 @@ import {
   AdventureReply,
   AdventureService,
 } from "@/modules/adventure/adventure.service";
-
-type StoryIntent =
-  | "adventure_story"
-  | "english_story"
-  | "idiom_story"
-  | "free_story"
-  | "not_story";
+import {
+  ConversationIntent,
+  ConversationSessionService,
+} from "./conversation-session.service";
 
 /**
  * 机芯厂-facing 业务服务
@@ -42,6 +39,7 @@ export class VendorService {
     private readonly replyUploader: VendorReplyUploader,
     private readonly adventureService: AdventureService,
     private readonly childMemoriesService: ChildMemoriesService,
+    private readonly conversationSessionService: ConversationSessionService,
   ) {
     this.defaultTextbookId =
       this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
@@ -147,16 +145,19 @@ export class VendorService {
   }
 
   /**
-   * 校验对话上下文是否有效
-   * - free_chat 模式不强制校验 textbook/unit
-   * - locked_unit / textbook_learning 模式要求 textbookId 与 unitId 真实存在
+   * 五模式均不强制校验 textbook/unit；旧教材模式保留原有校验以兼容旧调用方。
    */
   private async validateConversationContext(
     mode: string | null | undefined,
     textbookId: string,
     unitId: string,
   ): Promise<boolean> {
-    if (mode === "free_chat") {
+    if (
+      mode === "free_chat" ||
+      mode === "english_story" ||
+      mode === "idiom_story" ||
+      mode === "sleep_story"
+    ) {
       return true;
     }
 
@@ -193,8 +194,9 @@ export class VendorService {
    */
   private async getRecentHistory(
     deviceInternalId: string,
-    textbookId: string,
-    unitId: string,
+    textbookId: string | null,
+    unitId: string | null,
+    mode?: string,
     limit = 12, // 消息条数，约 6 轮问答
   ): Promise<{
     history: Array<{ role: "user" | "assistant"; content: string }>;
@@ -205,6 +207,7 @@ export class VendorService {
         deviceId: deviceInternalId,
         textbookId,
         unitId,
+        ...(mode ? { mode } : {}),
       },
       orderBy: { spokeAt: "desc" },
       take: limit,
@@ -236,77 +239,17 @@ export class VendorService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
-  private isStoryCandidate(asrText: string): boolean {
-    return /故事|冒险|风铃树|再听一遍|继续讲|接着讲|story|adventure/i.test(
-      asrText,
-    );
-  }
-
-  private fallbackStoryIntent(asrText: string): StoryIntent {
-    if (/英语|英文|english/i.test(asrText)) {
-      return "english_story";
-    }
-    if (/成语|idiom/i.test(asrText)) {
-      return "idiom_story";
-    }
-    if (/冒险|风铃树|再听一遍|继续.*故事|接着.*故事/i.test(asrText)) {
-      return "adventure_story";
-    }
-    return this.isStoryCandidate(asrText) ? "free_story" : "not_story";
-  }
-
-  /** 小模型只做语义分类；每日状态与路由权限始终由后端决定。 */
-  private async classifyStoryIntent(asrText: string): Promise<StoryIntent> {
-    // TODO(可用性)：灰度补充分类模型超时、限流与非法输出的真实指标。
-    try {
-      const result = await this.llmService.complete({
-        model: this.llmService.smallModelName,
-        temperature: 0,
-        maxTokens: 10,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是儿童语音产品的故事意图分类器。只输出一个标签，禁止解释：" +
-              "adventure_story（每日互动冒险、续听或重听已播冒险）；" +
-              "english_story（英语故事或英语口语陪练）；" +
-              "idiom_story（成语故事）；free_story（泛化的听故事或自由创作故事）；" +
-              "not_story（不是故事请求）。孩子表达含糊时按字面选择最接近标签。",
-          },
-          { role: "user", content: `孩子的话：${asrText}` },
-        ],
-      });
-      const text = result.text.trim().toLowerCase();
-      const intents: StoryIntent[] = [
-        "adventure_story",
-        "english_story",
-        "idiom_story",
-        "free_story",
-        "not_story",
-      ];
-      return (
-        intents.find((intent) => text.includes(intent)) ||
-        this.fallbackStoryIntent(asrText)
-      );
-    } catch (error) {
-      this.logger.warn(
-        `Story intent classification failed, keyword fallback used: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return this.fallbackStoryIntent(asrText);
-    }
-  }
-
-  private storyPrompt(intent: StoryIntent): string | undefined {
+  private storyPrompt(intent: ConversationIntent): string | undefined {
     switch (intent) {
       case "english_story":
         return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
       case "idiom_story":
         return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
+      case "sleep_story":
+        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。";
       case "adventure_story":
       case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。";
+        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。";
       default:
         return undefined;
     }
@@ -325,9 +268,12 @@ export class VendorService {
       return this.sendAdventureReply(device, adventureReply, dto.asrText);
     }
 
-    let storyIntent: StoryIntent | null = null;
-    if (this.isStoryCandidate(dto.asrText)) {
-      storyIntent = await this.classifyStoryIntent(dto.asrText);
+    const storyIntent = await this.conversationSessionService.resolve(
+      device.id,
+      dto.asrText,
+    );
+    const storyMode = storyIntent !== "free_chat";
+    if (storyMode && storyIntent !== "sleep_story") {
       const completedToday = await this.adventureService.isCompletedToday(
         device.id,
       );
@@ -341,6 +287,7 @@ export class VendorService {
           true,
         );
         if (startedAdventure) {
+          await this.conversationSessionService.reset(device.id);
           return this.sendAdventureReply(device, startedAdventure, dto.asrText);
         }
       }
@@ -358,14 +305,16 @@ export class VendorService {
       device.id,
     );
 
-    const storyMode = storyIntent && storyIntent !== "not_story";
-    const mode = storyMode
-      ? "free_chat"
-      : (activeConfig?.mode ?? "locked_unit");
+    const mode =
+      storyIntent === "english_story" ||
+      storyIntent === "idiom_story" ||
+      storyIntent === "sleep_story"
+        ? storyIntent
+        : "free_chat";
 
-    // free_chat 不涉及教材：快照置空,避免 .env 默认教材/单元污染统计口径
-    const stampTextbookId = mode === "free_chat" ? null : textbookId;
-    const stampUnitId = mode === "free_chat" ? null : unitId;
+    // 五模式均不依赖教材：快照置空，避免默认教材污染统计口径。
+    const stampTextbookId = null;
+    const stampUnitId = null;
 
     // 校验对话上下文是否有效，无效则整轮不落库，避免脏数据
     const contextValid = await this.validateConversationContext(
@@ -374,12 +323,13 @@ export class VendorService {
       unitId,
     );
 
-    // 获取同单元最近消息历史，用于 prompt 拼接
-    // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt
+    // 获取同一模式、同一教材快照的最近消息，避免跨模式和旧教材历史串题。
+    // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
     const { history, recentFillers } = await this.getRecentHistory(
       device.id,
-      textbookId,
-      unitId,
+      stampTextbookId,
+      stampUnitId,
+      mode,
     );
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
@@ -461,7 +411,7 @@ export class VendorService {
       text: "",
       memoryIds: [],
     };
-    if (mode === "free_chat") {
+    if (storyIntent === "free_chat") {
       try {
         memoryPrompt = await this.childMemoriesService.buildPromptBlock(
           device.id,

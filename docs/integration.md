@@ -44,15 +44,23 @@
 | 链路               | API                                                                                                                              | 前端文件                                                                                               | 后端文件                                                                                                                       | 备注                                |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
 | 微信登录换 JWT     | `POST /users/login`                                                                                                              | `pages/login/login.ts`                                                                                 | `src/modules/users/users.controller.ts`                                                                                        | code 来自 `wx.login`                |
-| 设备列表/绑定/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001         |
+| 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序 |
 | 查询设备当前配置   | `GET /device-configs/:deviceId/current`                                                                                          | `pages/device-list/device-list.ts` 等                                                                  | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 多页面共用                          |
 | 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | `pages/switch-mode/switch-mode.ts`                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 点分类仅跳转子页,不在此页保存;mode-only 载荷 400 |
 | 选择自由对话子模式 | `GET /conversation-modes?categoryKey=free_chat`<br>`POST /device-configs/:deviceId/mode`                                         | `pages/choose-free-chat-mode/choose-free-chat-mode.ts`                                                 | `src/modules/conversation-modes/conversation-modes.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts` | 子页提交完整载荷（mode+conversationModeKey） |
 | 选择教材单元       | `GET /textbooks`<br>`GET /textbooks/:id/units`<br>`POST /device-configs/:deviceId/apply`                                         | `pages/textbook-learning/textbook-learning.ts`<br>`pages/choose-textbook-unit/choose-textbook-unit.ts` | `src/modules/textbooks/textbooks.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts`                   | apply 保存 textbookId + unitId      |
 | 查询对话记录       | `GET /conversations?page&pageSize&deviceId`                                                                                      | `pages/chat-history/chat-history.ts`                                                                   | `src/modules/conversations/conversations.controller.ts`                                                                        | 一条 item=一条消息（turnId 关联成轮）；page=1 为最新一页，页内时间正序（顶老底新），前端勿再自行反转；删除接口已移除；URL 无语境参数时前端按设备当前配置推导过滤（后端只认显式传参、不读配置） |
-| 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案            |
+| 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案；`gender` 可选值为 `male/female`，`null` 表示未设置或清除，PATCH 省略时保留原值 |
 | 学习全览 MVP       | `GET /learning-stats/dashboard`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/topics`<br>`GET /learning-stats/timeline` | `pages/learning-data/learning-data.ts`                                                                 | `src/modules/learning-stats/learning-stats.controller.ts`<br>`src/modules/learning-stats/learning-stats.service.ts`            | 仪表盘/趋势/主题/时间线             |
 | 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities`<br>`GET /learning-stats/unit-progress/:deviceId` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器：查看任何教材/单元/自由对话均为只读,**不修改设备配置**（家长看不打断孩子练习）;缺省=当前配置模式族;指标卡/趋势/动态随 tab 走 range（自然历）且随语境过滤;趋势今日=摘要卡/本月=周聚合;topics 全量（教材族带 avgScore,free_chat 按子模式不评分）;单元进度全量,free_chat 语境下隐藏 |
+
+## 设备排序契约
+
+- 前端拖拽结束后调用 `PUT /devices/order`，请求体为 `{ "orderedDeviceIds": ["dev-002", "dev-001"] }`；数组必须包含当前用户全部已绑定设备，且顺序就是期望显示顺序。
+- 成功返回 `data.orderedDeviceIds`；重复提交相同顺序是幂等操作。顺序按家长独立保存，不影响其他绑定同一设备的家长。
+- `GET /devices` 按已保存顺序返回，响应字段不变；新绑定设备自动排到末尾，旧客户端无需调用排序接口。
+- `400` 表示空数组、重复或非法设备 ID；`403` 表示包含当前用户无权操作的设备；`409` 表示设备集合已变化、包含未知 ID 或发生排序写冲突。
+- 前端收到 `409` 后应重新调用 `GET /devices` 拉取最新完整列表，再基于最新列表重排，不要直接重试旧数组。
 
 ## 设备配置入参校验
 
@@ -99,6 +107,35 @@
 - 兼容：`LLM_STREAM_ENABLED=false` 时后端整体回落到非流式单模型路径，只经入站连接回 `vendor:text:out`。
 - 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
 - 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
+
+## “更懂 TA”统计契约
+
+- `GET /learning-stats/daily` 的 `date` 统一为 `YYYY-MM-DD`，按日期升序，无数据日期补零。
+- 家长报告趋势使用 `GET /learning-stats/daily?deviceId=<厂商设备编号>&days=7&scope=all`；`scope=all` 不按设备当前配置过滤模式，统计全部用户交互，`sessionCount` 为当日用户交互数。
+- 旧学习页面不传 `scope=all` 时保持原模式族过滤和会话数语义。
+- `scope=all` 趋势与家长报告统一按每条用户消息 0.5 分钟估算使用时长，同一设备、同一日期的分钟数一致；单设备使用设备时区，多设备汇总使用默认报告时区。
+
+## 家长每日报告
+
+- 查询：`GET /learning-stats/parent-report?deviceId=<厂商设备编号>&date=YYYY-MM-DD`；只读取已绑定设备，不触发生成。
+- 响应包含 `generationStatus=pending / generating / completed / failed`；无报告记录时为 `pending`。
+- 仅 `completed` 且至少一项总结字段非空时返回完整 `summary` 对象；其余状态及空日报告均返回 `summary=null`，不暴露内部生成错误。
+- `modeUsage[]` 保留原始 `mode` 并增加中文 `label`；未知新模式保留原始 key，`label=其他`。
+- 提交反馈：`POST /learning-stats/parent-report/feedback`，请求体仅含 `deviceId`、`reportDate`、`useful`；`useful` 必须是 JSON 布尔值，成功固定返回 HTTP 200 和 `{ reportDate, feedback }`。
+- 反馈按 `(userId, deviceId, reportDate)` 唯一保存；重复提交幂等，改选更新原记录；设备未绑定返回 403 且不写入，报告不存在返回 404。
+- 查询报告的 `feedback` 为当前登录用户的 `useful / not_useful / null`，前端据此恢复按钮选中状态。
+- 自动生成：配置 `PARENT_REPORT_GENERATION_ENABLED=true` 后，服务启动时补扫一次，之后每 15 分钟扫描；设备当地 01:15 后生成昨天报告，默认时区 `Asia/Shanghai`。
+- 空日无用户消息时不调用 LLM；有消息时只将 answer 部分送入主模型，filler 不进入报告 prompt。
+- 数据库抢占防止多实例重复生成，失败按 5/15/45 分钟退避，最多 3 次。
+- 本地数据库集成测试必须设置 `TEST_DATABASE_URL`，且数据库名必须包含 `test`；测试只写该隔离库并 mock LLM，不使用开发库或真实模型。
+
+## 滚动功能使用统计
+
+- 查询：`GET /learning-stats/mode-usage?deviceId=<厂商设备编号>&days=7&endDate=YYYY-MM-DD`；`deviceId` 必填且必须已绑定当前用户（否则 404），`days` 可选默认 7（整数 1–31，越界 400），`endDate` 可选默认设备时区当日，未来日期自动回落到当日。
+- 窗口为 `endDate` 及前 `days-1` 个自然日（设备时区，非最近 N×24 小时）；统计起点不早于当前用户绑定该设备的日期，不补绑定前的数据。
+- 统计口径与日报 `modeUsage.count` 一致：窗口内全部 `role=user` 消息按 `mode` 聚合，`mode` 为空归为 `unknown`；`modeUsage` 仅含 `{ mode, count }`（无 `label`），按 count 降序、同数按 mode 字典序；`totalCount` 为各项之和。
+- 返回真实 `startDate / endDate / actualDays`，前端不得自行推算；`actualDays` 为窗口内实际纳入统计的自然日数，某天互动为 0 也计入。
+- 窗口内无任何用户消息时返回空态：`{ deviceId, startDate: null, endDate: null, actualDays: 0, totalCount: 0, modeUsage: [] }`。
 
 ## 联调顺序
 

@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Delete,
   Param,
   Body,
@@ -14,6 +15,7 @@ import { DevicesService } from "./devices.service";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
+import { UpdateDeviceOrderDto } from "./dto/update-device-order.dto";
 import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
 
 interface RequestWithUser extends Request {
@@ -36,6 +38,15 @@ export class DevicesController {
   @Get()
   async list(@Req() req: RequestWithUser) {
     return this.devicesService.list(req.user.userId);
+  }
+
+  @Put("order")
+  @ApiOperation({ summary: "完整替换当前用户的设备显示顺序" })
+  async updateOrder(
+    @Body() dto: UpdateDeviceOrderDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.devicesService.updateOrder(req.user.userId, dto);
   }
 
   @Get(":id")

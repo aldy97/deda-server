@@ -31,6 +31,10 @@ describe("Vendor WebSocket (e2e)", () => {
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: "e2e-msg-001" }),
     },
+    conversationSession: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      upsert: jest.fn().mockResolvedValue(undefined),
+    },
     conversationModeCategory: {
       upsert: jest.fn().mockResolvedValue({}),
       findUnique: jest.fn().mockResolvedValue(null),

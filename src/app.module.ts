@@ -24,6 +24,7 @@ import { MqttModule } from "./common/mqtt/mqtt.module";
 import { DeviceStatusModule } from "./modules/device-status/device-status.module";
 import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
 import { AdventureModule } from "./modules/adventure/adventure.module";
+import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { AdventureModule } from "./modules/adventure/adventure.module";
     RagModule,
     LlmModule,
     AdventureModule,
+    FeedbacksModule,
   ],
 })
 export class AppModule {}

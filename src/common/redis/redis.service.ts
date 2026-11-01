@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Redis from "ioredis";
 
@@ -10,7 +10,7 @@ import Redis from "ioredis";
  * 设备状态缓存、Webhook 幂等/限流、消息队列等。
  */
 @Injectable()
-export class RedisService {
+export class RedisService implements OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
   private readonly client?: Redis;
   private readonly memoryCache = new Map<
@@ -28,6 +28,20 @@ export class RedisService {
         "REDIS_URL is not configured. Running in MVP mode with in-memory cache. " +
           "For production, configure REDIS_URL to enable shared caching and rate limiting.",
       );
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (!this.client) return;
+    try {
+      await this.client.quit();
+    } catch (error) {
+      this.logger.warn(
+        `Redis graceful shutdown failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      this.client.disconnect();
     }
   }
 

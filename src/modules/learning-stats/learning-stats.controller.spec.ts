@@ -1,13 +1,25 @@
+import {
+  ExecutionContext,
+  INestApplication,
+  UnauthorizedException,
+  ValidationPipe,
+} from "@nestjs/common";
 import { Test, TestingModule } from "@nestjs/testing";
+import * as request from "supertest";
+import { ResponseInterceptor } from "@/common/interceptors/response.interceptor";
+import { HttpExceptionFilter } from "@/common/filters/http-exception.filter";
+import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
 import { LearningStatsController } from "./learning-stats.controller";
 import { LearningStatsService } from "./learning-stats.service";
 
 describe("LearningStatsController", () => {
   let controller: LearningStatsController;
   let service: any;
+  let testingModule: TestingModule;
+  let app: INestApplication | undefined;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
+    testingModule = await Test.createTestingModule({
       controllers: [LearningStatsController],
       providers: [
         {
@@ -20,13 +32,33 @@ describe("LearningStatsController", () => {
             getUnitProgress: jest.fn(),
             getInsights: jest.fn(),
             getHealth: jest.fn(),
+            getModeUsage: jest.fn(),
           },
         },
       ],
-    }).compile();
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          const req = context.switchToHttp().getRequest();
+          if (req.headers.authorization !== "Bearer valid-token") {
+            throw new UnauthorizedException("Unauthorized");
+          }
+          req.user = { userId: "user-001", openid: "openid-001" };
+          return true;
+        },
+      })
+      .compile();
 
-    controller = module.get<LearningStatsController>(LearningStatsController);
-    service = module.get(LearningStatsService);
+    controller = testingModule.get<LearningStatsController>(
+      LearningStatsController,
+    );
+    service = testingModule.get(LearningStatsService);
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
   });
 
   it("should be defined", () => {
@@ -100,6 +132,32 @@ describe("LearningStatsController", () => {
         },
       );
       expect(result).toBe(trend);
+    });
+
+    it("should pass scope=all through without changing legacy query fields", async () => {
+      const req = { user: { userId: "user-001" } } as Parameters<
+        typeof controller.daily
+      >[0];
+      service.getDailyTrend.mockResolvedValue([]);
+
+      await controller.daily(req, {
+        deviceId: "dev-001",
+        days: "7",
+        scope: "all",
+      });
+
+      expect(service.getDailyTrend).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        7,
+        {
+          textbookId: undefined,
+          unitId: undefined,
+          mode: undefined,
+          conversationModeKey: undefined,
+          scope: "all",
+        },
+      );
     });
   });
 
@@ -208,6 +266,193 @@ describe("LearningStatsController", () => {
         "week",
       );
       expect(result).toBe(health);
+    });
+  });
+
+  describe("parent reports", () => {
+    beforeEach(async () => {
+      service.submitParentReportFeedback = jest.fn();
+      app = testingModule.createNestApplication();
+      app.useGlobalPipes(
+        new ValidationPipe({
+          whitelist: true,
+          transform: true,
+          forbidNonWhitelisted: true,
+        }),
+      );
+      app.useGlobalInterceptors(new ResponseInterceptor());
+      app.useGlobalFilters(new HttpExceptionFilter());
+      await app.init();
+    });
+
+    it("should return the requested daily parent report", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      const report = { deviceId: "dev-001", reportDate: "2026-10-30" };
+      service.getParentReport = jest.fn().mockResolvedValue(report);
+
+      const result = await controller.parentReport(req, {
+        deviceId: "dev-001",
+        date: "2026-10-30",
+      });
+
+      expect(service.getParentReport).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+      );
+      expect(result).toBe(report);
+    });
+
+    it("should submit feedback with HTTP 200 and the exact response contract", async () => {
+      service.submitParentReportFeedback.mockResolvedValue({
+        reportDate: "2026-10-31",
+        feedback: "useful",
+      });
+
+      const response = await request(app!.getHttpServer())
+        .post("/learning-stats/parent-report/feedback")
+        .set("Authorization", "Bearer valid-token")
+        .send({
+          deviceId: "dev-local-001",
+          reportDate: "2026-10-31",
+          useful: true,
+        })
+        .expect(200);
+
+      expect(response.body).toEqual({
+        code: 0,
+        message: "success",
+        data: { reportDate: "2026-10-31", feedback: "useful" },
+      });
+      expect(service.submitParentReportFeedback).toHaveBeenCalledWith(
+        "user-001",
+        "dev-local-001",
+        "2026-10-31",
+        true,
+      );
+    });
+
+    it.each(["", "Bearer invalid-token"])(
+      "should reject missing or invalid JWT",
+      async (authorization) => {
+        const req = request(app!.getHttpServer()).post(
+          "/learning-stats/parent-report/feedback",
+        );
+        if (authorization) req.set("Authorization", authorization);
+        await req
+          .send({ deviceId: "dev-001", reportDate: "2026-10-31", useful: true })
+          .expect(401);
+        expect(service.submitParentReportFeedback).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { deviceId: "", reportDate: "2026-10-31", useful: true },
+      { deviceId: "dev-001", reportDate: "10/31/2026", useful: true },
+      { deviceId: "dev-001", reportDate: "2026-10-31", useful: "true" },
+      { deviceId: "dev-001", reportDate: "2026-10-31", useful: "false" },
+      { deviceId: "dev-001", reportDate: "2026-10-31", useful: 0 },
+      { deviceId: "dev-001", reportDate: "2026-10-31", useful: 1 },
+      { deviceId: "dev-001", reportDate: "2026-10-31", useful: null },
+      {
+        deviceId: "dev-001",
+        reportDate: "2026-10-31",
+        useful: true,
+        userId: "forged-user",
+      },
+    ])("should reject invalid feedback input", async (body) => {
+      await request(app!.getHttpServer())
+        .post("/learning-stats/parent-report/feedback")
+        .set("Authorization", "Bearer valid-token")
+        .send(body)
+        .expect(400);
+      expect(service.submitParentReportFeedback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("mode usage", () => {
+    beforeEach(async () => {
+      app = testingModule.createNestApplication();
+      app.useGlobalPipes(
+        new ValidationPipe({
+          whitelist: true,
+          transform: true,
+          forbidNonWhitelisted: true,
+        }),
+      );
+      app.useGlobalInterceptors(new ResponseInterceptor());
+      app.useGlobalFilters(new HttpExceptionFilter());
+      await app.init();
+    });
+
+    it("should return mode usage with default days when only deviceId is given", async () => {
+      const usage = {
+        deviceId: "dev-001",
+        startDate: "2026-10-26",
+        endDate: "2026-11-01",
+        actualDays: 7,
+        totalCount: 21,
+        modeUsage: [{ mode: "free_chat", count: 21 }],
+      };
+      service.getModeUsage.mockResolvedValue(usage);
+
+      const response = await request(app!.getHttpServer())
+        .get("/learning-stats/mode-usage?deviceId=dev-001")
+        .set("Authorization", "Bearer valid-token")
+        .expect(200);
+
+      expect(response.body).toEqual({
+        code: 0,
+        message: "success",
+        data: usage,
+      });
+      expect(service.getModeUsage).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        7,
+        undefined,
+      );
+    });
+
+    it("should pass explicit days and endDate through to the service", async () => {
+      service.getModeUsage.mockResolvedValue({});
+
+      await request(app!.getHttpServer())
+        .get(
+          "/learning-stats/mode-usage?deviceId=dev-001&days=7&endDate=2026-11-01",
+        )
+        .set("Authorization", "Bearer valid-token")
+        .expect(200);
+
+      expect(service.getModeUsage).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+    });
+
+    it("should reject requests without a valid JWT", async () => {
+      await request(app!.getHttpServer())
+        .get("/learning-stats/mode-usage?deviceId=dev-001")
+        .expect(401);
+      expect(service.getModeUsage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      "",
+      "?days=7",
+      "?deviceId=",
+      "?deviceId=dev-001&days=abc",
+      "?deviceId=dev-001&days=1.5",
+      "?deviceId=dev-001&endDate=10/31/2026",
+      "?deviceId=dev-001&foo=bar",
+    ])("should reject invalid query: %s", async (query) => {
+      await request(app!.getHttpServer())
+        .get(`/learning-stats/mode-usage${query}`)
+        .set("Authorization", "Bearer valid-token")
+        .expect(400);
+      expect(service.getModeUsage).not.toHaveBeenCalled();
     });
   });
 });

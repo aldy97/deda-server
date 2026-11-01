@@ -136,6 +136,10 @@ describe("Adventure streaming pipeline (e2e)", () => {
         return Promise.resolve(row);
       }),
     },
+    conversationSession: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      upsert: jest.fn().mockResolvedValue(undefined),
+    },
     conversationModeCategory: {
       upsert: jest.fn().mockResolvedValue({}),
       findUnique: jest.fn().mockResolvedValue(null),

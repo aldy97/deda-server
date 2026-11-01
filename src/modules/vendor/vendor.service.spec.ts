@@ -12,6 +12,7 @@ import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
+import { ConversationSessionService } from "./conversation-session.service";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -75,6 +76,7 @@ describe("VendorService", () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         VendorService,
+        ConversationSessionService,
         {
           provide: PrismaService,
           useValue: {
@@ -100,6 +102,10 @@ describe("VendorService", () => {
             message: {
               findMany: jest.fn(),
               create: jest.fn(),
+            },
+            conversationSession: {
+              findUnique: jest.fn().mockResolvedValue(null),
+              upsert: jest.fn().mockResolvedValue(undefined),
             },
           },
         },
@@ -262,8 +268,8 @@ describe("VendorService", () => {
           content: "你好",
           turnId: expect.any(String),
           status: "completed",
-          textbookId: "sample-textbook",
-          unitId: "unit-1",
+          textbookId: null,
+          unitId: null,
         }),
       );
       // 落库为用户实际播报全文：小模型 filler + 大模型答案
@@ -274,8 +280,8 @@ describe("VendorService", () => {
           content: "嗯\nHello! I'm fine, thank you.",
           turnId: userCall[0].data.turnId,
           status: "completed",
-          textbookId: "sample-textbook",
-          unitId: "unit-1",
+          textbookId: null,
+          unitId: null,
         }),
       );
       // user 消息必须在 LLM 调用之前写入
@@ -509,7 +515,7 @@ describe("VendorService", () => {
             englishName: "Ali",
           },
           promptTemplate: textbookTemplate,
-          mode: "locked_unit",
+          mode: "free_chat",
         }),
       );
     });
@@ -616,12 +622,12 @@ describe("VendorService", () => {
         expect.objectContaining({
           childProfile: undefined,
           promptTemplate: undefined,
-          mode: "locked_unit",
+          mode: "free_chat",
         }),
       );
     });
 
-    it("should validate textbook and unit before persisting locked_unit conversation", async () => {
+    it("should not require legacy unit validation for unified free-chat", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
         asrText: "Hello",
@@ -665,18 +671,11 @@ describe("VendorService", () => {
           where: { textbookId: "valid-book" },
         }),
       );
-      expect(prisma.unit.findUnique).toHaveBeenCalledWith({
-        where: {
-          textbookId_unitId: {
-            textbookId: "book-uuid",
-            unitId: "valid-unit",
-          },
-        },
-      });
+      expect(prisma.unit.findUnique).not.toHaveBeenCalled();
       expect(prisma.message.create).toHaveBeenCalled();
     });
 
-    it("should not persist conversation when textbook does not exist for locked_unit", async () => {
+    it("should persist unified free-chat when textbook does not exist for locked_unit", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
         asrText: "Hello",
@@ -710,11 +709,11 @@ describe("VendorService", () => {
 
       const result = await service.handleTextIn(dto);
 
-      expect(prisma.message.create).not.toHaveBeenCalled();
+      expect(prisma.message.create).toHaveBeenCalledTimes(2);
       expect(result.responseText).toBe("嗯\nHi!");
     });
 
-    it("should not persist conversation when unit does not exist for locked_unit", async () => {
+    it("should persist unified free-chat when unit does not exist for locked_unit", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
         asrText: "Hello",
@@ -752,7 +751,7 @@ describe("VendorService", () => {
 
       const result = await service.handleTextIn(dto);
 
-      expect(prisma.message.create).not.toHaveBeenCalled();
+      expect(prisma.message.create).toHaveBeenCalledTimes(2);
       expect(result.responseText).toBe("嗯\nHi!");
     });
 
@@ -824,6 +823,16 @@ describe("VendorService", () => {
       expect(userCall[0].data.unitId).toBeNull();
       expect(assistantCall[0].data.textbookId).toBeNull();
       expect(assistantCall[0].data.unitId).toBeNull();
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            deviceId: "uuid-001",
+            textbookId: null,
+            unitId: null,
+            mode: "free_chat",
+          },
+        }),
+      );
     });
   });
 
@@ -915,7 +924,7 @@ describe("VendorService", () => {
         expect.any(Array),
         expect.objectContaining({
           mode: "free_chat",
-          promptTemplate: expect.stringContaining("自由创作"),
+          promptTemplate: expect.stringMatching(/自由创作[\s\S]*不要承诺/),
         }),
       );
     });
@@ -942,10 +951,108 @@ describe("VendorService", () => {
         expect.any(String),
         expect.any(Array),
         expect.objectContaining({
-          mode: "free_chat",
+          mode: "english_story",
           promptTemplate: expect.stringContaining("English"),
         }),
       );
+    });
+
+    it("should route ordinary chat directly to free-chat without classification or session writes", async () => {
+      setupStreamingBase();
+      mockAnswerStream("今天很适合出门走走。");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "今天天气怎么样",
+      });
+
+      expect(llmService.complete).not.toHaveBeenCalled();
+      expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({ mode: "free_chat" }),
+      );
+    });
+
+    it("should keep an active English session for ordinary answers without entering adventure", async () => {
+      setupStreamingBase();
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        id: "session-s1",
+        deviceId: "uuid-s1",
+        currentMode: "english_story",
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      });
+      mockAnswerStream("Yes, the cat is in the garden.");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "I see a cat.",
+      });
+
+      expect(llmService.complete).not.toHaveBeenCalled();
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+      expect(childMemoriesService.buildPromptBlock).not.toHaveBeenCalled();
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "english_story",
+          promptTemplate: expect.stringContaining("English"),
+        }),
+      );
+    });
+
+    it("should use a calm non-interactive prompt for sleep stories and isolate memories", async () => {
+      setupStreamingBase();
+      llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
+      mockAnswerStream("月亮轻轻闭上了眼睛。");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "我想听哄睡故事",
+      });
+
+      expect(childMemoriesService.buildPromptBlock).not.toHaveBeenCalled();
+      expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "sleep_story",
+          promptTemplate: expect.stringMatching(/平静|缓慢/),
+        }),
+      );
+      const promptOptions = llmService.buildEnglishTutorPrompt.mock.calls[0][4];
+      expect(promptOptions?.promptTemplate).toContain("不要提问");
+      expect(promptOptions?.promptTemplate).toContain("不要邀请互动");
+    });
+
+    it("should reset the persisted session after successfully starting an adventure", async () => {
+      setupStreamingBase();
+      adventureService.startToday.mockResolvedValue({
+        texts: ["今天 Elly 要出门啦。"],
+        action: "completed",
+      });
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "讲故事",
+      });
+
+      expect(adventureService.startToday).toHaveBeenCalledWith("uuid-s1", true);
+      expect(prisma.conversationSession.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deviceId: "uuid-s1" },
+          update: { currentMode: "free_chat", expiresAt: null },
+        }),
+      );
+      expect(ragService.retrieve).not.toHaveBeenCalled();
     });
 
     it("should inject relevant memories only into the free-chat answer and extract asynchronously", async () => {

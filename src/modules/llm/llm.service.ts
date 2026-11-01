@@ -342,7 +342,7 @@ ${params.segmentText}
 
     const childProfileSection = this.buildChildProfileSection(childProfile);
 
-    const defaultRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
+    const englishTutorRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
 Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
 
 Rules:
@@ -359,6 +359,32 @@ Rules:
 11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.
 12. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel). Do NOT repeat greetings or acknowledgments (e.g. "Oh, you like...") — go straight into your reply content so the two parts sound like one natural utterance.`;
 
+    const freeChatRules = `You are a warm, safe companion for a young child. Have a natural free chat, not an English lesson.
+
+Rules:
+1. Reply in the same language the child just used, and answer the child's current question directly before adding anything else.
+2. Keep the reply warm, concise, age-appropriate, and relevant; do not force a question or change the topic.
+3. Never turn the conversation into English practice unless the child explicitly asks for it.
+4. When child_memories are provided, they are current trusted facts: use the active remembered value over conflicting statements in older conversation history.
+5. The child has already heard a short acknowledgment from a separate fast-response channel. Do not repeat it; go straight into the answer.`;
+
+    const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions. The child has already heard a short acknowledgment from a separate fast-response channel, so do not repeat it.`;
+
+    const isFiveMode = [
+      "free_chat",
+      "english_story",
+      "idiom_story",
+      "sleep_story",
+      "adventure_story",
+      "free_story",
+    ].includes(options?.mode || "");
+    const defaultRules =
+      options?.mode === "free_chat"
+        ? freeChatRules
+        : isFiveMode
+          ? storyModeRules
+          : englishTutorRules;
+
     const rulesSection = promptTemplate
       ? `In addition, always follow these general rules:\n${defaultRules}`
       : defaultRules;
@@ -369,7 +395,9 @@ Rules:
 
     const contextSection = context
       ? `Current textbook context (${unitName || "selected unit"}):\n"""\n${context}\n"""`
-      : "No specific textbook context is selected. Have a free English chat with the child.";
+      : isFiveMode
+        ? ""
+        : "No specific textbook context is selected. Have a free English chat with the child.";
 
     const systemPrompt = [childProfileSection, templateSection, contextSection]
       .filter((section) => section.length > 0)

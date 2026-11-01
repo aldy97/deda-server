@@ -1,6 +1,11 @@
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { Test, TestingModule } from "@nestjs/testing";
 import { LearningStatsService } from "./learning-stats.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import {
+  reportDateInTimezone,
+  shiftReportDate,
+} from "./parent-report-date.util";
 
 describe("LearningStatsService", () => {
   let service: LearningStatsService;
@@ -15,6 +20,7 @@ describe("LearningStatsService", () => {
           useValue: {
             userDeviceBinding: {
               findMany: jest.fn(),
+              findUnique: jest.fn(),
             },
             deviceConfig: {
               findMany: jest.fn(),
@@ -25,6 +31,7 @@ describe("LearningStatsService", () => {
             message: {
               findMany: jest.fn(),
               count: jest.fn(),
+              groupBy: jest.fn(),
             },
             textbook: {
               findMany: jest.fn().mockResolvedValue([]),
@@ -398,6 +405,51 @@ describe("LearningStatsService", () => {
 
       expect(result).toHaveLength(7);
       expect(result[6].sessionCount).toBe(1);
+      expect(
+        result.every((point) => /^\d{4}-\d{2}-\d{2}$/.test(point.date)),
+      ).toBe(true);
+      expect(result.map((point) => point.date)).toEqual(
+        [...result.map((point) => point.date)].sort(),
+      );
+      expect(
+        result.slice(0, 6).every((point) => point.durationMinutes === 0),
+      ).toBe(true);
+    });
+
+    it("should count every interaction in all scope regardless of the active mode", async () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.device = {
+        findUnique: jest.fn().mockResolvedValue({ timezone: "Asia/Shanghai" }),
+      };
+      prisma.deviceConfig.findMany.mockResolvedValue([
+        {
+          deviceId: "device-uuid-001",
+          mode: "free_chat",
+          textbookId: null,
+          unitId: null,
+        },
+      ]);
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1", "t1", "继续冒险", { mode: "adventure_story" }),
+        makeUserMessage("m2", "t2", "我要听哄睡故事", { mode: "sleep_story" }),
+      ]);
+      const allScope = { scope: "all" as const };
+
+      const result = await service.getDailyTrend("user-001", "dev-001", 7, {
+        ...allScope,
+      });
+
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.not.objectContaining({ mode: expect.anything() }),
+        }),
+      );
+      expect(prisma.deviceConfig.findMany).not.toHaveBeenCalled();
+      expect(result[6]).toEqual({
+        date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+        durationMinutes: 1,
+        sessionCount: 2,
+      });
     });
 
     it("should count all textbook units (any textbook) and exclude free_chat on a textbook-mode device", async () => {
@@ -1048,6 +1100,564 @@ describe("LearningStatsService", () => {
 
       expect(result.score).toBeLessThanOrEqual(54);
       expect(result.suggestion).toContain("今天还没有学习记录");
+    });
+  });
+
+  describe("parent reports", () => {
+    beforeEach(() => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.parentReportFeedback = {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn(),
+      };
+    });
+
+    it("should combine daily usage, mode distribution, stored summary and habit progress", async () => {
+      prisma.device = {
+        findUnique: jest.fn().mockResolvedValue({ timezone: "Asia/Shanghai" }),
+      };
+      prisma.learningStat = {
+        findUnique: jest.fn().mockResolvedValue({ durationSeconds: 1200 }),
+      };
+      prisma.message.findMany.mockResolvedValue([
+        makeUserMessage("m1", "t1", "讲个故事", { mode: "free_chat" }),
+        makeUserMessage("m2", "t2", "继续聊", { mode: "free_chat" }),
+        makeUserMessage("m3", "t3", "继续冒险", {
+          mode: "adventure_story",
+        }),
+      ]);
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({
+          generationStatus: "completed",
+          expressionObservation: "孩子主动发起了故事请求。",
+          emotionObservation: null,
+          thinkingObservation: null,
+          suggestion: "明天继续接住孩子的故事想象。",
+          feedback: "not_useful",
+        }),
+      };
+      prisma.parentReportFeedback.findUnique.mockResolvedValue({
+        isUseful: true,
+      });
+      prisma.habitPlan = {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: "habit-1",
+            title: "睡前主动刷牙洗脸",
+            targetDays: 21,
+            dailyRecords: [
+              { recordDate: "2026-10-29", completed: true },
+              { recordDate: "2026-10-30", completed: true },
+            ],
+          },
+        ]),
+      };
+
+      const result = await service.getParentReport(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+      );
+
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            spokeAt: {
+              gte: new Date("2026-10-29T16:00:00Z"),
+              lt: new Date("2026-10-30T16:00:00Z"),
+            },
+          }),
+        }),
+      );
+      expect(prisma.parentReportFeedback.findUnique).toHaveBeenCalledWith({
+        where: {
+          userId_deviceId_reportDate: {
+            userId: "user-001",
+            deviceId: "device-uuid-001",
+            reportDate: "2026-10-30",
+          },
+        },
+        select: { isUseful: true },
+      });
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        reportDate: "2026-10-30",
+        durationMinutes: 2,
+        generationStatus: "completed",
+        modeUsage: [
+          { mode: "free_chat", label: "自由对话", count: 2 },
+          { mode: "adventure_story", label: "每日冒险", count: 1 },
+        ],
+        summary: {
+          expressionObservation: "孩子主动发起了故事请求。",
+          emotionObservation: null,
+          thinkingObservation: null,
+          suggestion: "明天继续接住孩子的故事想象。",
+        },
+        habits: [
+          {
+            planId: "habit-1",
+            title: "睡前主动刷牙洗脸",
+            targetDays: 21,
+            completedDays: 2,
+            todayCompleted: true,
+          },
+        ],
+        feedback: "useful",
+      });
+    });
+
+    it.each(["pending", "generating", "failed", "completed"] as const)(
+      "should hide summary fields unless a completed report has content (%s)",
+      async (generationStatus) => {
+        prisma.device = {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ timezone: "Asia/Shanghai" }),
+        };
+        prisma.learningStat = {
+          findUnique: jest.fn().mockResolvedValue(null),
+        };
+        prisma.message.findMany.mockResolvedValue([]);
+        prisma.parentReport = {
+          findUnique: jest.fn().mockResolvedValue({
+            generationStatus,
+            expressionObservation: null,
+            emotionObservation: null,
+            thinkingObservation: null,
+            suggestion: null,
+            generationError: "internal model error",
+          }),
+        };
+        prisma.habitPlan = { findMany: jest.fn().mockResolvedValue([]) };
+
+        const result = await service.getParentReport(
+          "user-001",
+          "dev-001",
+          "2026-10-30",
+        );
+
+        expect(result.generationStatus).toBe(generationStatus);
+        expect(result.summary).toBeNull();
+        expect(result.feedback).toBeNull();
+        expect(result).not.toHaveProperty("generationError");
+      },
+    );
+
+    it("should provide stable labels for every known mode and a fallback for new modes", async () => {
+      const labels = {
+        free_chat: "自由对话",
+        adventure_story: "每日冒险",
+        english_story: "英语故事",
+        idiom_story: "成语故事",
+        free_story: "自由故事",
+        sleep_story: "哄睡故事",
+        textbook_learning: "英语互动",
+        locked_unit: "英语互动",
+        free_textbook: "英语互动",
+        future_mode: "其他",
+      };
+      prisma.device = {
+        findUnique: jest.fn().mockResolvedValue({ timezone: "Asia/Shanghai" }),
+      };
+      prisma.learningStat = {
+        findUnique: jest.fn().mockResolvedValue(null),
+      };
+      prisma.message.findMany.mockResolvedValue(
+        Object.keys(labels).map((mode, index) =>
+          makeUserMessage(`m-${index}`, `t-${index}`, "继续", { mode }),
+        ),
+      );
+      prisma.parentReport = { findUnique: jest.fn().mockResolvedValue(null) };
+      prisma.parentReportFeedback.findUnique.mockResolvedValue({
+        isUseful: false,
+      });
+      prisma.habitPlan = { findMany: jest.fn().mockResolvedValue([]) };
+
+      const result = await service.getParentReport(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+      );
+
+      expect(
+        Object.fromEntries(
+          result.modeUsage.map((item) => [item.mode, item.label]),
+        ),
+      ).toEqual(labels);
+      expect(result.generationStatus).toBe("pending");
+      expect(result.feedback).toBe("not_useful");
+    });
+
+    it("should return 403 without writing when the device is not bound", async () => {
+      await expect(
+        service.submitParentReportFeedback(
+          "user-001",
+          "dev-999",
+          "2026-10-30",
+          true,
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+      expect(prisma.parentReportFeedback.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should return 404 when the report does not exist", async () => {
+      prisma.parentReport = { findUnique: jest.fn().mockResolvedValue(null) };
+
+      await expect(
+        service.submitParentReportFeedback(
+          "user-001",
+          "dev-001",
+          "2026-10-30",
+          true,
+        ),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(prisma.parentReportFeedback.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should reject an invalid calendar date", async () => {
+      await expect(
+        service.submitParentReportFeedback(
+          "user-001",
+          "dev-001",
+          "2026-02-30",
+          true,
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(prisma.parentReportFeedback.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should upsert boolean feedback for the bound parent", async () => {
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({ id: "report-1" }),
+        update: jest.fn(),
+      };
+      prisma.parentReportFeedback.upsert.mockResolvedValue({ isUseful: false });
+
+      const result = await service.submitParentReportFeedback(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        false,
+      );
+
+      expect(prisma.parentReportFeedback.upsert).toHaveBeenCalledWith({
+        where: {
+          userId_deviceId_reportDate: {
+            userId: "user-001",
+            deviceId: "device-uuid-001",
+            reportDate: "2026-10-30",
+          },
+        },
+        update: { isUseful: false },
+        create: {
+          userId: "user-001",
+          deviceId: "device-uuid-001",
+          reportDate: "2026-10-30",
+          isUseful: false,
+        },
+        select: { isUseful: true },
+      });
+      expect(prisma.parentReport.update).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        reportDate: "2026-10-30",
+        feedback: "not_useful",
+      });
+    });
+
+    it("should reuse one row for changes and isolate different users", async () => {
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({ id: "report-1" }),
+      };
+      prisma.parentReportFeedback.upsert.mockImplementation(
+        ({ create }: { create: { isUseful: boolean } }) =>
+          Promise.resolve({ isUseful: create.isUseful }),
+      );
+
+      await service.submitParentReportFeedback(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        true,
+      );
+      await service.submitParentReportFeedback(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        false,
+      );
+      await service.submitParentReportFeedback(
+        "user-002",
+        "dev-001",
+        "2026-10-30",
+        true,
+      );
+
+      const calls = prisma.parentReportFeedback.upsert.mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[0][0].where).toEqual(calls[1][0].where);
+      expect(calls[1][0].update).toEqual({ isUseful: false });
+      expect(calls[2][0].where.userId_deviceId_reportDate.userId).toBe(
+        "user-002",
+      );
+    });
+
+    it("should return the final value saved by the database", async () => {
+      prisma.parentReport = {
+        findUnique: jest.fn().mockResolvedValue({ id: "report-1" }),
+      };
+      prisma.parentReportFeedback.upsert.mockResolvedValue({ isUseful: false });
+
+      const result = await service.submitParentReportFeedback(
+        "user-001",
+        "dev-001",
+        "2026-10-30",
+        true,
+      );
+
+      expect(result.feedback).toBe("not_useful");
+    });
+  });
+
+  describe("getModeUsage", () => {
+    const setupBoundDevice = (bindingCreatedAt: string) => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
+      prisma.userDeviceBinding.findUnique.mockResolvedValue({
+        createdAt: new Date(bindingCreatedAt),
+      });
+      prisma.device = {
+        findUnique: jest.fn().mockResolvedValue({ timezone: "Asia/Shanghai" }),
+      };
+    };
+
+    it("should throw NotFoundException when the device is not bound to the user", async () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.getModeUsage("user-001", "dev-001", 7, "2026-11-01"),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it("should aggregate a full 7-day rolling window when binding predates it", async () => {
+      setupBoundDevice("2026-10-20T02:00:00Z"); // 绑定日 2026-10-20（设备时区）
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: "free_chat", _count: { _all: 17 } },
+        { mode: "adventure_story", _count: { _all: 4 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+
+      expect(prisma.message.groupBy).toHaveBeenCalledWith({
+        by: ["mode"],
+        where: {
+          deviceId: "device-uuid-001",
+          role: "user",
+          spokeAt: {
+            gte: new Date("2026-10-25T16:00:00Z"),
+            lt: new Date("2026-11-01T16:00:00Z"),
+          },
+        },
+        _count: { _all: true },
+      });
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        startDate: "2026-10-26",
+        endDate: "2026-11-01",
+        actualDays: 7,
+        totalCount: 21,
+        modeUsage: [
+          { mode: "free_chat", count: 17 },
+          { mode: "adventure_story", count: 4 },
+        ],
+      });
+    });
+
+    it("should start from the binding date when bound only 3 days ago", async () => {
+      setupBoundDevice("2026-10-30T02:00:00Z"); // 绑定日 2026-10-30
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: "free_chat", _count: { _all: 5 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        startDate: "2026-10-30",
+        endDate: "2026-11-01",
+        actualDays: 3,
+        totalCount: 5,
+        modeUsage: [{ mode: "free_chat", count: 5 }],
+      });
+      expect(prisma.message.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            spokeAt: {
+              gte: new Date("2026-10-29T16:00:00Z"),
+              lt: new Date("2026-11-01T16:00:00Z"),
+            },
+          }),
+        }),
+      );
+    });
+
+    it("should report a single actual day when bound on endDate itself", async () => {
+      setupBoundDevice("2026-11-01T02:00:00Z"); // 绑定日 = endDate
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: "locked_unit", _count: { _all: 2 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+
+      expect(result.startDate).toBe("2026-11-01");
+      expect(result.endDate).toBe("2026-11-01");
+      expect(result.actualDays).toBe(1);
+      expect(result.totalCount).toBe(2);
+    });
+
+    it("should handle a window spanning a month boundary", async () => {
+      setupBoundDevice("2026-01-01T00:00:00Z");
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: "free_chat", _count: { _all: 9 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-03-02",
+      );
+
+      expect(result.startDate).toBe("2026-02-24");
+      expect(result.endDate).toBe("2026-03-02");
+      expect(result.actualDays).toBe(7);
+      expect(prisma.message.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            spokeAt: {
+              gte: new Date("2026-02-23T16:00:00Z"),
+              lt: new Date("2026-03-02T16:00:00Z"),
+            },
+          }),
+        }),
+      );
+    });
+
+    it("should return the empty shape when the window has no user messages", async () => {
+      setupBoundDevice("2026-10-30T02:00:00Z");
+      prisma.message.groupBy.mockResolvedValue([]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        startDate: null,
+        endDate: null,
+        actualDays: 0,
+        totalCount: 0,
+        modeUsage: [],
+      });
+    });
+
+    it("should return the empty shape without querying messages when binding is after endDate", async () => {
+      setupBoundDevice("2026-10-20T02:00:00Z");
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-10-01",
+      );
+
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        startDate: null,
+        endDate: null,
+        actualDays: 0,
+        totalCount: 0,
+        modeUsage: [],
+      });
+      expect(prisma.message.groupBy).not.toHaveBeenCalled();
+    });
+
+    it("should clamp a future endDate to today in the device timezone", async () => {
+      setupBoundDevice("2026-01-01T00:00:00Z");
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: "free_chat", _count: { _all: 3 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2099-01-01",
+      );
+
+      const todayKey = reportDateInTimezone(new Date(), "Asia/Shanghai");
+      expect(result.endDate).toBe(todayKey);
+      expect(result.startDate).toBe(shiftReportDate(todayKey, -6));
+      expect(result.actualDays).toBe(7);
+    });
+
+    it("should reject a semantically invalid endDate", async () => {
+      setupBoundDevice("2026-10-20T02:00:00Z");
+
+      await expect(
+        service.getModeUsage("user-001", "dev-001", 7, "2026-02-30"),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it.each([0, -3, 32, 1.5, Number.NaN])(
+      "should reject out-of-range days=%s",
+      async (days) => {
+        setupBoundDevice("2026-10-20T02:00:00Z");
+
+        await expect(
+          service.getModeUsage("user-001", "dev-001", days, "2026-11-01"),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      },
+    );
+
+    it("should bucket null mode as unknown and sort by count desc then mode", async () => {
+      setupBoundDevice("2026-10-20T02:00:00Z");
+      prisma.message.groupBy.mockResolvedValue([
+        { mode: null, _count: { _all: 2 } },
+        { mode: "free_chat", _count: { _all: 5 } },
+        { mode: "adventure_story", _count: { _all: 5 } },
+      ]);
+
+      const result = await service.getModeUsage(
+        "user-001",
+        "dev-001",
+        7,
+        "2026-11-01",
+      );
+
+      expect(result.modeUsage).toEqual([
+        { mode: "adventure_story", count: 5 },
+        { mode: "free_chat", count: 5 },
+        { mode: "unknown", count: 2 },
+      ]);
+      expect(result.totalCount).toBe(12);
     });
   });
 });

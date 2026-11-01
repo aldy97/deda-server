@@ -1,4 +1,10 @@
-import { IsOptional, IsString, MaxLength, Matches } from "class-validator";
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Matches,
+} from "class-validator";
 import { ApiPropertyOptional } from "@nestjs/swagger";
 
 export class UpsertChildProfileDto {
@@ -21,4 +27,13 @@ export class UpsertChildProfileDto {
   @IsString()
   @MaxLength(50)
   englishName?: string;
+
+  @ApiPropertyOptional({
+    description: "孩子性别；null 表示未设置或清除已填性别",
+    enum: ["male", "female"],
+    nullable: true,
+  })
+  @IsOptional()
+  @IsIn(["male", "female"])
+  gender?: "male" | "female" | null;
 }
