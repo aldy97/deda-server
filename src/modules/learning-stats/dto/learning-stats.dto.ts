@@ -1,4 +1,10 @@
-import { IsBoolean, IsString, Matches } from "class-validator";
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+} from "class-validator";
 
 export class ParentReportQueryDto {
   @IsString()
@@ -12,6 +18,7 @@ export class ParentReportQueryDto {
 
 export class ParentReportFeedbackDto {
   @IsString()
+  @IsNotEmpty()
   deviceId!: string;
 
   @Matches(/^\d{4}-\d{2}-\d{2}$/, {
@@ -23,8 +30,42 @@ export class ParentReportFeedbackDto {
   useful!: boolean;
 }
 
+export class ModeUsageQueryDto {
+  @IsString()
+  @IsNotEmpty()
+  deviceId!: string;
+
+  @IsOptional()
+  @Matches(/^\d+$/, { message: "days must be a positive integer" })
+  days?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: "endDate must use YYYY-MM-DD format",
+  })
+  endDate?: string;
+}
+
+export interface ModeUsageItemDto {
+  mode: string;
+  count: number;
+}
+
+export interface ModeUsageResultDto {
+  deviceId: string;
+  /** 实际统计起点 YYYY-MM-DD；窗口内无任何可统计数据时为 null */
+  startDate: string | null;
+  /** 实际统计截止日 YYYY-MM-DD；窗口内无任何可统计数据时为 null */
+  endDate: string | null;
+  /** 实际纳入统计的自然日数（含 0 次互动的天） */
+  actualDays: number;
+  totalCount: number;
+  modeUsage: ModeUsageItemDto[];
+}
+
 export interface ParentReportModeUsageDto {
   mode: string;
+  label: string;
   count: number;
 }
 
@@ -40,6 +81,7 @@ export interface ParentReportDto {
   deviceId: string;
   reportDate: string;
   durationMinutes: number;
+  generationStatus: "pending" | "generating" | "completed" | "failed";
   modeUsage: ParentReportModeUsageDto[];
   summary: {
     expressionObservation: string | null;
@@ -196,4 +238,6 @@ export interface StatsContext {
   /** 精确 mode（目前用于 free_chat） */
   mode?: string;
   conversationModeKey?: string;
+  /** 家长报告口径：不按设备当前配置过滤，统计全部用户交互 */
+  scope?: "all";
 }

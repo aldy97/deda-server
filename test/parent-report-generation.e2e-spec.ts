@@ -147,7 +147,29 @@ describe("Parent report generation with PostgreSQL", () => {
       REPORT_DATE,
     );
     expect(response.summary?.suggestion).toContain("明天");
-    expect(response.modeUsage).toEqual([{ mode: "adventure_story", count: 1 }]);
+    expect(response.generationStatus).toBe("completed");
+    expect(response.modeUsage).toEqual([
+      { mode: "adventure_story", label: "每日冒险", count: 1 },
+    ]);
+
+    await learningStats.submitParentReportFeedback(
+      userId,
+      deviceId,
+      REPORT_DATE,
+      true,
+    );
+    const persistedFeedback =
+      await prisma.parentReportFeedback.findUniqueOrThrow({
+        where: {
+          userId_deviceId_reportDate: {
+            userId,
+            deviceId: deviceInternalId,
+            reportDate: REPORT_DATE,
+          },
+        },
+      });
+    expect(persistedFeedback.isUseful).toBe(true);
+    expect(persistedFeedback.userId).toBe(userId);
 
     await generator.generateDueReports(AFTER_DUE);
     expect(llmComplete).toHaveBeenCalledTimes(1);
@@ -183,5 +205,67 @@ describe("Parent report generation with PostgreSQL", () => {
     expect(report.thinkingObservation).toBeNull();
     expect(report.suggestion).toBeNull();
     expect(llmComplete).not.toHaveBeenCalled();
+
+    const response = await learningStats.getParentReport(
+      userId,
+      deviceId,
+      REPORT_DATE,
+    );
+    expect(response.generationStatus).toBe("completed");
+    expect(response.summary).toBeNull();
+  });
+
+  it("reads all-mode trend and parent report with the same duration and counts", async () => {
+    const now = new Date();
+    await prisma.message.createMany({
+      data: [
+        {
+          deviceId: deviceInternalId,
+          turnId: "turn-adventure",
+          role: "user",
+          content: "继续每日冒险",
+          mode: "adventure_story",
+          hitUnitIds: [],
+          spokeAt: now,
+        },
+        {
+          deviceId: deviceInternalId,
+          turnId: "turn-sleep",
+          role: "user",
+          content: "我要听哄睡故事",
+          mode: "sleep_story",
+          hitUnitIds: [],
+          spokeAt: now,
+        },
+      ],
+    });
+
+    const allScope = { scope: "all" as const };
+    const daily = await learningStats.getDailyTrend(userId, deviceId, 7, {
+      ...allScope,
+    });
+    const today = daily[daily.length - 1];
+    const report = await learningStats.getParentReport(
+      userId,
+      deviceId,
+      today.date,
+    );
+
+    expect(daily).toHaveLength(7);
+    expect(daily.every((point) => /^\d{4}-\d{2}-\d{2}$/.test(point.date))).toBe(
+      true,
+    );
+    expect(
+      daily.slice(0, -1).every((point) => point.durationMinutes === 0),
+    ).toBe(true);
+    expect(today.durationMinutes).toBe(1);
+    expect(today.sessionCount).toBe(2);
+    expect(report.durationMinutes).toBe(today.durationMinutes);
+    expect(report.modeUsage).toEqual([
+      { mode: "adventure_story", label: "每日冒险", count: 1 },
+      { mode: "sleep_story", label: "哄睡故事", count: 1 },
+    ]);
+    expect(report.generationStatus).toBe("pending");
+    expect(report.summary).toBeNull();
   });
 });

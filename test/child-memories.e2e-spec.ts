@@ -8,6 +8,7 @@ import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
 import { AdventureService } from "./../src/modules/adventure/adventure.service";
+import { ConversationSessionService } from "./../src/modules/vendor/conversation-session.service";
 
 const extraction = (value: string, operation = "assert") =>
   JSON.stringify([
@@ -77,6 +78,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
       message: {
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(({ data }) => Promise.resolve(data)),
+      },
+      conversationSession: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue(undefined),
       },
       childMemory: {
         findMany: jest.fn(({ where }) =>
@@ -169,6 +174,7 @@ describe("Child memories conversation pipeline (e2e)", () => {
       providers: [
         VendorService,
         ChildMemoriesService,
+        ConversationSessionService,
         { provide: PrismaService, useValue: prismaMock },
         {
           provide: ConfigService,

@@ -51,6 +51,7 @@ describe("ChildProfilesService", () => {
         name: "Alice",
         birthday: "2018-05-20",
         englishName: null,
+        gender: "female",
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -89,12 +90,13 @@ describe("ChildProfilesService", () => {
   });
 
   describe("upsertByDevice", () => {
-    it("should create owner info for bound device", async () => {
-      const dto: UpsertChildProfileDto = {
+    it("should create owner info with gender for bound device", async () => {
+      const dto = {
         name: "Alice",
         birthday: "2018-05-20",
         englishName: "Ali",
-      };
+        gender: "male",
+      } as UpsertChildProfileDto;
       const created = {
         id: "child-001",
         userId: "user-001",
@@ -102,6 +104,7 @@ describe("ChildProfilesService", () => {
         name: "Alice",
         birthday: "2018-05-20",
         englishName: "Ali",
+        gender: "male",
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -113,23 +116,30 @@ describe("ChildProfilesService", () => {
 
       expect(prisma.childProfile.upsert).toHaveBeenCalledWith({
         where: { deviceId: "device-uuid-001" },
-        update: { name: "Alice", birthday: "2018-05-20", englishName: "Ali" },
+        update: {
+          name: "Alice",
+          birthday: "2018-05-20",
+          englishName: "Ali",
+          gender: "male",
+        },
         create: {
           userId: "user-001",
           deviceId: "device-uuid-001",
           name: "Alice",
           birthday: "2018-05-20",
           englishName: "Ali",
+          gender: "male",
         },
       });
       expect(result).toEqual(created);
     });
 
-    it("should update existing owner info", async () => {
-      const dto: UpsertChildProfileDto = {
+    it("should update existing owner info and allow clearing gender", async () => {
+      const dto = {
         name: "Bob",
         englishName: "Bobby",
-      };
+        gender: null,
+      } as UpsertChildProfileDto;
       const updated = {
         id: "child-001",
         userId: "user-001",
@@ -137,6 +147,7 @@ describe("ChildProfilesService", () => {
         name: "Bob",
         birthday: "2018-05-20",
         englishName: "Bobby",
+        gender: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -148,16 +159,48 @@ describe("ChildProfilesService", () => {
 
       expect(prisma.childProfile.upsert).toHaveBeenCalledWith({
         where: { deviceId: "device-uuid-001" },
-        update: { name: "Bob", birthday: undefined, englishName: "Bobby" },
+        update: {
+          name: "Bob",
+          birthday: undefined,
+          englishName: "Bobby",
+          gender: null,
+        },
         create: {
           userId: "user-001",
           deviceId: "device-uuid-001",
           name: "Bob",
           birthday: undefined,
           englishName: "Bobby",
+          gender: null,
         },
       });
       expect(result).toEqual(updated);
+    });
+
+    it("should preserve gender omission semantics for legacy callers", async () => {
+      const dto: UpsertChildProfileDto = { name: "Alice" };
+      prisma.userDeviceBinding.findFirst.mockResolvedValue(mockBinding);
+      prisma.childProfile.upsert.mockResolvedValue({ id: "child-001" });
+
+      await service.upsertByDevice("user-001", "dev-001", dto);
+
+      expect(prisma.childProfile.upsert).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+        update: {
+          name: "Alice",
+          birthday: undefined,
+          englishName: undefined,
+          gender: undefined,
+        },
+        create: {
+          userId: "user-001",
+          deviceId: "device-uuid-001",
+          name: "Alice",
+          birthday: undefined,
+          englishName: undefined,
+          gender: undefined,
+        },
+      });
     });
 
     it("should throw ForbiddenException when user does not own the device", async () => {

@@ -206,6 +206,16 @@ export class ChildMemoriesService {
       const newId = randomUUID();
       const retracting = candidate.operation === "retract";
       const version = (current?.version || 0) + 1;
+      if (current) {
+        await tx.childMemory.update({
+          where: { id: current.id },
+          data: {
+            status: retracting ? "retracted" : "superseded",
+            validTo: occurredAt,
+            supersededById: newId,
+          },
+        });
+      }
       await tx.childMemory.create({
         data: {
           id: newId,
@@ -229,16 +239,6 @@ export class ChildMemoriesService {
           lastConfirmedAt: occurredAt,
         },
       });
-      if (current) {
-        await tx.childMemory.update({
-          where: { id: current.id },
-          data: {
-            status: retracting ? "retracted" : "superseded",
-            validTo: occurredAt,
-            supersededById: newId,
-          },
-        });
-      }
       return true;
     });
   }

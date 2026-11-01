@@ -20,10 +20,26 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  bindings      UserDeviceBinding[]
-  childProfiles ChildProfile[]
+  bindings              UserDeviceBinding[]
+  childProfiles         ChildProfile[]
+  feedbacks             Feedback[]
+  parentReportFeedbacks ParentReportFeedback[]
 
   @@map("users")
+}
+
+// 用户反馈：删除用户时保留反馈，并清空历史反馈的用户关联。
+model Feedback {
+  id        String   @id
+  userId    String?  @map("user_id")
+  content   String
+  contact   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("feedbacks")
 }
 
 // 设备信息
@@ -56,11 +72,26 @@ model Device {
   childMemories   ChildMemory[]
   parentReports   ParentReport[]
   habitPlans      HabitPlan[]
+  conversationSession ConversationSession?
 
   @@map("devices")
 }
 
-// 家长每日报告：使用时长和模式分布实时统计，本表只保存生成内容与反馈。
+// 每台设备的当前对话会话；冒险进度仍由 AdventureProgress 单独管理。
+model ConversationSession {
+  id          String    @id @default(uuid())
+  deviceId    String    @unique
+  currentMode String    @default("free_chat") // free_chat / english_story / idiom_story / sleep_story
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_sessions")
+}
+
+// 家长每日报告：使用时长和模式分布实时统计，本表保存生成内容。
 model ParentReport {
   id                   String    @id @default(uuid())
   deviceId             String
@@ -77,16 +108,32 @@ model ParentReport {
   generatorModel       String?
   promptVersion        String?
   generatedAt          DateTime?
-  feedback             String?   // useful / not_useful
-  feedbackAt           DateTime?
-  feedbackUserId       String?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device   Device                   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  feedbacks ParentReportFeedback[]
 
   @@unique([deviceId, reportDate])
   @@map("parent_reports")
+}
+
+// 每个绑定用户对每份家长报告的独立反馈。
+model ParentReportFeedback {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  deviceId  String   @map("device_id")
+  reportDate String  @map("report_date")
+  isUseful  Boolean  @map("is_useful")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  report ParentReport @relation(fields: [deviceId, reportDate], references: [deviceId, reportDate], onDelete: Cascade)
+
+  @@unique([userId, deviceId, reportDate])
+  @@index([deviceId, reportDate])
+  @@map("parent_report_feedbacks")
 }
 
 // 家长端习惯培养计划，例如 21 天睡前刷牙计划。
@@ -129,6 +176,7 @@ model UserDeviceBinding {
   userId    String
   deviceId  String
   isOwner   Boolean  @default(true) // 是否为拥有者
+  sortOrder Int      @default(0) // 当前用户的设备显示顺序
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -136,6 +184,7 @@ model UserDeviceBinding {
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@unique([userId, deviceId])
+  @@index([userId, sortOrder])
   @@map("user_device_bindings")
 }
 
@@ -147,6 +196,7 @@ model ChildProfile {
   name        String?  // 孩子姓名
   birthday    String?  // 生日 YYYY-MM-DD
   englishName String?  // 英文名（AI 称呼用）
+  gender      String?  // 性别：male / female；NULL 表示未设置
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

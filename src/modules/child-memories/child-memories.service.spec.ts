@@ -174,6 +174,9 @@ describe("ChildMemoriesService", () => {
       where: { id: "memory-red" },
       data: expect.objectContaining({ valueText: "blue" }),
     });
+    expect(prisma.childMemory.update.mock.invocationCallOrder[0]).toBeLessThan(
+      prisma.childMemory.create.mock.invocationCallOrder[0],
+    );
   });
 
   it("should confirm the same value without creating a duplicate version", async () => {

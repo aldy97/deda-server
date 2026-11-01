@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -16,6 +17,7 @@ import {
   StatsContext,
   LearningStatsInsightDto,
   LearningStatsHealthDto,
+  ModeUsageResultDto,
   ParentReportDto,
   ParentReportFeedbackResultDto,
 } from "./dto/learning-stats.dto";
@@ -23,7 +25,12 @@ import { ConversationMetricsCalculator } from "./calculators/conversation-metric
 import { StreakCalculator } from "./calculators/streak.calculator";
 import { TopicCoverageCalculator } from "./calculators/topic-coverage.calculator";
 import { ScoreCalculator } from "./calculators/score.calculator";
-import { isValidReportDate, reportDayRange } from "./parent-report-date.util";
+import {
+  isValidReportDate,
+  reportDateInTimezone,
+  reportDayRange,
+  shiftReportDate,
+} from "./parent-report-date.util";
 
 interface ActiveConfig {
   deviceId: string;
@@ -41,6 +48,19 @@ export class LearningStatsService {
     "textbook_learning",
     "free_textbook",
   ];
+
+  private static readonly MODE_LABELS: Record<string, string> = {
+    free_chat: "自由对话",
+    adventure_story: "每日冒险",
+    english_story: "英语故事",
+    idiom_story: "成语故事",
+    free_story: "自由故事",
+    sleep_story: "哄睡故事",
+    textbook_learning: "英语互动",
+    locked_unit: "英语互动",
+    free_textbook: "英语互动",
+    unknown: "其他",
+  };
 
   private readonly metricsCalculator = new ConversationMetricsCalculator();
   private readonly streakCalculator = new StreakCalculator();
@@ -68,20 +88,13 @@ export class LearningStatsService {
     });
     const { start, end } = reportDayRange(reportDate, device?.timezone);
 
-    const [learningStat, messages, report, habitPlans] = await Promise.all([
-      this.prisma.learningStat.findUnique({
-        where: {
-          deviceId_statDate: { deviceId: internalId, statDate: reportDate },
-        },
-        select: { durationSeconds: true },
-      }),
+    const [messages, report, habitPlans, feedbackRecord] = await Promise.all([
       this.prisma.message.findMany({
         where: {
           deviceId: internalId,
           role: "user",
           spokeAt: { gte: start, lt: end },
         },
-        select: { mode: true },
       }),
       this.prisma.parentReport.findUnique({
         where: {
@@ -99,6 +112,16 @@ export class LearningStatsService {
           },
         },
       }),
+      this.prisma.parentReportFeedback.findUnique({
+        where: {
+          userId_deviceId_reportDate: {
+            userId,
+            deviceId: internalId,
+            reportDate,
+          },
+        },
+        select: { isUseful: true },
+      }),
     ]);
 
     const modeCounts = new Map<string, number>();
@@ -108,22 +131,36 @@ export class LearningStatsService {
     }
     const modeUsage = Array.from(modeCounts, ([mode, count]) => ({
       mode,
+      label: LearningStatsService.MODE_LABELS[mode] ?? "其他",
       count,
     })).sort((a, b) => b.count - a.count || a.mode.localeCompare(b.mode));
+    const generationStatus = (report?.generationStatus ??
+      "pending") as ParentReportDto["generationStatus"];
+    const hasSummaryContent = report
+      ? [
+          report.expressionObservation,
+          report.emotionObservation,
+          report.thinkingObservation,
+          report.suggestion,
+        ].some((value) => value !== null)
+      : false;
 
     return {
       deviceId,
       reportDate,
-      durationMinutes: Math.round((learningStat?.durationSeconds ?? 0) / 60),
+      durationMinutes:
+        this.metricsCalculator.calculate(messages).totalDurationMinutes,
+      generationStatus,
       modeUsage,
-      summary: report
-        ? {
-            expressionObservation: report.expressionObservation,
-            emotionObservation: report.emotionObservation,
-            thinkingObservation: report.thinkingObservation,
-            suggestion: report.suggestion,
-          }
-        : null,
+      summary:
+        generationStatus === "completed" && report && hasSummaryContent
+          ? {
+              expressionObservation: report.expressionObservation,
+              emotionObservation: report.emotionObservation,
+              thinkingObservation: report.thinkingObservation,
+              suggestion: report.suggestion,
+            }
+          : null,
       habits: habitPlans.map((plan) => ({
         planId: plan.id,
         title: plan.title,
@@ -134,7 +171,111 @@ export class LearningStatsService {
           (record) => record.recordDate === reportDate && record.completed,
         ),
       })),
-      feedback: (report?.feedback as "useful" | "not_useful" | null) ?? null,
+      feedback: feedbackRecord
+        ? feedbackRecord.isUseful
+          ? "useful"
+          : "not_useful"
+        : null,
+    };
+  }
+
+  /**
+   * 滚动功能使用统计：endDate（缺省=设备时区当日，未来日期回落到当日）及前
+   * days-1 个自然日，起点不早于当前用户绑定该设备的日期。
+   * 统计口径与日报 modeUsage.count 一致：窗口内全部 role=user 消息按 mode 聚合。
+   * 窗口内无任何用户消息（或绑定日晚于 endDate）时返回全零空态。
+   */
+  async getModeUsage(
+    userId: string,
+    deviceId: string,
+    days = 7,
+    endDate?: string,
+  ): Promise<ModeUsageResultDto> {
+    if (!Number.isInteger(days) || days < 1 || days > 31) {
+      throw new BadRequestException("Invalid days");
+    }
+    const { internalIds } = await this.getUserDevices(userId, deviceId);
+    if (internalIds.length === 0) {
+      throw new NotFoundException("Device not bound");
+    }
+    if (endDate !== undefined && !isValidReportDate(endDate)) {
+      throw new BadRequestException("Invalid endDate");
+    }
+    const internalId = internalIds[0];
+
+    const [device, binding] = await Promise.all([
+      this.prisma.device.findUnique({
+        where: { id: internalId },
+        select: { timezone: true },
+      }),
+      this.prisma.userDeviceBinding.findUnique({
+        where: { userId_deviceId: { userId, deviceId: internalId } },
+        select: { createdAt: true },
+      }),
+    ]);
+    const timezone = device?.timezone;
+
+    const today = reportDateInTimezone(new Date(), timezone);
+    const resolvedEndDate =
+      endDate !== undefined && endDate <= today ? endDate : today;
+
+    const emptyResult: ModeUsageResultDto = {
+      deviceId,
+      startDate: null,
+      endDate: null,
+      actualDays: 0,
+      totalCount: 0,
+      modeUsage: [],
+    };
+
+    const bindingDate = binding
+      ? reportDateInTimezone(binding.createdAt, timezone)
+      : null;
+    if (bindingDate && bindingDate > resolvedEndDate) {
+      return emptyResult;
+    }
+
+    let startDate = shiftReportDate(resolvedEndDate, -(days - 1));
+    if (bindingDate && bindingDate > startDate) {
+      startDate = bindingDate;
+    }
+
+    const { start } = reportDayRange(startDate, timezone);
+    const { end } = reportDayRange(resolvedEndDate, timezone);
+
+    const groups = await this.prisma.message.groupBy({
+      by: ["mode"],
+      where: {
+        deviceId: internalId,
+        role: "user",
+        spokeAt: { gte: start, lt: end },
+      },
+      _count: { _all: true },
+    });
+
+    const totalCount = groups.reduce((sum, g) => sum + g._count._all, 0);
+    if (totalCount === 0) {
+      return emptyResult;
+    }
+
+    const modeUsage = groups
+      .map((g) => ({ mode: g.mode ?? "unknown", count: g._count._all }))
+      .sort((a, b) => b.count - a.count || a.mode.localeCompare(b.mode));
+
+    const actualDays =
+      Math.round(
+        (Date.parse(`${resolvedEndDate}T00:00:00Z`) -
+          Date.parse(`${startDate}T00:00:00Z`)) /
+          86400000,
+      ) + 1;
+
+    return {
+      deviceId,
+      startDate,
+      endDate: resolvedEndDate,
+      actualDays,
+      totalCount,
+      modeUsage,
     };
   }
 
@@ -146,14 +287,16 @@ export class LearningStatsService {
   ): Promise<ParentReportFeedbackResultDto> {
     const { internalIds } = await this.getUserDevices(userId, deviceId);
     if (internalIds.length === 0) {
-      throw new NotFoundException("Device not bound");
+      throw new ForbiddenException("Device not bound");
     }
+    if (!isValidReportDate(reportDate)) {
+      throw new BadRequestException("Invalid report date");
+    }
+
+    const internalId = internalIds[0];
     const report = await this.prisma.parentReport.findUnique({
       where: {
-        deviceId_reportDate: {
-          deviceId: internalIds[0],
-          reportDate,
-        },
+        deviceId_reportDate: { deviceId: internalId, reportDate },
       },
       select: { id: true },
     });
@@ -161,12 +304,28 @@ export class LearningStatsService {
       throw new NotFoundException("Parent report not found");
     }
 
-    const feedback = useful ? "useful" : "not_useful";
-    await this.prisma.parentReport.update({
-      where: { id: report.id },
-      data: { feedback, feedbackAt: new Date(), feedbackUserId: userId },
+    const savedFeedback = await this.prisma.parentReportFeedback.upsert({
+      where: {
+        userId_deviceId_reportDate: {
+          userId,
+          deviceId: internalId,
+          reportDate,
+        },
+      },
+      update: { isUseful: useful },
+      create: {
+        userId,
+        deviceId: internalId,
+        reportDate,
+        isUseful: useful,
+      },
+      select: { isUseful: true },
     });
-    return { reportDate, feedback };
+
+    return {
+      reportDate,
+      feedback: savedFeedback.isUseful ? "useful" : "not_useful",
+    };
   }
 
   async getDashboard(
@@ -270,8 +429,19 @@ export class LearningStatsService {
     ctx: StatsContext = {},
   ): Promise<DailyTrendPoint[]> {
     const { internalIds } = await this.getUserDevices(userId, deviceId);
-    // 显式语境 > 设备当前配置模式族;不再按单元隔离（跨教材跨单元计入）
-    const where = await this.buildContextWhere(internalIds, ctx);
+    const allScope = ctx.scope === "all";
+    let timezone: string | undefined;
+    if (allScope && internalIds.length === 1) {
+      const device = await this.prisma.device.findUnique({
+        where: { id: internalIds[0] },
+        select: { timezone: true },
+      });
+      timezone = device?.timezone;
+    }
+    // 全模式只用于家长报告；旧页面仍按显式语境或设备当前配置过滤。
+    const where = allScope
+      ? { role: "user", deviceId: { in: internalIds } }
+      : await this.buildContextWhere(internalIds, ctx);
     const conversations = await this.prisma.message.findMany({
       where,
       orderBy: { spokeAt: "desc" },
@@ -279,22 +449,31 @@ export class LearningStatsService {
 
     const result: DailyTrendPoint[] = [];
     const today = new Date();
+    const todayKey = reportDateInTimezone(today, timezone);
 
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
-      const dateStr = this.toDateString(date);
+      const dateStr = allScope
+        ? shiftReportDate(todayKey, -i)
+        : this.toDateString(date);
 
-      const dayConversations = conversations.filter(
-        (c) => c.spokeAt && this.toDateString(new Date(c.spokeAt)) === dateStr,
-      );
+      const dayConversations = conversations.filter((c) => {
+        if (!c.spokeAt) return false;
+        const spokeAt = new Date(c.spokeAt);
+        return allScope
+          ? reportDateInTimezone(spokeAt, timezone) === dateStr
+          : this.toDateString(spokeAt) === dateStr;
+      });
 
       const metrics = this.metricsCalculator.calculate(dayConversations);
 
       result.push({
-        date: `${date.getMonth() + 1}/${date.getDate()}`,
+        date: dateStr,
         durationMinutes: metrics.totalDurationMinutes,
-        sessionCount: metrics.totalSessions,
+        sessionCount: allScope
+          ? dayConversations.length
+          : metrics.totalSessions,
       });
     }
 

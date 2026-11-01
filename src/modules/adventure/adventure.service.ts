@@ -185,8 +185,16 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         });
       }
       // 中断续玩：只恢复已分配的同一集，不重播 recap。
+      // 等待互动时退出，nextSegmentOrder 已指向交互点之后；恢复需退回该未回答交互点。
+      const resumeProgress =
+        progress.status === "exited"
+          ? {
+              ...progress,
+              nextSegmentOrder: Math.max(0, progress.nextSegmentOrder - 1),
+            }
+          : progress;
       const segments = await this.loadSegments(progress.episodeId);
-      return this.playFrom(progress, segments, [], daily);
+      return this.playFrom(resumeProgress, segments, [], daily);
     }
 
     const characterKey = await this.getCharacterKey(deviceInternalId);

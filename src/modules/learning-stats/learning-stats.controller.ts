@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   Post,
   Query,
@@ -13,6 +14,7 @@ import { Request } from "express";
 import { LearningStatsService } from "./learning-stats.service";
 import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
 import {
+  ModeUsageQueryDto,
   ParentReportFeedbackDto,
   ParentReportQueryDto,
 } from "./dto/learning-stats.dto";
@@ -65,6 +67,7 @@ export class LearningStatsController {
       unitId?: string;
       mode?: string;
       conversationModeKey?: string;
+      scope?: "all";
     },
   ) {
     return this.learningStatsService.getDailyTrend(
@@ -76,6 +79,7 @@ export class LearningStatsController {
         unitId: query.unitId,
         mode: query.mode,
         conversationModeKey: query.conversationModeKey,
+        ...(query.scope === "all" ? { scope: "all" as const } : {}),
       },
     );
   }
@@ -174,6 +178,19 @@ export class LearningStatsController {
     );
   }
 
+  @Get("mode-usage")
+  async modeUsage(
+    @Req() req: RequestWithUser,
+    @Query() query: ModeUsageQueryDto,
+  ) {
+    return this.learningStatsService.getModeUsage(
+      req.user.userId,
+      query.deviceId,
+      query.days ? Number(query.days) : 7,
+      query.endDate,
+    );
+  }
+
   @Get("parent-report")
   async parentReport(
     @Req() req: RequestWithUser,
@@ -187,6 +204,7 @@ export class LearningStatsController {
   }
 
   @Post("parent-report/feedback")
+  @HttpCode(200)
   async parentReportFeedback(
     @Req() req: RequestWithUser,
     @Body() body: ParentReportFeedbackDto,

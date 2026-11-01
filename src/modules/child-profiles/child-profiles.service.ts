@@ -20,7 +20,7 @@ export class ChildProfilesService {
 
   /**
    * 创建或更新指定设备的 owner info
-   * 仅允许 name 和 birthday
+   * 仅允许孩子档案 DTO 白名单字段
    */
   async upsertByDevice(
     userId: string,
@@ -35,6 +35,7 @@ export class ChildProfilesService {
         name: dto.name,
         birthday: dto.birthday,
         englishName: dto.englishName,
+        gender: dto.gender,
       },
       create: {
         userId,
@@ -42,6 +43,7 @@ export class ChildProfilesService {
         name: dto.name,
         birthday: dto.birthday,
         englishName: dto.englishName,
+        gender: dto.gender,
       },
     });
   }

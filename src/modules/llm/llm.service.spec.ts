@@ -216,6 +216,42 @@ describe("LlmService", () => {
       );
     });
 
+    it("should use direct child-language rules for free chat", () => {
+      const messages = service.buildEnglishTutorPrompt(
+        "你还记得我最喜欢什么颜色吗？",
+        "",
+        undefined,
+        undefined,
+        { mode: "free_chat" },
+      );
+
+      expect(messages[0].content).toContain("same language");
+      expect(messages[0].content).toContain("current question");
+      expect(messages[0].content).toContain("child_memories");
+      expect(messages[0].content).toContain("older conversation history");
+      expect(messages[0].content).not.toContain("Reply in English only");
+      expect(messages[0].content).not.toContain("unit topic");
+      expect(messages[0].content).not.toContain("free English chat");
+    });
+
+    it("should not impose English tutor rules on Chinese story modes", () => {
+      const messages = service.buildEnglishTutorPrompt(
+        "讲一个守株待兔的故事",
+        "",
+        undefined,
+        undefined,
+        {
+          mode: "idiom_story",
+          promptTemplate: "用中文讲一个适合孩子的成语故事。",
+        },
+      );
+
+      expect(messages[0].content).toContain("用中文讲一个适合孩子的成语故事");
+      expect(messages[0].content).not.toContain("Reply in English only");
+      expect(messages[0].content).not.toContain("unit topic");
+      expect(messages[0].content).not.toContain("free English chat");
+    });
+
     it("should include child profile in system prompt", () => {
       const messages = service.buildEnglishTutorPrompt(
         "Hello",

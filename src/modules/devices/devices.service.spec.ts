@@ -21,15 +21,21 @@ describe("DevicesService", () => {
         {
           provide: PrismaService,
           useValue: {
+            $transaction: jest.fn((callback: any) => callback(prisma)),
             device: {
               findUnique: jest.fn(),
+              findMany: jest.fn(),
               create: jest.fn(),
             },
             userDeviceBinding: {
               findUnique: jest.fn(),
               findMany: jest.fn(),
               findFirst: jest.fn(),
+              aggregate: jest
+                .fn()
+                .mockResolvedValue({ _max: { sortOrder: -1 } }),
               create: jest.fn(),
+              update: jest.fn(),
               deleteMany: jest.fn(),
             },
           },
@@ -79,11 +85,16 @@ describe("DevicesService", () => {
       expect(prisma.device.create).toHaveBeenCalledWith({
         data: { deviceId: "dev-001" },
       });
+      expect(prisma.userDeviceBinding.aggregate).toHaveBeenCalledWith({
+        where: { userId: "user-001" },
+        _max: { sortOrder: true },
+      });
       expect(prisma.userDeviceBinding.create).toHaveBeenCalledWith({
         data: {
           userId: "user-001",
           deviceId: "device-uuid-001",
           isOwner: true,
+          sortOrder: 0,
         },
       });
       expect(result).toEqual({
@@ -204,6 +215,11 @@ describe("DevicesService", () => {
       expect(prisma.userDeviceBinding.findMany).toHaveBeenCalledWith({
         where: { userId: "user-001" },
         include: { device: { include: { childProfile: true } } },
+        orderBy: [
+          { sortOrder: "asc" },
+          { createdAt: "asc" },
+          { deviceId: "asc" },
+        ],
       });
       expect(result).toEqual([
         {
@@ -225,6 +241,101 @@ describe("DevicesService", () => {
           childProfile: null,
         },
       ]);
+    });
+  });
+
+  describe("updateOrder", () => {
+    const mockBoundDevices = () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue([
+        {
+          id: "binding-a",
+          device: { id: "device-uuid-a", deviceId: "dev-a" },
+        },
+        {
+          id: "binding-b",
+          device: { id: "device-uuid-b", deviceId: "dev-b" },
+        },
+      ]);
+      prisma.device.findMany.mockResolvedValue([
+        { id: "device-uuid-a", deviceId: "dev-a" },
+        { id: "device-uuid-b", deviceId: "dev-b" },
+      ]);
+    };
+
+    it("atomically writes zero-based positions and uses serializable isolation", async () => {
+      mockBoundDevices();
+      prisma.userDeviceBinding.update.mockResolvedValue({});
+
+      const result = await service.updateOrder("user-001", {
+        orderedDeviceIds: ["dev-b", "dev-a"],
+      });
+
+      expect(result).toEqual({ orderedDeviceIds: ["dev-b", "dev-a"] });
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: "Serializable",
+      });
+      expect(prisma.userDeviceBinding.update).toHaveBeenNthCalledWith(1, {
+        where: { id: "binding-b" },
+        data: { sortOrder: 0 },
+      });
+      expect(prisma.userDeviceBinding.update).toHaveBeenNthCalledWith(2, {
+        where: { id: "binding-a" },
+        data: { sortOrder: 1 },
+      });
+    });
+
+    it("rejects empty and duplicate orders before writing", async () => {
+      prisma.$transaction.mockClear();
+
+      await expect(
+        service.updateOrder("user-001", { orderedDeviceIds: [] }),
+      ).rejects.toMatchObject({ status: 400 });
+      await expect(
+        service.updateOrder("user-001", {
+          orderedDeviceIds: ["dev-a", "dev-a"],
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects missing and unknown IDs with 409 and no updates", async () => {
+      mockBoundDevices();
+
+      await expect(
+        service.updateOrder("user-001", { orderedDeviceIds: ["dev-a"] }),
+      ).rejects.toMatchObject({ status: 409 });
+      await expect(
+        service.updateOrder("user-001", {
+          orderedDeviceIds: ["dev-b", "dev-a", "dev-unknown"],
+        }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(prisma.userDeviceBinding.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a known device that is not bound to the user with 403", async () => {
+      mockBoundDevices();
+      prisma.device.findMany.mockResolvedValue([
+        { id: "device-uuid-a", deviceId: "dev-a" },
+        { id: "device-uuid-b", deviceId: "dev-b" },
+        { id: "device-uuid-c", deviceId: "dev-c" },
+      ]);
+
+      await expect(
+        service.updateOrder("user-001", {
+          orderedDeviceIds: ["dev-b", "dev-a", "dev-c"],
+        }),
+      ).rejects.toMatchObject({ status: 403 });
+      expect(prisma.userDeviceBinding.update).not.toHaveBeenCalled();
+    });
+
+    it("maps a serialization conflict to 409", async () => {
+      prisma.$transaction.mockRejectedValueOnce({ code: "P2034" });
+
+      await expect(
+        service.updateOrder("user-001", {
+          orderedDeviceIds: ["dev-b", "dev-a"],
+        }),
+      ).rejects.toMatchObject({ status: 409 });
     });
   });
 

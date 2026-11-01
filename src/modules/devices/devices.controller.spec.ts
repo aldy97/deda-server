@@ -23,6 +23,7 @@ describe("DevicesController", () => {
             bind: jest.fn(),
             unbind: jest.fn(),
             list: jest.fn(),
+            updateOrder: jest.fn(),
             detail: jest.fn(),
             status: jest.fn(),
             control: jest.fn(),
@@ -85,6 +86,18 @@ describe("DevicesController", () => {
 
       expect(service.list).toHaveBeenCalledWith("user-001");
       expect(result).toEqual(expected);
+    });
+  });
+
+  describe("PUT /devices/order", () => {
+    it("should call service.updateOrder with userId and the complete order", async () => {
+      const dto = { orderedDeviceIds: ["dev-002", "dev-001"] };
+      service.updateOrder.mockResolvedValue(dto);
+
+      const result = await controller.updateOrder(dto, mockReq("user-001"));
+
+      expect(service.updateOrder).toHaveBeenCalledWith("user-001", dto);
+      expect(result).toEqual(dto);
     });
   });
 

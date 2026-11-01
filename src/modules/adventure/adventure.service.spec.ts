@@ -412,7 +412,7 @@ describe("AdventureService", () => {
     );
   });
 
-  it("should return to free chat after exit and resume only on an explicit story request", async () => {
+  it("should resume the unanswered interaction after an explicit story request", async () => {
     prisma.adventureProgress.findFirst.mockResolvedValue({
       ...baseProgress,
       status: "exited",
@@ -421,7 +421,15 @@ describe("AdventureService", () => {
 
     expect(await service.startToday("dev-uuid-1", false)).toBeNull();
     const resumed = await service.startToday("dev-uuid-1", true);
-    expect(resumed.texts[0]).toBe(segments[3].text);
+    expect(resumed.texts[0]).toBe(segments[2].text);
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextSegmentOrder: 3,
+          status: "awaiting_reply",
+        }),
+      }),
+    );
   });
 
   it("should continue with fallback when no reply arrives within 10s", async () => {
@@ -664,7 +672,7 @@ describe("AdventureService", () => {
 
     const reply = await service.startToday("dev-uuid-1", true);
 
-    expect(reply.texts[0]).toBe(segments[3].text);
+    expect(reply.texts[0]).toBe(segments[2].text);
     expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
     expect(prisma.adventureEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -692,7 +700,7 @@ describe("AdventureService", () => {
 
     const reply = await service.startToday("dev-uuid-1", true);
 
-    expect(reply.texts[0]).toBe(segments[3].text);
+    expect(reply.texts[0]).toBe(segments[2].text);
     expect(reply.texts).not.toContain(episode.recap);
     expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
     expect(prisma.adventureEpisode.findMany).not.toHaveBeenCalled();

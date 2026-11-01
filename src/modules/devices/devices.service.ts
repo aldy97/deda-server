@@ -1,10 +1,23 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
+import { UpdateDeviceOrderDto } from "./dto/update-device-order.dto";
+
+const BINDING_TRANSACTION_OPTIONS = {
+  isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+};
 
 @Injectable()
 export class DevicesService {
@@ -19,62 +32,72 @@ export class DevicesService {
       throw new Error("deviceId or deviceCode is required");
     }
 
-    let device;
+    return this.prisma.$transaction(async (tx) => {
+      let device;
 
-    if (dto.deviceId) {
-      // 按 deviceId 查找或创建（可能已由 4G 对话懒创建）
-      device = await this.prisma.device.findUnique({
-        where: { deviceId: dto.deviceId },
-      });
-      if (!device) {
-        device = await this.prisma.device.create({
-          data: { deviceId: dto.deviceId },
+      if (dto.deviceId) {
+        // 按 deviceId 查找或创建（可能已由 4G 对话懒创建）
+        device = await tx.device.findUnique({
+          where: { deviceId: dto.deviceId },
         });
+        if (!device) {
+          device = await tx.device.create({
+            data: { deviceId: dto.deviceId },
+          });
+        }
+      } else if (dto.deviceCode) {
+        // 按 deviceCode 查找，不存在则报错（避免随意创建）
+        device = await tx.device.findUnique({
+          where: { deviceCode: dto.deviceCode },
+        });
+        if (!device) {
+          throw new NotFoundException(
+            `Device with code ${dto.deviceCode} not found`,
+          );
+        }
+      } else {
+        throw new Error("deviceId or deviceCode is required");
       }
-    } else if (dto.deviceCode) {
-      // 按 deviceCode 查找，不存在则报错（避免随意创建）
-      device = await this.prisma.device.findUnique({
-        where: { deviceCode: dto.deviceCode },
-      });
-      if (!device) {
-        throw new NotFoundException(
-          `Device with code ${dto.deviceCode} not found`,
-        );
-      }
-    } else {
-      throw new Error("deviceId or deviceCode is required");
-    }
 
-    // 检查是否已绑定
-    const existing = await this.prisma.userDeviceBinding.findUnique({
-      where: {
-        userId_deviceId: {
+      const existing = await tx.userDeviceBinding.findUnique({
+        where: {
+          userId_deviceId: {
+            userId,
+            deviceId: device.id,
+          },
+        },
+      });
+
+      if (existing) {
+        return { success: true, deviceId: device.deviceId, alreadyBound: true };
+      }
+
+      const lastBinding = await tx.userDeviceBinding.aggregate({
+        where: { userId },
+        _max: { sortOrder: true },
+      });
+      await tx.userDeviceBinding.create({
+        data: {
           userId,
           deviceId: device.id,
+          isOwner: true,
+          sortOrder: (lastBinding._max.sortOrder ?? -1) + 1,
         },
-      },
-    });
+      });
 
-    if (existing) {
-      return { success: true, deviceId: device.deviceId, alreadyBound: true };
-    }
-
-    // 当前阶段不区分 owner/member，isOwner 默认 true（第一个绑定者）
-    await this.prisma.userDeviceBinding.create({
-      data: {
-        userId,
-        deviceId: device.id,
-        isOwner: true,
-      },
-    });
-
-    return { success: true, deviceId: device.deviceId, alreadyBound: false };
+      return { success: true, deviceId: device.deviceId, alreadyBound: false };
+    }, BINDING_TRANSACTION_OPTIONS);
   }
 
   async list(userId: string) {
     const bindings = await this.prisma.userDeviceBinding.findMany({
       where: { userId },
       include: { device: { include: { childProfile: true } } },
+      orderBy: [
+        { sortOrder: "asc" },
+        { createdAt: "asc" },
+        { deviceId: "asc" },
+      ],
     });
     return bindings.map((b) => ({
       id: b.device.deviceId,
@@ -90,6 +113,82 @@ export class DevicesService {
           }
         : null,
     }));
+  }
+
+  async updateOrder(userId: string, dto: UpdateDeviceOrderDto) {
+    const orderedDeviceIds = dto.orderedDeviceIds;
+    if (
+      !Array.isArray(orderedDeviceIds) ||
+      orderedDeviceIds.length === 0 ||
+      orderedDeviceIds.some(
+        (deviceId) => typeof deviceId !== "string" || deviceId.trim() === "",
+      ) ||
+      new Set(orderedDeviceIds).size !== orderedDeviceIds.length
+    ) {
+      throw new BadRequestException(
+        "orderedDeviceIds must be a non-empty array of unique device IDs",
+      );
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const [bindings, devices] = await Promise.all([
+          tx.userDeviceBinding.findMany({
+            where: { userId },
+            include: { device: true },
+          }),
+          tx.device.findMany({
+            where: { deviceId: { in: orderedDeviceIds } },
+            select: { id: true, deviceId: true },
+          }),
+        ]);
+        const bindingByDeviceId = new Map(
+          bindings.map((binding) => [binding.device.deviceId, binding]),
+        );
+        const existingDeviceIds = new Set(
+          devices.map((device) => device.deviceId),
+        );
+
+        if (orderedDeviceIds.some((id) => !existingDeviceIds.has(id))) {
+          throw new ConflictException(
+            "The device list changed; reload it before reordering",
+          );
+        }
+        if (orderedDeviceIds.some((id) => !bindingByDeviceId.has(id))) {
+          throw new ForbiddenException(
+            "Cannot reorder a device that is not bound to the current user",
+          );
+        }
+        if (
+          bindings.length !== orderedDeviceIds.length ||
+          bindings.some(
+            (binding) => !orderedDeviceIds.includes(binding.device.deviceId),
+          )
+        ) {
+          throw new ConflictException(
+            "The complete bound device list is required",
+          );
+        }
+
+        for (const [sortOrder, deviceId] of orderedDeviceIds.entries()) {
+          await tx.userDeviceBinding.update({
+            where: { id: bindingByDeviceId.get(deviceId).id },
+            data: { sortOrder },
+          });
+        }
+        return { orderedDeviceIds };
+      }, BINDING_TRANSACTION_OPTIONS);
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      if ((error as { code?: string })?.code === "P2034") {
+        throw new ConflictException(
+          "The device list changed during reordering; reload and retry",
+        );
+      }
+      throw error;
+    }
   }
 
   async detail(userId: string, id: string) {
@@ -123,18 +222,20 @@ export class DevicesService {
   }
 
   async unbind(userId: string, id: string) {
-    const device = await this.prisma.device.findUnique({
-      where: { deviceId: id },
-    });
-    if (!device) {
-      throw new NotFoundException(`Device ${id} not found`);
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const device = await tx.device.findUnique({
+        where: { deviceId: id },
+      });
+      if (!device) {
+        throw new NotFoundException(`Device ${id} not found`);
+      }
 
-    await this.prisma.userDeviceBinding.deleteMany({
-      where: { userId, deviceId: device.id },
-    });
+      await tx.userDeviceBinding.deleteMany({
+        where: { userId, deviceId: device.id },
+      });
 
-    return { success: true, deviceId: id };
+      return { success: true, deviceId: id };
+    }, BINDING_TRANSACTION_OPTIONS);
   }
 
   async findMembers(id: string) {
