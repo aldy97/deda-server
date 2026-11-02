@@ -636,9 +636,30 @@ describe("VendorService", () => {
         expect.any(String),
         expect.any(Array),
         expect.objectContaining({
-          mode: "adventure_story",
+          mode: "free_chat",
           promptTemplate: expect.stringMatching(/自由创作[\s\S]*不要承诺/),
         }),
+      );
+    });
+
+    it("should persist blocked adventure entry messages as free_chat mode", async () => {
+      setupStreamingBase();
+      adventureService.isCompletedToday.mockResolvedValue(true);
+      llmService.complete.mockResolvedValue({ text: "adventure_story" } as any);
+      mockAnswerStream("今天已经听过冒险啦，我们讲个别的故事吧。");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "我想玩下一集每日冒险",
+      });
+
+      // 冒险被门禁拦截、未真正开始：消息 mode 不得污染 adventure_story 统计
+      const [userCall, assistantCall] = prisma.message.create.mock.calls;
+      expect(userCall[0].data).toEqual(
+        expect.objectContaining({ role: "user", mode: "free_chat" }),
+      );
+      expect(assistantCall[0].data).toEqual(
+        expect.objectContaining({ role: "assistant", mode: "free_chat" }),
       );
     });
 

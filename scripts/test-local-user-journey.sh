@@ -140,6 +140,18 @@ assert_message "$IDIOM_TEXT" "idiom_story"
 SLEEP_TEXT="我要睡觉了，讲一个温柔的哄睡故事。"
 call_vendor "$SLEEP_TEXT"
 assert_message "$SLEEP_TEXT" "sleep_story"
+# 前端「如何进入哄睡模式」方式1 的四类语音指令覆盖。
+call_vendor "进入哄睡模式"
+assert_message "进入哄睡模式" "sleep_story"
+call_vendor "陪我睡觉"
+assert_message "陪我睡觉" "sleep_story"
+call_vendor "我要听睡前故事"
+assert_message "我要听睡前故事" "sleep_story"
+# 「我要听睡前儿歌」依赖儿歌内容源（后续批次），当前仅记录实际路由模式，不断言。
+call_vendor "我要听睡前儿歌"
+SONG_MODE=$(psql "${DATABASE_URL%%\?*}" -tAc \
+  "SELECT mode FROM messages WHERE role = 'user' AND content = '我要听睡前儿歌' ORDER BY \"createdAt\" DESC LIMIT 1")
+echo "INFO: 睡前儿歌 routed mode => ${SONG_MODE:-unknown}"
 FREE_TEXT="不想听故事了，我们随便聊聊。今天天气怎么样？"
 call_vendor "$FREE_TEXT"
 assert_message "$FREE_TEXT" "free_chat"

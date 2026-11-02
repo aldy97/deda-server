@@ -53,6 +53,25 @@ async function prepare() {
   if (device.characterKey !== "elly") {
     throw new Error(`Expected elly device, got ${device.characterKey}`);
   }
+  // 旅程断言基于 free_chat 顶层模式快照；历史手动测试可能把设备留在
+  // english_chat，这里重置为自由对话默认配置，保证结果可复现。
+  await prisma.deviceConfig.updateMany({
+    where: { deviceId: device.id, isActive: true },
+    data: { isActive: false },
+  });
+  await prisma.deviceConfig.create({
+    data: {
+      deviceId: device.id,
+      mode: "free_chat",
+      conversationModeKey: "free_chat_casual",
+      language: "bilingual",
+      speechRate: "normal",
+      isActive: true,
+    },
+  });
+  await prisma.conversationSession.deleteMany({
+    where: { deviceId: device.id },
+  });
   const episode1 = await getEpisode(1);
   const episode1Daily = await prisma.adventureDailyRecord.findFirst({
     where: { deviceId: device.id, episodeId: episode1.id },
