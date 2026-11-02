@@ -30,33 +30,6 @@ describe("DeviceConfigs validation (e2e)", () => {
         Promise.resolve({ id: "config-new", ...data }),
       ),
     },
-    textbook: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      findUnique: jest.fn(({ where }: any) =>
-        where.textbookId === "not-exist"
-          ? Promise.resolve(null)
-          : Promise.resolve({
-              id: "textbook-uuid-001",
-              textbookId: where.textbookId ?? "unlock-l1-speaking-listening",
-              name: "Unlock L1 Speaking & Listening",
-            }),
-      ),
-    },
-    unit: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-      findUnique: jest.fn(({ where }: any) =>
-        where.textbookId_unitId?.unitId === "unit-999"
-          ? Promise.resolve(null)
-          : Promise.resolve({
-              id: "unit-uuid-001",
-              unitId: where.textbookId_unitId?.unitId ?? "unit-1",
-              name: "Unit 1",
-            }),
-      ),
-    },
     conversationModeCategory: {
       upsert: jest.fn().mockResolvedValue({}),
       findUnique: jest.fn().mockResolvedValue({ id: "cat-uuid-001" }),
@@ -72,14 +45,6 @@ describe("DeviceConfigs validation (e2e)", () => {
             key: "free_chat_casual",
             isActive: true,
             category: { key: "free_chat" },
-          });
-        }
-        if (where.key === "textbook_follow") {
-          return Promise.resolve({
-            id: "mode-uuid-002",
-            key: "textbook_follow",
-            isActive: true,
-            category: { key: "textbook_learning" },
           });
         }
         return Promise.resolve(null);
@@ -137,12 +102,11 @@ describe("DeviceConfigs validation (e2e)", () => {
         .expect(400);
     });
 
-    it("should reject free_chat with textbookId with 400", () => {
+    it("should reject english_chat with conversationModeKey with 400", () => {
       return authedPost("/device-configs/dev-001/mode")
         .send({
-          mode: "free_chat",
+          mode: "english_chat",
           conversationModeKey: "free_chat_casual",
-          textbookId: "unlock-l1-speaking-listening",
         })
         .expect(400);
     });
@@ -151,43 +115,6 @@ describe("DeviceConfigs validation (e2e)", () => {
       return authedPost("/device-configs/dev-001/mode")
         .send({ mode: "free_chat", conversationModeKey: "not_a_mode" })
         .expect(400);
-    });
-
-    it("should reject a conversationModeKey from the wrong category with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({ mode: "free_chat", conversationModeKey: "textbook_follow" })
-        .expect(400);
-    });
-
-    it("should reject textbook_learning without textbookId with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({ mode: "textbook_learning" })
-        .expect(400);
-    });
-
-    it("should reject locked_unit without unitId with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({
-          mode: "locked_unit",
-          textbookId: "unlock-l1-speaking-listening",
-        })
-        .expect(400);
-    });
-
-    it("should reject free_textbook with unitId with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({
-          mode: "free_textbook",
-          textbookId: "unlock-l1-speaking-listening",
-          unitId: "unit-1",
-        })
-        .expect(400);
-    });
-
-    it("should return 404 when the textbook does not exist", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({ mode: "textbook_learning", textbookId: "not-exist" })
-        .expect(404);
     });
 
     it("should accept a valid free_chat payload with 201", () => {
@@ -200,6 +127,17 @@ describe("DeviceConfigs validation (e2e)", () => {
           expect(res.body.data.conversationModeKey).toBe("free_chat_casual");
         });
     });
+
+    it("should accept a valid english_chat payload with 201", () => {
+      return authedPost("/device-configs/dev-001/mode")
+        .send({ mode: "english_chat" })
+        .expect(201)
+        .expect((res) => {
+          expect(res.body.code).toBe(0);
+          expect(res.body.data.mode).toBe("english_chat");
+          expect(res.body.data.conversationModeKey).toBeNull();
+        });
+    });
   });
 
   describe("POST /device-configs/:deviceId/apply", () => {
@@ -209,28 +147,14 @@ describe("DeviceConfigs validation (e2e)", () => {
         .expect(400);
     });
 
-    it("should return 404 when the unit does not exist", () => {
+    it("should accept a valid english_chat payload with 201", () => {
       return authedPost("/device-configs/dev-001/apply")
-        .send({
-          mode: "locked_unit",
-          textbookId: "unlock-l1-speaking-listening",
-          unitId: "unit-999",
-        })
-        .expect(404);
-    });
-
-    it("should accept a valid locked_unit payload with 201", () => {
-      return authedPost("/device-configs/dev-001/apply")
-        .send({
-          mode: "locked_unit",
-          textbookId: "unlock-l1-speaking-listening",
-          unitId: "unit-1",
-        })
+        .send({ mode: "english_chat" })
         .expect(201)
         .expect((res) => {
           expect(res.body.code).toBe(0);
-          expect(res.body.data.textbookId).toBe("unlock-l1-speaking-listening");
-          expect(res.body.data.unitId).toBe("unit-1");
+          expect(res.body.data.mode).toBe("english_chat");
+          expect(res.body.data.conversationModeKey).toBeNull();
         });
     });
   });

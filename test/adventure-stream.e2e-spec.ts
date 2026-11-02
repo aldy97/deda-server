@@ -6,7 +6,6 @@ import { Server as SocketIOServer } from "socket.io";
 import { io, Socket as ClientSocket } from "socket.io-client";
 import { AppModule } from "./../src/app.module";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
-import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { AdventureService } from "./../src/modules/adventure/adventure.service";
 
@@ -149,17 +148,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    textbook: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    unit: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
     adventureEpisode: {
       findMany: jest.fn().mockResolvedValue([episode]),
     },
@@ -261,10 +249,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
     },
   };
 
-  const mockRagService = {
-    retrieve: jest.fn(),
-    truncateContent: jest.fn((content: string) => content),
-  };
   const mockLlmService = {
     get smallModelName() {
       return "small-llm";
@@ -337,8 +321,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
     })
       .overrideProvider(PrismaService)
       .useValue(mockPrismaService)
-      .overrideProvider(RagService)
-      .useValue(mockRagService)
       .overrideProvider(LlmService)
       .useValue(mockLlmService)
       .compile();
@@ -499,7 +481,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
     expect(assistantRows.every((row) => row.mode === "adventure_story")).toBe(
       true,
     );
-    expect(mockRagService.retrieve).not.toHaveBeenCalled();
     expect(mockLlmService.completeStream).not.toHaveBeenCalled();
     await expect(
       adventureService.startToday(device.id, true),

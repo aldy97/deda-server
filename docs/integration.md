@@ -46,13 +46,12 @@
 | 微信登录换 JWT     | `POST /users/login`                                                                                                              | `pages/login/login.ts`                                                                                 | `src/modules/users/users.controller.ts`                                                                                        | code 来自 `wx.login`                |
 | 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序 |
 | 查询设备当前配置   | `GET /device-configs/:deviceId/current`                                                                                          | `pages/device-list/device-list.ts` 等                                                                  | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 多页面共用                          |
-| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | `pages/switch-mode/switch-mode.ts`                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 点分类仅跳转子页,不在此页保存;mode-only 载荷 400 |
-| 选择自由对话子模式 | `GET /conversation-modes?categoryKey=free_chat`<br>`POST /device-configs/:deviceId/mode`                                         | `pages/choose-free-chat-mode/choose-free-chat-mode.ts`                                                 | `src/modules/conversation-modes/conversation-modes.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts` | 子页提交完整载荷（mode+conversationModeKey） |
-| 选择教材单元       | `GET /textbooks`<br>`GET /textbooks/:id/units`<br>`POST /device-configs/:deviceId/apply`                                         | `pages/textbook-learning/textbook-learning.ts`<br>`pages/choose-textbook-unit/choose-textbook-unit.ts` | `src/modules/textbooks/textbooks.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts`                   | apply 保存 textbookId + unitId      |
+| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | `pages/switch-mode/switch-mode.ts`                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 顶层模式仅 `free_chat / english_chat` |
+| 选择自由对话子模式 | `GET /conversation-modes?categoryKey=free_chat`<br>`POST /device-configs/:deviceId/mode`                                         | `pages/choose-free-chat-mode/choose-free-chat-mode.ts`                                                 | `src/modules/conversation-modes/conversation-modes.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts` | 子页提交完整载荷（mode+conversationModeKey）；`english_chat` 无子模式 |
 | 查询对话记录       | `GET /conversations?page&pageSize&deviceId`                                                                                      | `pages/chat-history/chat-history.ts`                                                                   | `src/modules/conversations/conversations.controller.ts`                                                                        | 一条 item=一条消息（turnId 关联成轮）；page=1 为最新一页，页内时间正序（顶老底新），前端勿再自行反转；删除接口已移除；URL 无语境参数时前端按设备当前配置推导过滤（后端只认显式传参、不读配置） |
 | 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案；`gender` 可选值为 `male/female`，`null` 表示未设置或清除，PATCH 省略时保留原值 |
 | 学习全览 MVP       | `GET /learning-stats/dashboard`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/topics`<br>`GET /learning-stats/timeline` | `pages/learning-data/learning-data.ts`                                                                 | `src/modules/learning-stats/learning-stats.controller.ts`<br>`src/modules/learning-stats/learning-stats.service.ts`            | 仪表盘/趋势/主题/时间线             |
-| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities`<br>`GET /learning-stats/unit-progress/:deviceId` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器：查看任何教材/单元/自由对话均为只读,**不修改设备配置**（家长看不打断孩子练习）;缺省=当前配置模式族;指标卡/趋势/动态随 tab 走 range（自然历）且随语境过滤;趋势今日=摘要卡/本月=周聚合;topics 全量（教材族带 avgScore,free_chat 按子模式不评分）;单元进度全量,free_chat 语境下隐藏 |
+| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前顶层模式过滤；自由对话可继续按子模式过滤；topics 按 `mode + conversationModeKey` 全量分组 |
 
 ## 设备排序契约
 
@@ -64,21 +63,19 @@
 
 ## 设备配置入参校验
 
-`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` / `textbookId` / `unitId` / `conversationModeKey` 做服务端强校验：
+`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` / `conversationModeKey` 做服务端强校验：
 
-| mode | textbookId | unitId | conversationModeKey |
-| ---- | ---------- | ------ | ------------------- |
-| `free_chat` | 禁止 | 禁止 | **必填**，须为启用中的 free_chat 分类子模式 |
-| `textbook_learning` | **必填** | 可选 | 可选，若给须为 textbook_learning 分类子模式 |
-| `locked_unit` | **必填** | **必填** | 可选，若给须为 textbook_learning 分类子模式 |
-| `free_textbook` | **必填** | 禁止 | 可选，若给须为 textbook_learning 分类子模式 |
+| mode | conversationModeKey |
+| ---- | ------------------- |
+| `free_chat` | **必填**，须为启用中的 free_chat 分类子模式 |
+| `english_chat` | **禁止**，必须省略或为 `null` |
 
 错误语义：
 
 - `400`：mode 不在枚举内、违反上表必填/禁止规则、`conversationModeKey` 不存在/未启用/分类与 mode 不匹配。
-- `404`：提供的 `textbookId` 不存在，或 `unitId` 不属于该教材。
+- 无配置设备默认 `free_chat + free_chat_casual`。
 
-前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts`、`pages/textbook-learning/textbook-learning.ts`、`pages/choose-textbook-unit/choose-textbook-unit.ts` 需保证按上表带齐必填字段、不带禁止字段，否则会被 400 拒绝。
+前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts` 需按上表提交；英语对话直接提交 `mode=english_chat`，不再进入子模式或教材选择页。
 
 ## 机芯厂 WS 流式协议（vendor namespace）
 
@@ -162,7 +159,7 @@
 ## 常见坑
 
 - **CORS**：后端 `CORS_ORIGIN=*` 仅用于开发；生产需改为小程序域名。
-- **字段命名**：后端用 camelCase（如 `deviceId`、`textbookId`），数据库存储也是 camelCase。
+- **字段命名**：后端用 camelCase（如 `deviceId`、`conversationModeKey`），数据库存储也是 camelCase。
 - **时间格式**：后端返回 ISO 8601 字符串（如 `2026-09-25T09:11:00.657Z`）。
 - **401/403**：token 过期或设备不属于当前用户；前端应重新登录或提示无权限。
 - **代理配置**：小程序开发版直连 `127.0.0.1:3000`；真机需 HTTPS 域名或开启「不校验合法域名」。

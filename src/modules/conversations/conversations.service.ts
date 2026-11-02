@@ -18,8 +18,6 @@ export class ConversationsService {
       page?: number | string;
       pageSize?: number | string;
       deviceId?: string;
-      textbookId?: string;
-      unitId?: string;
       conversationModeKey?: string;
     },
   ) {
@@ -105,8 +103,6 @@ export class ConversationsService {
   private buildWhereClause(
     query: {
       deviceId?: string;
-      textbookId?: string;
-      unitId?: string;
       conversationModeKey?: string;
     },
     targetInternalIds: string[],
@@ -117,8 +113,6 @@ export class ConversationsService {
       where.deviceId = { in: targetInternalIds };
     }
 
-    if (query.textbookId) where.textbookId = query.textbookId;
-    if (query.unitId) where.unitId = query.unitId;
     if (query.conversationModeKey)
       where.conversationModeKey = query.conversationModeKey;
 

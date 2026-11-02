@@ -177,7 +177,6 @@ npx prisma migrate deploy --schema=src/prisma/schema.prisma
 | 对话记录          | `src/modules/conversations/conversations.controller.ts`                                          |
 | 孩子档案          | `src/modules/child-profiles/child-profiles.controller.ts`                                        |
 | 对话模式          | `src/modules/conversation-modes/conversation-modes.controller.ts`                                |
-| 教材单元          | `src/modules/textbooks/textbooks.controller.ts`                                                  |
 | 机芯厂对接        | `src/modules/vendor/vendor.controller.ts`、`src/modules/vendor/vendor.gateway.ts`                |
 | Prisma schema     | `src/prisma/schema.prisma`                                                                       |
 | 联调契约          | `docs/integration.md`                                                                            |

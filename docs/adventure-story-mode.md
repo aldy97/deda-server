@@ -120,7 +120,7 @@ VendorService.handleTextIn
 2. 故事候选文本调用小模型，返回 `adventure_story / english_story / idiom_story / free_story / not_story` 之一；非法输出或调用失败使用关键词兜底；
 3. 今日未完成时，`adventure_story` 和 `free_story` 都尝试开集／续玩；明确英语、成语故事不抢占；
 4. 今日完成后不再调用 `startToday`，记录 `entry_blocked_completed` 与 `routed_other_mode`，再进入对应故事链路；
-5. 非故事普通聊天不自动开冒险，沿用原教材／自由对话流程。
+5. 非故事普通聊天不自动开冒险，按设备当前配置进入英语对话或自由对话流程。
 
 冒险回复复用 `VendorReplyUploader`：`source=answer`、seq 连续、逐 chunk await ack、最后发送 `vendor:text:out` 全量兜底；WS DTO 不变。落库后追加 `segments_presented` 和交互结果事件。
 

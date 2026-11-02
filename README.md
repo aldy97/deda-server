@@ -33,7 +33,7 @@ Deda 微信小程序后端服务，负责家长 App 设备管理、学习数据�
                        ▼                    ▼                    ▼
               ┌─────────────────────────────────────────────────────┐
               │                    deda-server                       │
-              │  （NestJS / PostgreSQL / Redis / LLM + RAG）          │
+              │  （NestJS / PostgreSQL / Redis / LLM）                │
               │                                                     │
               │  • 接收 ASR 文字，调用 LLM 生成回复                    │
               │  • 通过 WebSocket 返回回复文字给机芯厂商云              │
@@ -133,7 +133,6 @@ deda-server/
 │   │   ├── users             # 用户账号（微信登录、手机号绑定）
 │   │   ├── devices           # 设备管理、状态查询、控制转发、绑定、WiFi 下发
 │   │   ├── child-profiles    # 孩子档案
-│   │   ├── textbooks         # 教材与单元元数据
 │   │   ├── device-configs    # 设备学习配置下发、模式/语言/语速同步
 │   │   ├── conversations     # 对话记录查询与删除
 │   │   ├── learning-stats    # 学习统计与进度

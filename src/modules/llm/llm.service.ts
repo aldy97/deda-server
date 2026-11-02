@@ -314,17 +314,13 @@ ${params.segmentText}
   }
 
   /**
-   * 构建儿童英语陪练 prompt
+   * 构建儿童对话 prompt
    * @param asrText 当前用户输入
-   * @param context 教材单元上下文
-   * @param unitName 单元名称
-   * @param history 同设备同教材同单元的最近对话历史
-   * @param options 扩展选项：孩子档案、模式/教材 prompt 模板
+   * @param history 同设备同模式的最近对话历史
+   * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板
    */
   buildEnglishTutorPrompt(
     asrText: string,
-    context: string,
-    unitName?: string,
     history?: Array<{ role: "user" | "assistant"; content: string }>,
     options?: {
       childProfile?: {
@@ -352,12 +348,10 @@ Rules:
 4. If the child says something in Chinese, gently guide them to say it in English.
 5. If the child's English has mistakes, correct them gently by repeating the correct form.
 6. Never use content that is scary, violent, or inappropriate for children.
-7. When a textbook context is provided, use the unit topic and key sentences as a starting point, but do NOT repeat the same facts over and over. Introduce variety by exploring different angles, related words, and imaginative connections within the unit theme.
-8. Always end your reply with a question that is relevant to the unit topic, especially those topics that are not covered yet in the conversation, encouraging the child to respond in English.
-9. If the child does not answer your engaging question, smoothly shift to another aspect of the same unit. For example, ask about different jobs, describe what people do, or invite the child to imagine their own future job.
-10. IMPORTANT: If the child's answer seems off-topic, do NOT just say "let's go back." Instead, make a friendly, creative bridge back to the unit. For example, if the unit is about jobs and the child says "I want to play football," you can say "Playing football is fun! Do you want to be a football player when you grow up?" This keeps the conversation in the unit while honoring what the child said.
-11. Avoid repeating the same job titles or example people (e.g., Nadiya Hussain, chef, TV presenter) in every reply. Use them only when truly relevant, and prefer open-ended questions that invite the child to speak.
-12. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel). Do NOT repeat greetings or acknowledgments (e.g. "Oh, you like...") — go straight into your reply content so the two parts sound like one natural utterance.`;
+7. Have an open English conversation about the child's interests and everyday life. Introduce variety and do not repeat the same examples in every reply.
+8. Ask relevant, engaging questions that encourage the child to respond in English, but do not force a fixed topic.
+9. If the child changes the subject, follow their lead naturally while keeping the conversation in simple English.
+10. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel). Do NOT repeat greetings or acknowledgments (e.g. "Oh, you like...") — go straight into your reply content so the two parts sound like one natural utterance.`;
 
     const freeChatRules = `You are a warm, safe companion for a young child. Have a natural free chat, not an English lesson.
 
@@ -376,8 +370,7 @@ Rules:
 2. If the child brings up such a topic, do not repeat or echo their words. Gently say this topic is not for little kids, suggest talking to parents or a trusted adult, then move to a safe topic.
 3. If the child says something aggressive out of anger or frustration (for example, wanting to hurt a sibling), respond with empathy first, gently ask what happened, and never agree with or encourage any hurting.`;
 
-    const isFiveMode = [
-      "free_chat",
+    const isStoryMode = [
       "english_story",
       "idiom_story",
       "sleep_story",
@@ -387,7 +380,7 @@ Rules:
     const baseRules =
       options?.mode === "free_chat"
         ? freeChatRules
-        : isFiveMode
+        : isStoryMode
           ? storyModeRules
           : englishTutorRules;
     const defaultRules = `${baseRules}\n\n${childSafetyRules}`;
@@ -400,13 +393,7 @@ Rules:
       ? `${promptTemplate}\n\n${rulesSection}`
       : rulesSection;
 
-    const contextSection = context
-      ? `Current textbook context (${unitName || "selected unit"}):\n"""\n${context}\n"""`
-      : isFiveMode
-        ? ""
-        : "No specific textbook context is selected. Have a free English chat with the child.";
-
-    const systemPrompt = [childProfileSection, templateSection, contextSection]
+    const systemPrompt = [childProfileSection, templateSection]
       .filter((section) => section.length > 0)
       .join("\n\n");
 
