@@ -97,6 +97,7 @@ Content-Type: application/json
 | 对话模式 | 3 | 分类、子模式、树形结构 |
 | 学习统计 | 10 | 仪表盘、趋势、主题、时间线、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
+| 哄睡配置 | 2 | 查询、部分更新 |
 
 ---
 
@@ -1027,7 +1028,61 @@ Query：
 
 ---
 
-## 10. 小程序接入注意事项
+## 10. 哄睡配置
+
+本模块接口均需要 JWT，且当前用户必须已绑定目标设备（否则 403）。配置按设备一对一保存，生命周期跟随设备（解绑/删除设备时级联删除）。
+
+### 10.1 查询设备哄睡配置
+
+- **方法／路径**：`GET /sleep-configs/device/:deviceId`
+- **鉴权**：JWT
+- **成功状态**：200
+
+响应数据：从未设置过时为 `null`，前端展示默认值（`enabled=false, durationMode="default", durationMinutes=null, contentType="story", sleepTime="21:30", forceSleep=false`）；否则为：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 哄睡配置 ID |
+| `deviceId` | string | **设备内部 UUID**，不是设备业务 ID |
+| `enabled` | boolean | 哄睡总开关 |
+| `durationMode` | string | `default / custom`；`default` 表示由后端决定播放时长 |
+| `durationMinutes` | number \| null | 手动哄睡时长（分钟），取值 `10/15/20/25/30`；`durationMode=default` 时恒为 `null` |
+| `contentType` | string | 哄睡内容类型：`story / song / mixed` |
+| `sleepTime` | string | 每晚定时进入时间，24h 制 `HH:mm`，如 `21:30` |
+| `forceSleep` | boolean | 强制哄睡开关 |
+| `createdAt` | string | 创建时间 |
+| `updatedAt` | string | 更新时间 |
+
+### 10.2 部分更新哄睡配置
+
+- **方法／路径**：`PATCH /sleep-configs/device/:deviceId`
+- **鉴权**：JWT
+- **成功状态**：200
+
+请求体（所有字段可选，传什么改什么；省略的字段保留原值）：
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | 否 | — |
+| `durationMode` | string | 否 | 仅允许 `default / custom` |
+| `durationMinutes` | number \| null | 否 | 仅允许 `10/15/20/25/30`；生效 `durationMode=custom` 时必须有值（显式传 `null` 视为无值），否则 400 |
+| `contentType` | string | 否 | 仅允许 `story / song / mixed` |
+| `sleepTime` | string | 否 | 必须匹配 `^([01]\d\|2[0-3]):[0-5]\d$` |
+| `forceSleep` | boolean | 否 | — |
+
+跨字段规则：
+
+- 「生效 `durationMode`」= 本次传入值，未传则取已存值，从未设置过则视为 `default`。
+- 生效为 `custom` 且生效 `durationMinutes` 为空 → 400。
+- 生效为 `default` 时忽略并清空 `durationMinutes`（存为 `null`）。
+
+响应数据：更新后的完整配置，字段同 10.1。从未设置过的设备首次 PATCH 会按「默认值 + 本次入参」创建记录。
+
+> 说明：定时进入、语音指令进入、强制哄睡拦截及哄睡统计口径为后续批次行为，当前接口仅负责配置读写。
+
+---
+
+## 11. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。

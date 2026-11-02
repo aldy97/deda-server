@@ -73,6 +73,7 @@ model Device {
   parentReports   ParentReport[]
   habitPlans      HabitPlan[]
   conversationSession ConversationSession?
+  sleepConfig     SleepConfig?
 
   @@map("devices")
 }
@@ -462,4 +463,22 @@ model ChildMemory {
   @@index([deviceId, status, key, lastInjectedAt])
   @@index([deviceId, key, validFrom])
   @@map("child_memories")
+}
+
+// 哄睡配置：每设备一份，生命周期跟随设备（级联删除）
+model SleepConfig {
+  id              String   @id @default(uuid())
+  deviceId        String   @unique // 设备内部 ID，一对一
+  enabled         Boolean  @default(false) // 哄睡总开关
+  durationMode    String   @default("default") // default=后端决定时长 / custom=手动
+  durationMinutes Int? // custom 时必填：10/15/20/25/30；default 时恒为 null
+  contentType     String   @default("story") // story / song / mixed
+  sleepTime       String   @default("21:30") // 每晚定时进入时间，HH:mm（24h）
+  forceSleep      Boolean  @default(false) // 强制哄睡开关
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("sleep_configs")
 }

@@ -23,6 +23,7 @@ import { DeviceStatusModule } from "./modules/device-status/device-status.module
 import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
 import { AdventureModule } from "./modules/adventure/adventure.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
+import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
     LlmModule,
     AdventureModule,
     FeedbacksModule,
+    SleepConfigsModule,
   ],
 })
 export class AppModule {}
