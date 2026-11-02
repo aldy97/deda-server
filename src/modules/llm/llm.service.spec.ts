@@ -727,4 +727,25 @@ describe("LlmService", () => {
       expect(LlmService.extractAnswer("x", { answer: 123 })).toBeNull();
     });
   });
+
+  describe("child safety rules (L3)", () => {
+    it.each([undefined, "free_chat", "sleep_story", "locked_unit"])(
+      "buildEnglishTutorPrompt includes hard safety rules for mode=%s",
+      (mode) => {
+        const messages = service.buildEnglishTutorPrompt(
+          "你好",
+          "",
+          undefined,
+          [],
+          { mode },
+        );
+        const system = messages[0].content;
+        expect(system).toContain(
+          "Never generate, describe, or expand sexual, violent, bloody, or self-harm content",
+        );
+        expect(system).toContain("do not repeat or echo their words");
+        expect(system).toContain("empathy first");
+      },
+    );
+  });
 });

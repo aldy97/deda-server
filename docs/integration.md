@@ -108,6 +108,15 @@
 - 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
 - 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
 
+## 儿童安全三层防护（vendor 链路）
+
+- L1 正则闸（`src/modules/vendor/child-safety.service.ts`）：显式敏感词（色情/自杀自残/血腥暴力，中英文）零延迟拦截，优先于冒险状态机与一切 LLM 调用；刻意不收裸「杀/打/枪/刀」等字样，孩子的攻击性气话（如「我要杀了我的弟弟」）不在此拦截。
+- L2 小模型安全分类：每轮一次 small model 调用（与意图路由并行），标签 `safe / sexual / violence / self_harm / emotional_harm`；前三者拦截，`emotional_harm`（情绪气话）放行并向大模型注入共情引导 system 消息；分类失败 fail-open 放行，由 L3 兜底。
+- L3 prompt 硬约束（`llm.service.ts` `buildEnglishTutorPrompt`）：全模式常驻儿童安全规则（不生成/不复述敏感内容、温和转移、气话先共情）。
+- 拦截回复：不调 LLM，直接播报类别兜底话术（self_harm 引导告诉家长/信任的大人）；走既有 answer chunk 通道。
+- 落库：拦截轮 user 原文 + assistant 兜底话术，`mode=free_chat`，assistant `rawPayload` 含 `safetyCategory / safetyLayer`，供家长端敏感事件时间线与告警（家长端展示与推送为后续工作）。
+- 人工验收：`scripts/test-child-safety.sh`（真实链路，需本地后端 + 真实 LLM key，会写入测试对话，不自动运行）。
+
 ## “更懂 TA”统计契约
 
 - `GET /learning-stats/daily` 的 `date` 统一为 `YYYY-MM-DD`，按日期升序，无数据日期补零。

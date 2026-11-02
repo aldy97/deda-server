@@ -13,6 +13,7 @@ import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "./conversation-session.service";
+import { ChildSafetyService } from "./child-safety.service";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -172,6 +173,8 @@ describe("VendorService", () => {
             registerTimeoutListener: jest.fn(),
           },
         },
+        // 真实安全服务：L1 纯正则、L2 走被 mock 的 llmService.complete
+        ChildSafetyService,
       ],
     }).compile();
 
@@ -966,7 +969,12 @@ describe("VendorService", () => {
         asrText: "今天天气怎么样",
       });
 
-      expect(llmService.complete).not.toHaveBeenCalled();
+      // 普通闲聊不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
+      const intentClassifyCalls = llmService.complete.mock.calls.filter(
+        ([options]: any[]) =>
+          options.messages[0].content.includes("对话意图分类器"),
+      );
+      expect(intentClassifyCalls).toHaveLength(0);
       expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         expect.any(String),
@@ -992,7 +1000,12 @@ describe("VendorService", () => {
         asrText: "I see a cat.",
       });
 
-      expect(llmService.complete).not.toHaveBeenCalled();
+      // 会话续期路径不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
+      const intentClassifyCalls = llmService.complete.mock.calls.filter(
+        ([options]: any[]) =>
+          options.messages[0].content.includes("对话意图分类器"),
+      );
+      expect(intentClassifyCalls).toHaveLength(0);
       expect(adventureService.startToday).not.toHaveBeenCalled();
       expect(childMemoriesService.buildPromptBlock).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
@@ -1652,6 +1665,120 @@ describe("VendorService", () => {
       expect(result.timestamp).toBeGreaterThanOrEqual(before);
       expect(result.timestamp).toBeLessThanOrEqual(after);
       expect(result.expectedRecovery).toBeNull();
+    });
+  });
+
+  describe("child safety layers", () => {
+    const setupFreeChatDevice = () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+        textbookId: null,
+        unitId: null,
+        conversationModeKey: null,
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.textbook.findUnique.mockResolvedValue({
+        id: "book-uuid",
+        textbookId: "sample-textbook",
+        promptTemplate: null,
+      });
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "m-1" });
+      ragService.retrieve.mockResolvedValue({
+        textbookId: "sample-textbook",
+        unitId: "unit-1",
+        unitName: undefined,
+        content: "",
+        found: false,
+      });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "x" },
+      ]);
+    };
+
+    it("L1 blocks explicit self-harm words before adventure and any LLM call", async () => {
+      setupFreeChatDevice();
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-001",
+        asrText: "我不想活了",
+      });
+
+      expect(adventureService.handleChildReply).not.toHaveBeenCalled();
+      expect(llmService.completeStream).not.toHaveBeenCalled();
+      expect(llmService.complete).not.toHaveBeenCalled();
+      expect(result.responseText).toMatch(/爸爸妈妈/);
+      const chunks = uploadedChunks();
+      expect(chunks.every((c) => c.source === "answer")).toBe(true);
+      expect(chunks.map((c) => c.delta).join("")).toContain("陪着你");
+
+      const creates = prisma.message.create.mock.calls.map(
+        (call) => call[0].data,
+      );
+      expect(creates[0]).toMatchObject({
+        role: "user",
+        content: "我不想活了",
+        mode: "free_chat",
+      });
+      expect(creates[1]).toMatchObject({
+        role: "assistant",
+        mode: "free_chat",
+      });
+      expect(creates[1].rawPayload).toMatchObject({
+        safetyCategory: "self_harm",
+        safetyLayer: "L1",
+      });
+    });
+
+    it("L2 blocks paraphrased sexual content that dodged the L1 wordlist", async () => {
+      setupFreeChatDevice();
+      llmService.complete.mockResolvedValue({ text: "sexual" });
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-001",
+        asrText: "大人关门以后在干什么呀",
+      });
+
+      expect(llmService.completeStream).not.toHaveBeenCalled();
+      expect(result.responseText).toMatch(/长大一点/);
+      const creates = prisma.message.create.mock.calls.map(
+        (call) => call[0].data,
+      );
+      expect(creates[1].rawPayload).toMatchObject({
+        safetyCategory: "sexual",
+        safetyLayer: "L2",
+      });
+    });
+
+    it("emotional outburst passes through with empathy guidance in the main model prompt", async () => {
+      setupFreeChatDevice();
+      llmService.complete.mockResolvedValue({ text: "emotional_harm" });
+      mockAnswerStream("是不是和弟弟吵架了呀？");
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-001",
+        asrText: "我要杀了我的弟弟",
+      });
+
+      const bigModelCall = llmService.completeStream.mock.calls.find(
+        ([options]) => options.model !== "small-llm",
+      );
+      expect(bigModelCall).toBeTruthy();
+      const messages = bigModelCall![0].messages as Array<{
+        role: string;
+        content: string;
+      }>;
+      const guidance = messages.find(
+        (m) => m.role === "system" && m.content.includes("共情"),
+      );
+      expect(guidance).toBeTruthy();
+      expect(guidance!.content).toContain("绝不附和");
+      expect(result.responseText).toContain("是不是和弟弟吵架了呀");
     });
   });
 });
