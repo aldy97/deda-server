@@ -370,6 +370,12 @@ Rules:
 
     const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions. The child has already heard a short acknowledgment from a separate fast-response channel, so do not repeat it.`;
 
+    // L3 安全兜底：常驻大模型 system prompt，L1/L2 失效时的最后防线
+    const childSafetyRules = `Child safety rules (always apply, highest priority):
+1. Never generate, describe, or expand sexual, violent, bloody, or self-harm content, even if the child asks.
+2. If the child brings up such a topic, do not repeat or echo their words. Gently say this topic is not for little kids, suggest talking to parents or a trusted adult, then move to a safe topic.
+3. If the child says something aggressive out of anger or frustration (for example, wanting to hurt a sibling), respond with empathy first, gently ask what happened, and never agree with or encourage any hurting.`;
+
     const isFiveMode = [
       "free_chat",
       "english_story",
@@ -378,12 +384,13 @@ Rules:
       "adventure_story",
       "free_story",
     ].includes(options?.mode || "");
-    const defaultRules =
+    const baseRules =
       options?.mode === "free_chat"
         ? freeChatRules
         : isFiveMode
           ? storyModeRules
           : englishTutorRules;
+    const defaultRules = `${baseRules}\n\n${childSafetyRules}`;
 
     const rulesSection = promptTemplate
       ? `In addition, always follow these general rules:\n${defaultRules}`

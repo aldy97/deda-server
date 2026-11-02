@@ -20,6 +20,11 @@ import {
   ConversationIntent,
   ConversationSessionService,
 } from "./conversation-session.service";
+import {
+  BlockedSafetyCategory,
+  ChildSafetyService,
+  SafetyVerdict,
+} from "./child-safety.service";
 
 /**
  * 机芯厂-facing 业务服务
@@ -40,6 +45,7 @@ export class VendorService {
     private readonly adventureService: AdventureService,
     private readonly childMemoriesService: ChildMemoriesService,
     private readonly conversationSessionService: ConversationSessionService,
+    private readonly childSafetyService: ChildSafetyService,
   ) {
     this.defaultTextbookId =
       this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
@@ -259,6 +265,16 @@ export class VendorService {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
 
+    // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
+    const l1Verdict = this.childSafetyService.checkL1(dto.asrText);
+    if (l1Verdict.blocked) {
+      return this.sendSafetyReply(
+        device,
+        l1Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
+        dto.asrText,
+      );
+    }
+
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     const adventureReply = await this.adventureService.handleChildReply(
       device.id,
@@ -268,10 +284,18 @@ export class VendorService {
       return this.sendAdventureReply(device, adventureReply, dto.asrText);
     }
 
-    const storyIntent = await this.conversationSessionService.resolve(
-      device.id,
-      dto.asrText,
-    );
+    // L2 安全分类与意图路由并行：小模型一次调用，补 L1 语义盲区
+    const [storyIntent, l2Verdict] = await Promise.all([
+      this.conversationSessionService.resolve(device.id, dto.asrText),
+      this.childSafetyService.classifyL2(dto.asrText),
+    ]);
+    if (l2Verdict.blocked) {
+      return this.sendSafetyReply(
+        device,
+        l2Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
+        dto.asrText,
+      );
+    }
     const storyMode = storyIntent !== "free_chat";
     if (storyMode && storyIntent !== "sleep_story") {
       const completedToday = await this.adventureService.isCompletedToday(
@@ -432,9 +456,18 @@ export class VendorService {
       history,
       promptOptions,
     );
-    const messages: LlmMessage[] = memoryPrompt.text
-      ? [{ role: "system", content: memoryPrompt.text }, ...baseMessages]
-      : baseMessages;
+    // emotional_harm（攻击性气话）不拦截：注入共情引导 system 消息交给大模型
+    const extraSystem: LlmMessage[] = [];
+    if (l2Verdict.category === "emotional_harm") {
+      extraSystem.push({
+        role: "system",
+        content: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
+      });
+    }
+    if (memoryPrompt.text) {
+      extraSystem.push({ role: "system", content: memoryPrompt.text });
+    }
+    const messages: LlmMessage[] = [...extraSystem, ...baseMessages];
 
     // 流式开关：LLM_STREAM_ENABLED=false 时整体回落到非流式单模型路径
     const streamEnabled =
@@ -525,6 +558,103 @@ export class VendorService {
           `Failed to mark child memories injected for deviceId=${dto.deviceId}: ${message}`,
         );
       }
+    }
+
+    return reply;
+  }
+
+  /**
+   * 安全拦截回复：不调用任何 LLM，直接播报对应类别的兜底话术。
+   * 与冒险回复同走 chunk 通道（单 answer chunk + 收尾 + 全量兜底）。
+   * 落库：user 原文 + assistant 兜底话术，rawPayload 标注安全类别与命中层，
+   * 供家长端后续做敏感事件时间线与告警。
+   */
+  private async sendSafetyReply(
+    device: { id: string; deviceId: string },
+    verdict: SafetyVerdict & { category: BlockedSafetyCategory },
+    asrText: string,
+  ): Promise<VendorTextOutDto> {
+    const turnId = randomUUID();
+    const text = this.childSafetyService.cannedReply(verdict.category);
+    this.logger.warn(
+      `Child safety ${verdict.layer} blocked deviceId=${device.deviceId} ` +
+        `category=${verdict.category} matched=${verdict.matched ?? "-"}`,
+    );
+
+    const reply: VendorTextOutDto = {
+      deviceId: device.deviceId,
+      responseText: text,
+      context: { safety: verdict.category },
+      ttsOptions: {},
+    };
+
+    try {
+      await this.replyUploader.sendChunk({
+        deviceId: device.deviceId,
+        turnId,
+        seq: 0,
+        source: "answer",
+        delta: text,
+        isFinal: false,
+      });
+      await this.replyUploader.sendChunk({
+        deviceId: device.deviceId,
+        turnId,
+        seq: 1,
+        source: "answer",
+        delta: "",
+        isFinal: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Failed to upload safety chunk for deviceId=${device.deviceId}: ${message}`,
+      );
+    }
+
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "user",
+        content: asrText,
+        status: "completed",
+        textbookId: null,
+        unitId: null,
+        mode: "free_chat",
+        conversationModeKey: null,
+        rawPayload: { asrText },
+        spokeAt: new Date(),
+      },
+    });
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "assistant",
+        content: text,
+        status: "completed",
+        textbookId: null,
+        unitId: null,
+        mode: "free_chat",
+        conversationModeKey: null,
+        rawPayload: {
+          filler: null,
+          answer: text,
+          safetyCategory: verdict.category,
+          safetyLayer: verdict.layer,
+        },
+        spokeAt: new Date(),
+      },
+    });
+
+    try {
+      await this.replyUploader.sendFullReply(reply);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Failed to upload full safety reply for deviceId=${device.deviceId}: ${message}`,
+      );
     }
 
     return reply;

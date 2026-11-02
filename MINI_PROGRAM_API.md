@@ -96,7 +96,7 @@ Content-Type: application/json
 | 设备配置 | 3 | 当前配置、应用配置、切换模式 |
 | 对话记录 | 1 | 分页查询 |
 | 对话模式 | 3 | 分类、子模式、树形结构 |
-| 学习统计 | 10 | 仪表盘、趋势、主题、时间线、单元进度、动态、洞察、健康度、家长报告、报告反馈 |
+| 学习统计 | 11 | 仪表盘、趋势、主题、时间线、单元进度、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 
 ---
@@ -444,6 +444,7 @@ Content-Type: application/json
 | `name` | string \| null | 孩子姓名 |
 | `birthday` | string \| null | 生日，格式 `YYYY-MM-DD` |
 | `englishName` | string \| null | 孩子英文名 |
+| `gender` | string \| null | 孩子性别：`male / female`；`null` 表示未设置或已清除 |
 | `createdAt` | string | 创建时间 |
 | `updatedAt` | string | 更新时间 |
 
@@ -460,8 +461,9 @@ Content-Type: application/json
 | `name` | string | 否 | 最长 50 字符 |
 | `birthday` | string | 否 | 必须匹配 `YYYY-MM-DD` |
 | `englishName` | string | 否 | 最长 50 字符 |
+| `gender` | string \| null | 否 | 仅允许 `male / female`；显式传 `null` 表示清除已填性别 |
 
-响应数据：完整的 `ChildProfile`，字段同 4.1。按设备一对一 upsert；未提供的字段会写为 `null`。
+响应数据：完整的 `ChildProfile`，字段同 4.1。按设备一对一 upsert；**省略的字段保留原值**，不会写为 `null`；仅 `gender` 支持显式传 `null` 清除。
 
 ---
 
@@ -1008,6 +1010,48 @@ Query：
 ```
 
 `useful=false` 时 `feedback=not_useful`。报告不存在时返回 404。
+
+### 9.11 查询滚动功能使用统计
+
+- **方法／路径**：`GET /learning-stats/mode-usage`
+- **鉴权**：JWT
+- **成功状态**：200
+
+Query：
+
+| 参数 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `deviceId` | string | 是 | 当前用户已绑定的设备业务 ID，未绑定返回 404 |
+| `days` | number | 否 | 滚动窗口天数，默认 `7`；整数 1–31，越界或非整数返回 400 |
+| `endDate` | string | 否 | 统计截止日期 `YYYY-MM-DD`；缺省为设备时区当日，未来日期自动回落到当日；格式非法返回 400 |
+
+响应数据：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `deviceId` | string | 设备业务 ID |
+| `startDate` | string \| null | 实际统计起点；窗口内无任何可统计数据时为 `null` |
+| `endDate` | string \| null | 实际统计截止日；窗口内无任何可统计数据时为 `null` |
+| `actualDays` | number | 实际纳入统计的自然日数（含 0 次互动的天） |
+| `totalCount` | number | 窗口内全部互动次数，等于 `modeUsage` 各项之和 |
+| `modeUsage` | array | 各模式使用次数，按次数降序、模式名字典序 |
+| `modeUsage[].mode` | string | 稳定原始模式 key；无模式消息归为 `unknown` |
+| `modeUsage[].count` | number | 使用次数 |
+
+统计口径：窗口为 `endDate` 及前 `days-1` 个自然日（设备时区，非最近 N×24 小时）；起点不早于当前用户绑定该设备的日期，不补绑定前的数据。`modeUsage` 只含 `{ mode, count }`，**不含中文 label**，展示文案由前端自行映射。窗口内无任何用户消息时返回空态：
+
+```json
+{
+  "deviceId": "d1",
+  "startDate": null,
+  "endDate": null,
+  "actualDays": 0,
+  "totalCount": 0,
+  "modeUsage": []
+}
+```
+
+`startDate / endDate / actualDays` 一律以后端返回值为准，前端不得自行推算。
 
 ---
 

@@ -401,8 +401,13 @@ describe("Adventure streaming pipeline (e2e)", () => {
       nextSegmentOrder: 4,
       stars: 1,
     });
-    // 开集分类调用一次；二选一命中本身不调用互动小模型。
-    expect(mockLlmService.complete).toHaveBeenCalledTimes(1);
+    // 开集意图分类调用一次；二选一命中本身不调用互动小模型。
+    // （每轮另有设计内的 L2 安全分类调用，maxTokens=10，不计入此锁定）
+    const intentClassifyCalls = () =>
+      mockLlmService.complete.mock.calls.filter(([options]) =>
+        options.messages?.[0]?.content?.includes("对话意图分类器"),
+      );
+    expect(intentClassifyCalls()).toHaveLength(1);
     expect(
       mockLlmService.complete.mock.calls.filter(
         ([options]) => options.maxTokens === 80,
@@ -419,7 +424,8 @@ describe("Adventure streaming pipeline (e2e)", () => {
       segments[5].text,
       "",
     ]);
-    expect(mockLlmService.complete).toHaveBeenCalledTimes(2);
+    // 互动小模型调用由下方 maxTokens===80 断言锁定；意图分类仍只有开集那次
+    expect(intentClassifyCalls()).toHaveLength(1);
     expect(
       mockLlmService.complete.mock.calls.filter(
         ([options]) => options.maxTokens === 80,
