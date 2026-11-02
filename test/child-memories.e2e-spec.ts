@@ -9,6 +9,7 @@ import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
 import { AdventureService } from "./../src/modules/adventure/adventure.service";
 import { ConversationSessionService } from "./../src/modules/vendor/conversation-session.service";
+import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service";
 
 const extraction = (value: string, operation = "assert") =>
   JSON.stringify([
@@ -175,6 +176,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
         VendorService,
         ChildMemoriesService,
         ConversationSessionService,
+        // 真实安全服务：L1 纯本地正则；L2 走被 mock 的 complete，
+        // 默认返回 undefined 时 fail-open 为 safe，不改变被测链路语义
+        ChildSafetyService,
         { provide: PrismaService, useValue: prismaMock },
         {
           provide: ConfigService,
@@ -209,8 +213,12 @@ describe("Child memories conversation pipeline (e2e)", () => {
   });
 
   it("should preserve red history, activate blue v2, and recall only blue", async () => {
+    // 调用顺序（每轮）：L2 安全分类先消费一次 complete（返回 safe 放行），
+    // 随后记忆提取器消费下一次 complete。
     mockLlmService.complete
+      .mockResolvedValueOnce({ text: "safe" })
       .mockResolvedValueOnce({ text: extraction("red") })
+      .mockResolvedValueOnce({ text: "safe" })
       .mockResolvedValueOnce({ text: extraction("blue", "supersede") });
 
     await vendorService.handleTextIn({
