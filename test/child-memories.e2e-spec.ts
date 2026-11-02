@@ -4,7 +4,6 @@ import { ChildMemory } from "@prisma/client";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
 import { VendorService } from "./../src/modules/vendor/vendor.service";
 import { VendorReplyUploader } from "./../src/modules/vendor/vendor-reply.uploader";
-import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
 import { AdventureService } from "./../src/modules/adventure/adventure.service";
@@ -65,17 +64,13 @@ describe("Child memories conversation pipeline (e2e)", () => {
       deviceConfig: {
         findFirst: jest.fn().mockResolvedValue({
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
-          conversationModeKey: "companion",
+          conversationModeKey: "free_chat_casual",
         }),
       },
       childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
       conversationMode: {
         findFirst: jest.fn().mockResolvedValue({ promptTemplate: null }),
       },
-      textbook: { findUnique: jest.fn().mockResolvedValue(null) },
-      unit: { findUnique: jest.fn().mockResolvedValue(null) },
       message: {
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(({ data }) => Promise.resolve(data)),
@@ -183,17 +178,6 @@ describe("Child memories conversation pipeline (e2e)", () => {
         {
           provide: ConfigService,
           useValue: { get: jest.fn().mockReturnValue(undefined) },
-        },
-        {
-          provide: RagService,
-          useValue: {
-            retrieve: jest.fn().mockResolvedValue({
-              unitName: null,
-              content: "",
-              found: false,
-            }),
-            truncateContent: jest.fn((content: string) => content),
-          },
         },
         { provide: LlmService, useValue: mockLlmService },
         { provide: VendorReplyUploader, useValue: mockReplyUploader },

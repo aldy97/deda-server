@@ -2,7 +2,6 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { RagService } from "@/modules/rag/rag.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
@@ -33,13 +32,10 @@ import {
 @Injectable()
 export class VendorService {
   private readonly logger = new Logger(VendorService.name);
-  private readonly defaultTextbookId: string;
-  private readonly defaultUnitId: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
-    private readonly ragService: RagService,
     private readonly llmService: LlmService,
     private readonly replyUploader: VendorReplyUploader,
     private readonly adventureService: AdventureService,
@@ -47,12 +43,6 @@ export class VendorService {
     private readonly conversationSessionService: ConversationSessionService,
     private readonly childSafetyService: ChildSafetyService,
   ) {
-    this.defaultTextbookId =
-      this.configService.get<string>("DEFAULT_TEXTBOOK_ID") ||
-      "sample-textbook";
-    this.defaultUnitId =
-      this.configService.get<string>("DEFAULT_UNIT_ID") || "unit-1";
-
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
         const device = await this.prisma.device.findUnique({
@@ -82,27 +72,6 @@ export class VendorService {
   }
 
   /**
-   * 解析本次对话使用的教材与单元
-   * 优先级：payload > 设备当前生效配置 > .env 默认值
-   */
-  private async resolveTextbookAndUnit(
-    dto: VendorTextInDto,
-    deviceInternalId: string,
-  ): Promise<{ textbookId: string; unitId: string }> {
-    if (dto.textbookId && dto.unitId) {
-      return { textbookId: dto.textbookId, unitId: dto.unitId };
-    }
-
-    const activeConfig = await this.resolveActiveConfig(deviceInternalId);
-
-    return {
-      textbookId:
-        dto.textbookId || activeConfig?.textbookId || this.defaultTextbookId,
-      unitId: dto.unitId || activeConfig?.unitId || this.defaultUnitId,
-    };
-  }
-
-  /**
    * 查询设备当前生效配置
    */
   private async resolveActiveConfig(deviceInternalId: string) {
@@ -122,99 +91,42 @@ export class VendorService {
   }
 
   /**
-   * 根据当前模式解析对应的 prompt 模板
-   * - free_chat 模式：从 ConversationMode.promptTemplate 读取
-   * - 教材相关模式：从 Textbook.promptTemplate 读取
+   * 自由对话按 conversationModeKey 读取子模式 prompt 模板。
    */
   private async resolvePromptTemplate(
     mode: string | null | undefined,
-    textbookId: string | null | undefined,
     conversationModeKey: string | null | undefined,
   ): Promise<string | undefined> {
-    if (mode === "free_chat" && conversationModeKey) {
-      const conversationMode = await this.prisma.conversationMode.findFirst({
-        where: { key: conversationModeKey },
-        select: { promptTemplate: true },
-      });
-      return conversationMode?.promptTemplate ?? undefined;
+    if (mode !== "free_chat" || !conversationModeKey) {
+      return undefined;
     }
 
-    if (textbookId) {
-      const textbook = await this.prisma.textbook.findUnique({
-        where: { textbookId },
-        select: { promptTemplate: true },
-      });
-      return textbook?.promptTemplate ?? undefined;
-    }
-
-    return undefined;
+    const conversationMode = await this.prisma.conversationMode.findFirst({
+      where: { key: conversationModeKey },
+      select: { promptTemplate: true },
+    });
+    return conversationMode?.promptTemplate ?? undefined;
   }
 
   /**
-   * 五模式均不强制校验 textbook/unit；旧教材模式保留原有校验以兼容旧调用方。
-   */
-  private async validateConversationContext(
-    mode: string | null | undefined,
-    textbookId: string,
-    unitId: string,
-  ): Promise<boolean> {
-    if (
-      mode === "free_chat" ||
-      mode === "english_story" ||
-      mode === "idiom_story" ||
-      mode === "sleep_story"
-    ) {
-      return true;
-    }
-
-    const textbook = await this.prisma.textbook.findUnique({
-      where: { textbookId },
-    });
-
-    if (!textbook) {
-      return false;
-    }
-
-    const unit = await this.prisma.unit.findUnique({
-      where: {
-        textbookId_unitId: {
-          textbookId: textbook.id,
-          unitId,
-        },
-      },
-    });
-
-    return !!unit;
-  }
-
-  /**
-   * 获取同一设备、同一教材、同一单元的最近消息历史
-   * 用于 prompt 拼接，保证多轮对话上下文连续且单元边界隔离
+   * 获取同一设备、同一顶层模式的最近消息历史。
    *
    * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
    * 边界结构化存 rawPayload { filler, answer }。
-   * - 大模型历史只取 answer 部分，filler 话术不进上下文
-   *   （避免大模型学着重复寒暄，与 prompt 规则 12 对齐）；
-   * - 无边界信息的旧 assistant 行整条跳过（用户决策：不做 backfill、不回落全文）；
+   * - 大模型历史只取 answer 部分，filler 话术不进上下文；
+   * - 无边界信息的旧 assistant 行整条跳过；
    * - recentFillers 返回最近 5 轮 filler 原文（时间正序），供小模型禁用清单。
    */
   private async getRecentHistory(
     deviceInternalId: string,
-    textbookId: string | null,
-    unitId: string | null,
-    mode?: string,
+    mode: string,
     limit = 12, // 消息条数，约 6 轮问答
   ): Promise<{
     history: Array<{ role: "user" | "assistant"; content: string }>;
     recentFillers: string[];
   }> {
     const rows = await this.prisma.message.findMany({
-      where: {
-        deviceId: deviceInternalId,
-        textbookId,
-        unitId,
-        ...(mode ? { mode } : {}),
-      },
+      where: { deviceId: deviceInternalId, mode },
       orderBy: { spokeAt: "desc" },
       take: limit,
       select: { role: true, content: true, rawPayload: true },
@@ -324,78 +236,53 @@ export class VendorService {
     }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
-    const { textbookId, unitId } = await this.resolveTextbookAndUnit(
-      dto,
-      device.id,
-    );
-
-    const mode =
-      storyIntent === "english_story" ||
-      storyIntent === "idiom_story" ||
-      storyIntent === "sleep_story"
-        ? storyIntent
+    const mode = storyMode
+      ? storyIntent
+      : activeConfig?.mode === "english_chat"
+        ? "english_chat"
         : "free_chat";
 
-    // 五模式均不依赖教材：快照置空，避免默认教材污染统计口径。
-    const stampTextbookId = null;
-    const stampUnitId = null;
-
-    // 校验对话上下文是否有效，无效则整轮不落库，避免脏数据
-    const contextValid = await this.validateConversationContext(
-      mode,
-      textbookId,
-      unitId,
-    );
-
-    // 获取同一模式、同一教材快照的最近消息，避免跨模式和旧教材历史串题。
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
     const { history, recentFillers } = await this.getRecentHistory(
       device.id,
-      stampTextbookId,
-      stampUnitId,
       mode,
     );
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
     const turnId = randomUUID();
     const sourceOccurredAt = new Date();
-    if (contextValid) {
-      await this.prisma.message.create({
-        data: {
-          deviceId: device.id,
-          turnId,
-          role: "user",
-          content: dto.asrText,
-          status: "completed",
-          textbookId: stampTextbookId,
-          unitId: stampUnitId,
-          mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
-          rawPayload: dto as any,
-          spokeAt: sourceOccurredAt,
-        },
-      });
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "user",
+        content: dto.asrText,
+        status: "completed",
+        mode,
+        conversationModeKey: activeConfig?.conversationModeKey ?? null,
+        rawPayload: dto as any,
+        spokeAt: sourceOccurredAt,
+      },
+    });
 
-      // 长期记忆异步提取，不阻塞 filler 首音；失败只影响记忆写入。
-      const previousAssistant = [...history]
-        .reverse()
-        .find((message) => message.role === "assistant")?.content;
-      void this.childMemoriesService
-        .extractAndStore({
-          deviceId: device.id,
-          turnId,
-          asrText: dto.asrText,
-          previousAssistant,
-          sourceOccurredAt,
-        })
-        .catch((error: unknown) => {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          this.logger.warn(
-            `Child memory extraction failed for deviceId=${dto.deviceId}: ${message}`,
-          );
-        });
-    }
+    // 长期记忆异步提取，不阻塞 filler 首音；失败只影响记忆写入。
+    const previousAssistant = [...history]
+      .reverse()
+      .find((message) => message.role === "assistant")?.content;
+    void this.childMemoriesService
+      .extractAndStore({
+        deviceId: device.id,
+        turnId,
+        asrText: dto.asrText,
+        previousAssistant,
+        sourceOccurredAt,
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Child memory extraction failed for deviceId=${dto.deviceId}: ${message}`,
+        );
+      });
 
     // 读取孩子档案与当前模式对应的 prompt 模板
     const childProfile = await this.getChildProfile(device.id);
@@ -403,20 +290,9 @@ export class VendorService {
       ? this.storyPrompt(storyIntent)
       : await this.resolvePromptTemplate(
           mode,
-          textbookId,
           activeConfig?.conversationModeKey,
         );
 
-    // RAG 检索教材内容
-    const retrieveResult = await this.ragService.retrieve(
-      textbookId,
-      unitId,
-      dto.asrText,
-    );
-
-    const context = retrieveResult.found
-      ? this.ragService.truncateContent(retrieveResult.content, 1500)
-      : "";
     const promptOptions = {
       childProfile: childProfile
         ? {
@@ -430,7 +306,7 @@ export class VendorService {
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
-    // 只在自由对话主回答中注入相关记忆；filler 和其他对话模式不使用。
+    // 只在非故事主回答中注入相关记忆；filler 和故事模式不使用。
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
@@ -451,8 +327,6 @@ export class VendorService {
 
     const baseMessages = this.llmService.buildEnglishTutorPrompt(
       dto.asrText,
-      context,
-      retrieveResult.unitName,
       history,
       promptOptions,
     );
@@ -499,12 +373,7 @@ export class VendorService {
     const reply: VendorTextOutDto = {
       deviceId: dto.deviceId,
       responseText,
-      context: {
-        textbookId,
-        unitId,
-        unitName: retrieveResult.unitName,
-        ragFound: retrieveResult.found,
-      },
+      context: { mode },
       ttsOptions: {},
     };
 
@@ -521,33 +390,25 @@ export class VendorService {
     }
 
     this.logger.debug(
-      `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
+      `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, mode=${mode}`,
     );
 
     // 补写 assistant 消息；LLM 失败时标 failed,与真实回答可区分
-    if (contextValid) {
-      await this.prisma.message.create({
-        data: {
-          deviceId: device.id,
-          turnId,
-          role: "assistant",
-          content: reply.responseText,
-          status: llmFailed ? "failed" : "completed",
-          textbookId: stampTextbookId,
-          unitId: stampUnitId,
-          mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
-          // 边界标注（方案 3）：content 保持播报全文纯净，
-          // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
-          rawPayload: { filler, answer },
-          spokeAt: new Date(),
-        },
-      });
-    } else {
-      this.logger.warn(
-        `Invalid conversation context skipped: mode=${mode}, textbookId=${textbookId}, unitId=${unitId}`,
-      );
-    }
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "assistant",
+        content: reply.responseText,
+        status: llmFailed ? "failed" : "completed",
+        mode,
+        conversationModeKey: activeConfig?.conversationModeKey ?? null,
+        // 边界标注（方案 3）：content 保持播报全文纯净，
+        // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
+        rawPayload: { filler, answer },
+        spokeAt: new Date(),
+      },
+    });
 
     if (!llmFailed && memoryPrompt.memoryIds.length > 0) {
       try {
@@ -619,8 +480,6 @@ export class VendorService {
         role: "user",
         content: asrText,
         status: "completed",
-        textbookId: null,
-        unitId: null,
         mode: "free_chat",
         conversationModeKey: null,
         rawPayload: { asrText },
@@ -634,8 +493,6 @@ export class VendorService {
         role: "assistant",
         content: text,
         status: "completed",
-        textbookId: null,
-        unitId: null,
         mode: "free_chat",
         conversationModeKey: null,
         rawPayload: {
@@ -686,8 +543,6 @@ export class VendorService {
           role: "user",
           content: asrText,
           status: "completed",
-          textbookId: null,
-          unitId: null,
           mode: "adventure_story",
           conversationModeKey: null,
           rawPayload: { asrText },
@@ -743,8 +598,6 @@ export class VendorService {
         role: "assistant",
         content: responseText,
         status: "completed",
-        textbookId: null,
-        unitId: null,
         mode: "adventure_story",
         conversationModeKey: null,
         rawPayload: {

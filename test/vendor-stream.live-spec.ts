@@ -7,21 +7,20 @@ import { Server as SocketIOServer } from "socket.io";
 import { io, Socket as ClientSocket } from "socket.io-client";
 import { AppModule } from "./../src/app.module";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
-import { RagService } from "./../src/modules/rag/rag.service";
 
 /**
  * 真实联调 live spec（不进 CI / 默认套件：文件名不以 .e2e-spec.ts 结尾）
  *
  * 与 vendor-stream.e2e-spec.ts 的唯一区别：LlmService 不做 mock，
  * 真实调用小模型（SMALL_LLM_*，百炼 qwen-flash）与大模型（OPENAI_*，deepseek）。
- * 机芯厂云仍为本地假 WS 服务端；Prisma / RAG 仍 mock。
+ * 机芯厂云仍为本地假 WS 服务端；Prisma 仍 mock。
  *
  * 手动运行：
  *   npx jest --config ./test/jest-e2e.json --testRegex "live-spec\.ts$" --forceExit --testTimeout=30000
  *
  * 首音延迟预算（用户目标：说完话 2 秒内听到首音）：
  *   ASR 尾延(机芯厂侧) ~300ms + 上行网络 ~50ms
- *   + 我方 DB/RAG ~50ms + 小模型 TTFT ~500ms + 首 chunk 上传 ack ~50ms
+ *   + 我方 DB ~50ms + 小模型 TTFT ~500ms + 首 chunk 上传 ack ~50ms
  *   + 机芯厂 TTS/下发/起播 ~500ms + 余量 ~550ms = 2000ms
  *   => 我方可控段「收到文字 -> 小模型首 chunk 到达机芯厂云」阈值定为 800ms。
  */
@@ -65,34 +64,6 @@ describe("Vendor streaming pipeline (live LLM)", () => {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    textbook: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue({
-        id: "book-uuid",
-        textbookId: "sample-textbook",
-        promptTemplate: null,
-      }),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    unit: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest
-        .fn()
-        .mockResolvedValue({ id: "unit-uuid", unitId: "unit-1" }),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-  };
-
-  const mockRagService = {
-    retrieve: jest.fn().mockResolvedValue({
-      textbookId: "sample-textbook",
-      unitId: "unit-1",
-      unitName: "Greetings",
-      content: "Hello! How are you?",
-      found: true,
-    }),
-    truncateContent: jest.fn((content: string) => content),
   };
 
   const sleep = (ms: number) =>
@@ -174,8 +145,6 @@ describe("Vendor streaming pipeline (live LLM)", () => {
     })
       .overrideProvider(PrismaService)
       .useValue(mockPrismaService)
-      .overrideProvider(RagService)
-      .useValue(mockRagService)
       // 注意：LlmService 不 override，真实调用小模型与大模型
       .compile();
 

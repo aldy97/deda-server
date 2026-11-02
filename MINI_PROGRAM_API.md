@@ -92,11 +92,10 @@ Content-Type: application/json
 | 用户账号 | 4 | 登录、绑定手机号、查询资料、更新资料 |
 | 设备管理 | 9 | 绑定、列表、详情、状态、成员、控制、WiFi、排序、解绑 |
 | 孩子档案 | 2 | 查询、创建或更新 |
-| 教材单元 | 3 | 教材列表、教材详情、单元列表 |
 | 设备配置 | 3 | 当前配置、应用配置、切换模式 |
 | 对话记录 | 1 | 分页查询 |
 | 对话模式 | 3 | 分类、子模式、树形结构 |
-| 学习统计 | 11 | 仪表盘、趋势、主题、时间线、单元进度、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
+| 学习统计 | 10 | 仪表盘、趋势、主题、时间线、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 
 ---
@@ -467,98 +466,31 @@ Content-Type: application/json
 
 ---
 
-## 5. 教材单元
-
-本模块接口当前均为公开接口。路径 `:id` 使用教材业务 `textbookId`。
-
-### 5.1 查询教材列表
-
-- **方法／路径**：`GET /textbooks`
-- **鉴权**：公开
-- **成功状态**：200
-
-响应数据：教材数组，按创建时间升序。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 教材内部 UUID |
-| `textbookId` | string | 教材业务 ID |
-| `name` | string | 教材名称 |
-| `description` | string \| null | 描述 |
-| `cefrLevel` | string \| null | CEFR 等级 |
-| `createdAt` | string | 创建时间 |
-| `updatedAt` | string | 更新时间 |
-
-### 5.2 查询教材详情
-
-- **方法／路径**：`GET /textbooks/:id`
-- **鉴权**：公开
-- **成功状态**：200
-
-响应数据：教材对象，字段在 5.1 基础上增加：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `promptTemplate` | string \| null | 教材提示词模板 |
-
-教材不存在时返回 404。
-
-### 5.3 查询教材单元列表
-
-- **方法／路径**：`GET /textbooks/:id/units`
-- **鉴权**：公开
-- **成功状态**：200
-
-响应数据：单元数组，按 `sortOrder` 升序。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 单元内部 UUID |
-| `unitId` | string | 单元业务 ID |
-| `textbookId` | string | **所属教材内部 UUID** |
-| `name` | string | 单元名称 |
-| `description` | string \| null | 描述 |
-| `cefrLevel` | string \| null | CEFR 等级 |
-| `difficulty` | number \| null | 数值难度 |
-| `sortOrder` | number | 排序值 |
-| `createdAt` | string | 创建时间 |
-| `updatedAt` | string | 更新时间 |
-
-教材不存在时返回 404。
-
----
-
-## 6. 设备配置
+## 5. 设备配置
 
 本模块接口均需要 JWT，且当前用户必须已绑定目标设备。
 
-### 6.1 通用模型与配置规则
+### 5.1 通用模型与配置规则
 
 `DeviceConfigResponse`：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
-| `mode` | string | `free_chat / textbook_learning / locked_unit / free_textbook` |
-| `conversationModeKey` | string \| null | 对话子模式 key |
-| `textbookId` | string \| null | 教材业务 ID |
-| `textbookName` | string \| null | 教材名称 |
-| `unitId` | string \| null | 单元业务 ID |
-| `unitName` | string \| null | 单元名称 |
+| `mode` | string | `free_chat / english_chat` |
+| `conversationModeKey` | string \| null | 自由对话子模式 key；`english_chat` 固定为 `null` |
 | `cefrLevel` | string \| null | CEFR 等级 |
 | `language` | string \| null | 语言，如 `zh / en / bilingual` |
 | `speechRate` | string \| null | 语速，如 `slow / normal / fast` |
 
 配置组合规则：
 
-| `mode` | `textbookId` | `unitId` | `conversationModeKey` |
-| --- | --- | --- | --- |
-| `free_chat` | 禁止 | 禁止 | 必填，且属于启用的 `free_chat` 分类 |
-| `textbook_learning` | 必填 | 可选 | 可选；提供时必须属于 `textbook_learning` 分类 |
-| `locked_unit` | 必填 | 必填 | 可选；提供时必须属于 `textbook_learning` 分类 |
-| `free_textbook` | 必填 | 禁止 | 可选；提供时必须属于 `textbook_learning` 分类 |
+| `mode` | `conversationModeKey` |
+| --- | --- |
+| `free_chat` | 必填，且属于启用的 `free_chat` 分类 |
+| `english_chat` | 禁止，必须省略或为 `null` |
 
-### 6.2 查询当前生效配置
+### 5.2 查询当前生效配置
 
 - **方法／路径**：`GET /device-configs/:deviceId/current`
 - **鉴权**：JWT
@@ -566,9 +498,9 @@ Content-Type: application/json
 
 响应数据：`DeviceConfigResponse`。
 
-无历史配置时返回服务端默认教材和单元；默认 `mode=locked_unit`、`language=bilingual`、`speechRate=normal`。
+无历史配置时默认 `mode=free_chat`、`conversationModeKey=free_chat_casual`、`language=bilingual`、`speechRate=normal`。
 
-### 6.3 应用完整设备配置
+### 5.3 应用完整设备配置
 
 - **方法／路径**：`POST /device-configs/:deviceId/apply`
 - **鉴权**：JWT
@@ -578,17 +510,15 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `mode` | string | 是 | 四种设备模式之一 |
-| `textbookId` | string | 条件必填 | 教材业务 ID |
-| `unitId` | string | 条件必填 | 单元业务 ID |
-| `conversationModeKey` | string | 条件必填 | 对话子模式 key |
+| `mode` | string | 是 | `free_chat / english_chat` |
+| `conversationModeKey` | string | 条件必填 | 仅自由对话必填 |
 | `cefrLevel` | string | 否 | CEFR 等级 |
 | `language` | string | 否 | 缺省为 `bilingual` |
 | `speechRate` | string | 否 | 缺省为 `normal` |
 
 响应数据：新创建的生效 `DeviceConfigResponse`。旧生效配置会被置为失效。
 
-### 6.4 切换对话模式／子模式
+### 5.4 切换对话模式／子模式
 
 - **方法／路径**：`POST /device-configs/:deviceId/mode`
 - **鉴权**：JWT
@@ -598,10 +528,8 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `mode` | string | 是 | 四种设备模式之一 |
-| `conversationModeKey` | string | 条件必填 | 对话子模式 key |
-| `textbookId` | string | 条件必填 | 教材业务 ID |
-| `unitId` | string | 条件必填 | 单元业务 ID |
+| `mode` | string | 是 | `free_chat / english_chat` |
+| `conversationModeKey` | string | 条件必填 | 仅自由对话必填 |
 | `language` | string | 否 | 缺省为 `bilingual` |
 | `speechRate` | string | 否 | 缺省为 `normal` |
 
@@ -609,9 +537,9 @@ Content-Type: application/json
 
 ---
 
-## 7. 对话记录
+## 6. 对话记录
 
-### 7.1 分页查询对话记录
+### 6.1 分页查询对话记录
 
 - **方法／路径**：`GET /conversations`
 - **鉴权**：JWT
@@ -624,8 +552,6 @@ Query 参数：
 | `page` | number | 否 | 1 | 页码，小于 1 时按 1 处理 |
 | `pageSize` | number | 否 | 20 | 每页条数，小于 1 时按 1 处理 |
 | `deviceId` | string | 否 | — | 仅查询当前用户绑定的指定设备 |
-| `textbookId` | string | 否 | — | 按教材业务 ID 过滤 |
-| `unitId` | string | 否 | — | 按单元业务 ID 过滤 |
 | `conversationModeKey` | string | 否 | — | 按对话子模式过滤 |
 
 响应数据：
@@ -643,11 +569,11 @@ Query 参数：
 
 ---
 
-## 8. 对话模式
+## 7. 对话模式
 
-本模块接口当前均为公开接口，仅返回启用中的分类和模式。
+本模块接口当前均为公开接口，仅返回启用中的分类和模式。默认分类为 `free_chat` 和 `english_chat`；仅自由对话包含 `free_chat_casual / free_chat_roleplay / free_chat_qa` 三个子模式。
 
-### 8.1 通用模型
+### 7.1 通用模型
 
 `ConversationModeCategory`：
 
@@ -674,7 +600,7 @@ Query 参数：
 | `configSchema` | object \| null | 前端配置 schema |
 | `promptTemplate` | string \| null | 提示词模板 |
 
-### 8.2 查询顶层分类
+### 7.2 查询顶层分类
 
 - **方法／路径**：`GET /conversation-modes/categories`
 - **鉴权**：公开
@@ -682,7 +608,7 @@ Query 参数：
 
 请求参数：无。响应数据为 `ConversationModeCategory[]`，按 `sortOrder` 升序。
 
-### 8.3 查询子模式列表
+### 7.3 查询子模式列表
 
 - **方法／路径**：`GET /conversation-modes`
 - **鉴权**：公开
@@ -696,7 +622,7 @@ Query 参数：
 
 响应数据：`ConversationMode[]`，按 `sortOrder` 升序。
 
-### 8.4 查询分类与子模式树
+### 7.4 查询分类与子模式树
 
 - **方法／路径**：`GET /conversation-modes/tree`
 - **鉴权**：公开
@@ -712,7 +638,7 @@ Query 参数：
 
 ---
 
-## 9. 学习统计
+## 8. 学习统计
 
 本模块接口均需要 JWT。未传 `deviceId` 时统计当前用户绑定的全部设备；传入时仅统计该设备。
 
@@ -720,20 +646,18 @@ Query 参数：
 
 | 参数 | 适用接口 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `deviceId` | 除单元进度外的查询接口 | 否 | 设备业务 ID |
+| `deviceId` | 查询接口 | 否 | 设备业务 ID |
 | `range` | dashboard、activities、insights、health | 否 | `today / week / month`；缺省按各接口累计口径 |
-| `textbookId` | dashboard、daily、activities | 否 | 教材业务 ID 过滤 |
-| `unitId` | dashboard、daily、activities | 否 | 单元业务 ID 过滤 |
-| `mode` | dashboard、daily、activities | 否 | 消息模式过滤 |
-| `conversationModeKey` | dashboard、daily、activities | 否 | 对话子模式过滤 |
+| `mode` | dashboard、daily、activities | 否 | 顶层消息模式过滤 |
+| `conversationModeKey` | dashboard、daily、activities | 否 | 自由对话子模式过滤 |
 
-### 9.1 查询学习仪表盘
+### 8.1 查询学习仪表盘
 
 - **方法／路径**：`GET /learning-stats/dashboard`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`range`、`textbookId`、`unitId`、`mode`、`conversationModeKey`，均可选。
+Query：`deviceId`、`range`、`mode`、`conversationModeKey`，均可选。
 
 响应数据：
 
@@ -765,20 +689,20 @@ Query：`deviceId`、`range`、`textbookId`、`unitId`、`mode`、`conversationM
 | `todayDurationMinutes` | number | 今日时长（分钟） |
 | `weekDurationMinutes` | number | 本周时长（分钟） |
 
-### 9.2 查询每日学习趋势
+### 8.2 查询每日学习趋势
 
 - **方法／路径**：`GET /learning-stats/daily`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`textbookId`、`unitId`、`mode`、`conversationModeKey` 可选；另支持：
+Query：`deviceId`、`mode`、`conversationModeKey` 可选；另支持：
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `days` | number | 否 | 7 | 返回最近多少天的数据；非有效数字按 7 处理 |
 | `scope` | string | 否 | — | 传入 `all` 时不按设备当前配置过滤，统计全部用户交互 |
 
-`scope=all` 用于“更懂 TA”：时长按每条用户消息 0.5 分钟估算，`sessionCount` 为当日用户交互数，并与同日家长报告的 `durationMinutes` 保持一致。单设备使用设备时区；多设备汇总使用默认报告时区。未传 `scope=all` 时保留原模式族过滤及会话数语义。
+`scope=all` 用于“更懂 TA”：时长按每条用户消息 0.5 分钟估算，`sessionCount` 为当日用户交互数，并与同日家长报告的 `durationMinutes` 保持一致。单设备使用设备时区；多设备汇总使用默认报告时区。未传 `scope=all` 时按显式语境或设备当前顶层模式过滤。
 
 响应数据：按日期升序排列的数组，无数据的日期也返回零点。
 
@@ -788,7 +712,7 @@ Query：`deviceId`、`textbookId`、`unitId`、`mode`、`conversationModeKey` �
 | `durationMinutes` | number | 使用时长（分钟） |
 | `sessionCount` | number | 会话数；`scope=all` 时为用户交互数 |
 
-### 9.3 查询主题分布
+### 8.3 查询主题分布
 
 - **方法／路径**：`GET /learning-stats/topics`
 - **鉴权**：JWT
@@ -796,24 +720,20 @@ Query：`deviceId`、`textbookId`、`unitId`、`mode`、`conversationModeKey` �
 
 Query：`deviceId` 可选。
 
-响应数据：主题数组。
+响应数据：按 `mode + conversationModeKey` 分组的主题数组。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | string | 主题语境标识 |
-| `mode` | string | 对话模式 |
-| `textbookId` | string \| null | 教材业务 ID |
-| `textbookName` | string \| null | 教材名称 |
-| `unitId` | string \| null | 单元业务 ID |
-| `unitName` | string \| null | 单元名称 |
-| `conversationModeKey` | string \| null | 对话子模式 key |
-| `conversationModeName` | string \| null | 对话子模式名称 |
+| `mode` | string | 顶层对话模式 |
+| `conversationModeKey` | string \| null | 自由对话子模式 key |
+| `conversationModeName` | string \| null | 自由对话子模式名称 |
 | `count` | number | 对话数量 |
 | `lastSpokeAt` | string | 最近对话时间 |
 | `isActive` | boolean | 是否为设备当前配置语境 |
-| `avgScore` | number \| null | 平均分；未接入语音评测时为 `null` |
+| `avgScore` | number \| null | 启发式开口分；自由对话为 `null` |
 
-### 9.4 查询对话时间线
+### 8.4 查询对话时间线
 
 - **方法／路径**：`GET /learning-stats/timeline`
 - **鉴权**：JWT
@@ -849,33 +769,13 @@ Query：
 | `aiText` | string | 同轮 AI 回复；缺失时为空字符串 |
 | `createdAt` | string | 对话时间 |
 
-### 9.5 查询设备单元进度
-
-- **方法／路径**：`GET /learning-stats/unit-progress/:deviceId`
-- **鉴权**：JWT
-- **成功状态**：200
-
-路径参数：`deviceId` 为设备业务 ID。无绑定或无进度时返回 `[]`。
-
-响应数据：单元进度数组。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `textbookId` | string | 教材业务 ID |
-| `textbookName` | string | 教材名称；当前实现返回教材业务 ID |
-| `unitId` | string | 单元业务 ID |
-| `unitName` | string | 单元名称；当前实现返回单元业务 ID |
-| `conversationCount` | number | 对话数量 |
-| `lastSpokeAt` | string | 最近对话时间 |
-| `masteryLevel` | number \| null | 掌握度；当前固定为 `null` |
-
-### 9.6 查询学习动态
+### 8.5 查询学习动态
 
 - **方法／路径**：`GET /learning-stats/activities`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`range`、`textbookId`、`unitId`、`mode`、`conversationModeKey` 可选；另支持 `page`（默认 1）、`pageSize`（默认 10）。
+Query：`deviceId`、`range`、`mode`、`conversationModeKey` 可选；另支持 `page`（默认 1）、`pageSize`（默认 10）。
 
 响应数据：
 
@@ -892,16 +792,12 @@ Query：`deviceId`、`range`、`textbookId`、`unitId`、`mode`、`conversationM
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `type` | string | `study / streak / unlock` |
-| `mode` | string \| null | 对话模式 |
-| `textbookId` | string \| null | 教材业务 ID |
-| `textbookName` | string \| null | 教材名称 |
-| `unitId` | string \| null | 单元业务 ID |
-| `unitName` | string \| null | 单元名称 |
+| `type` | string | `study / streak` |
+| `mode` | string \| null | `study` 事件的顶层对话模式 |
 | `turnCount` | number | `study` 事件的当日对话轮数 |
 | `streakDays` | number | `streak` 事件的连续学习天数 |
 
-### 9.7 查询学习洞察
+### 8.6 查询学习洞察
 
 - **方法／路径**：`GET /learning-stats/insights`
 - **鉴权**：JWT
@@ -922,7 +818,7 @@ Query：`deviceId`、`range` 可选。
 | `deviceId` | string \| null | 关联设备业务 ID |
 | `deviceName` | string \| null | 关联设备名称 |
 
-### 9.8 查询学习健康度
+### 8.7 查询学习健康度
 
 - **方法／路径**：`GET /learning-stats/health`
 - **鉴权**：JWT
@@ -944,7 +840,7 @@ Query：`deviceId`、`range` 可选。
 
 等级边界：`excellent ≥ 85`、`good ≥ 70`、`average ≥ 55`，其余为 `attention`。
 
-### 9.9 查询家长每日报告
+### 8.8 查询家长每日报告
 
 - **方法／路径**：`GET /learning-stats/parent-report`
 - **鉴权**：JWT
@@ -982,11 +878,11 @@ Query：
 | `habits[].todayCompleted` | boolean | 报告日期当天是否完成 |
 | `feedback` | string \| null | `useful / not_useful / null` |
 
-已知模式展示映射：`free_chat=自由对话`、`adventure_story=每日冒险`、`english_story=英语故事`、`idiom_story=成语故事`、`free_story=自由故事`、`sleep_story=哄睡故事`、`textbook_learning / locked_unit / free_textbook=英语互动`、`unknown=其他`。
+已知模式展示映射：`free_chat=自由对话`、`english_chat=英语对话`、`adventure_story=每日冒险`、`english_story=英语故事`、`idiom_story=成语故事`、`free_story=自由故事`、`sleep_story=哄睡故事`、`unknown=其他`。
 
 设备未绑定或日期无效时分别返回 404 或 400；响应不包含内部异常堆栈或模型错误。
 
-### 9.10 提交家长报告反馈
+### 8.9 提交家长报告反馈
 
 - **方法／路径**：`POST /learning-stats/parent-report/feedback`
 - **鉴权**：JWT
@@ -1011,7 +907,7 @@ Query：
 
 `useful=false` 时 `feedback=not_useful`。报告不存在时返回 404。
 
-### 9.11 查询滚动功能使用统计
+### 8.10 查询滚动功能使用统计
 
 - **方法／路径**：`GET /learning-stats/mode-usage`
 - **鉴权**：JWT
@@ -1055,11 +951,11 @@ Query：
 
 ---
 
-## 10. 音乐播放
+## 9. 音乐播放
 
 本模块接口当前均为公开接口。
 
-### 10.1 查询设备音乐播放状态
+### 9.1 查询设备音乐播放状态
 
 - **方法／路径**：`GET /music/status`
 - **鉴权**：公开
@@ -1081,7 +977,7 @@ Query：
 | `volume` | number | 音量；当前实现固定为 `50` |
 | `source` | string | 音乐来源；当前实现固定为 `netease` |
 
-### 10.2 控制音乐播放
+### 9.2 控制音乐播放
 
 - **方法／路径**：`POST /music/control`
 - **鉴权**：公开
@@ -1106,7 +1002,7 @@ Query：
 }
 ```
 
-### 10.3 绑定网易云音乐账号
+### 9.3 绑定网易云音乐账号
 
 - **方法／路径**：`POST /music/netease/bind`
 - **鉴权**：公开
@@ -1131,10 +1027,10 @@ Query：
 
 ---
 
-## 11. 小程序接入注意事项
+## 10. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。
-3. 设备相关业务 ID 与数据库内部 UUID 不可混用，尤其是孩子档案和教材单元响应中标注的内部 ID。
-4. 设备配置保存前先读取对话模式树，确保 `conversationModeKey` 与目标分类匹配。
+3. 设备相关业务 ID 与数据库内部 UUID 不可混用，尤其是孩子档案响应中标注的内部 ID。
+4. 自由对话配置保存前先读取对话模式树，确保 `conversationModeKey` 属于 `free_chat`；`english_chat` 不传子模式。
 5. 标注为“当前实现”的字段或占位行为只代表现有契约；后续实现真实能力时，应保持字段类型与兼容策略明确后再升级调用方。

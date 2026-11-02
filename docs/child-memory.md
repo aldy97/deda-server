@@ -38,7 +38,7 @@ MVP 不包含向量检索或通用 RAG，不保存学校、地址、电话、健
 2. 使用相同 `sourceOccurredAt` 异步调用小模型提取；上一条 assistant 仅提供剥离 filler 后的 answer。
 3. 提取器只输出严格 JSON 数组，每轮最多 3 个候选；后端只接受白名单 key、operation 和置信度不低于 0.75 的候选。
 4. 仅 `free_chat` 主回答执行确定性话题召回，最多选择 3 条相关 active 记忆。
-5. 记忆作为独立 system 数据块 prepend 到主 answer messages，不进入 filler prompt，也不注入教材等其他模式。
+5. 记忆作为独立 system 数据块 prepend 到主 answer messages，不进入 filler prompt，也不注入英语对话等其他模式。
 6. 主回复成功后才调用 `markInjected`；主模型失败不增加注入统计。
 
 当前白名单：

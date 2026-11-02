@@ -168,35 +168,26 @@ describe("LlmService", () => {
   });
 
   describe("buildEnglishTutorPrompt", () => {
-    it("should include context and user message", () => {
-      const messages = service.buildEnglishTutorPrompt(
-        "How are you?",
-        "Unit 1: Greetings",
-        "Greetings",
-      );
+    it("should include open English chat rules and user message", () => {
+      const messages = service.buildEnglishTutorPrompt("How are you?");
 
       expect(messages).toHaveLength(2);
       expect(messages[0].role).toBe("system");
-      expect(messages[0].content).toContain("Unit 1: Greetings");
       expect(messages[0].content).toContain(
         "friendly English-speaking AI companion",
       );
-      expect(messages[0].content).toContain("seems off-topic");
-      expect(messages[0].content).toContain("football player when you grow up");
+      expect(messages[0].content).toContain("open English conversation");
+      expect(messages[0].content).not.toContain("textbook");
+      expect(messages[0].content).not.toContain("unit topic");
       expect(messages[1].role).toBe("user");
       expect(messages[1].content).toBe("How are you?");
     });
 
     it("should include conversation history", () => {
-      const messages = service.buildEnglishTutorPrompt(
-        "I'm fine.",
-        "Unit 1: Greetings",
-        "Greetings",
-        [
-          { role: "user", content: "How are you?" },
-          { role: "assistant", content: "I am fine, thank you." },
-        ],
-      );
+      const messages = service.buildEnglishTutorPrompt("I'm fine.", [
+        { role: "user", content: "How are you?" },
+        { role: "assistant", content: "I am fine, thank you." },
+      ]);
 
       expect(messages).toHaveLength(4);
       expect(messages[0].role).toBe("system");
@@ -208,19 +199,21 @@ describe("LlmService", () => {
       expect(messages[3]).toEqual({ role: "user", content: "I'm fine." });
     });
 
-    it("should handle missing context", () => {
-      const messages = service.buildEnglishTutorPrompt("Hello", "");
+    it("should build an English chat without textbook context", () => {
+      const messages = service.buildEnglishTutorPrompt("Hello", undefined, {
+        mode: "english_chat",
+      });
 
       expect(messages[0].content).toContain(
-        "No specific textbook context is selected",
+        "friendly English-speaking AI companion",
       );
+      expect(messages[0].content).not.toContain("textbook");
+      expect(messages[0].content).not.toContain("unit topic");
     });
 
     it("should use direct child-language rules for free chat", () => {
       const messages = service.buildEnglishTutorPrompt(
         "你还记得我最喜欢什么颜色吗？",
-        "",
-        undefined,
         undefined,
         { mode: "free_chat" },
       );
@@ -237,8 +230,6 @@ describe("LlmService", () => {
     it("should not impose English tutor rules on Chinese story modes", () => {
       const messages = service.buildEnglishTutorPrompt(
         "讲一个守株待兔的故事",
-        "",
-        undefined,
         undefined,
         {
           mode: "idiom_story",
@@ -253,19 +244,13 @@ describe("LlmService", () => {
     });
 
     it("should include child profile in system prompt", () => {
-      const messages = service.buildEnglishTutorPrompt(
-        "Hello",
-        "",
-        undefined,
-        undefined,
-        {
-          childProfile: {
-            name: "Alice",
-            birthday: "2018-05-20",
-            englishName: "Ali",
-          },
+      const messages = service.buildEnglishTutorPrompt("Hello", undefined, {
+        childProfile: {
+          name: "Alice",
+          birthday: "2018-05-20",
+          englishName: "Ali",
         },
-      );
+      });
 
       expect(messages[0].content).toContain("Child Profile");
       expect(messages[0].content).toContain("Name: Alice");
@@ -278,13 +263,9 @@ describe("LlmService", () => {
 
     it("should use prompt template when provided", () => {
       const template = "You are a pirate tutor. Speak like a pirate.";
-      const messages = service.buildEnglishTutorPrompt(
-        "Hello",
-        "",
-        undefined,
-        undefined,
-        { promptTemplate: template },
-      );
+      const messages = service.buildEnglishTutorPrompt("Hello", undefined, {
+        promptTemplate: template,
+      });
 
       expect(messages[0].content).toContain(template);
       expect(messages[0].content).toContain(
@@ -299,8 +280,6 @@ describe("LlmService", () => {
       const template = "Focus on daily routines.";
       const messages = service.buildEnglishTutorPrompt(
         "Good morning",
-        "Unit 1: Morning routines",
-        "Morning routines",
         undefined,
         {
           childProfile: { name: "Bob", englishName: "Bobby" },
@@ -318,22 +297,16 @@ describe("LlmService", () => {
       expect(system).toContain("Name: Bob");
       expect(system).toContain("English Name: Bobby");
       expect(system).toContain("Birthday: not provided");
-      expect(system).toContain("Current textbook context (Morning routines)");
+      expect(system).not.toContain("textbook");
     });
 
     it("should keep default behavior when options are omitted", () => {
       const messagesWithOptions = service.buildEnglishTutorPrompt(
         "Hello",
-        "Unit 1: Greetings",
-        "Greetings",
         undefined,
         {},
       );
-      const messagesWithoutOptions = service.buildEnglishTutorPrompt(
-        "Hello",
-        "Unit 1: Greetings",
-        "Greetings",
-      );
+      const messagesWithoutOptions = service.buildEnglishTutorPrompt("Hello");
 
       expect(messagesWithOptions[0].content).toBe(
         messagesWithoutOptions[0].content,
@@ -341,7 +314,7 @@ describe("LlmService", () => {
     });
 
     it("should tell the model to skip repeated acknowledgments after the filler", () => {
-      const messages = service.buildEnglishTutorPrompt("我喜欢上海的天气", "");
+      const messages = service.buildEnglishTutorPrompt("我喜欢上海的天气");
 
       // 衔接丝滑：filler 寒暄已先行播报，正式回答直接进入正题、不得重复承接
       expect(messages[0].content).toContain(
@@ -729,16 +702,10 @@ describe("LlmService", () => {
   });
 
   describe("child safety rules (L3)", () => {
-    it.each([undefined, "free_chat", "sleep_story", "locked_unit"])(
+    it.each([undefined, "free_chat", "sleep_story", "english_chat"])(
       "buildEnglishTutorPrompt includes hard safety rules for mode=%s",
       (mode) => {
-        const messages = service.buildEnglishTutorPrompt(
-          "你好",
-          "",
-          undefined,
-          [],
-          { mode },
-        );
+        const messages = service.buildEnglishTutorPrompt("你好", [], { mode });
         const system = messages[0].content;
         expect(system).toContain(
           "Never generate, describe, or expand sexual, violent, bloody, or self-harm content",

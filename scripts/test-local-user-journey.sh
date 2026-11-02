@@ -279,7 +279,6 @@ for endpoint in \
   "/learning-stats/activities?deviceId=$BUSINESS_DEVICE_ID&range=week" \
   "/learning-stats/insights?deviceId=$BUSINESS_DEVICE_ID&range=week" \
   "/learning-stats/health?deviceId=$BUSINESS_DEVICE_ID&range=week" \
-  "/learning-stats/unit-progress/$BUSINESS_DEVICE_ID" \
   "/device-configs/$BUSINESS_DEVICE_ID/current"; do
   parent_get "$endpoint"
   pass "parent API $endpoint"

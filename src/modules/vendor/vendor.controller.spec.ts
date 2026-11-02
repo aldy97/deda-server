@@ -37,17 +37,11 @@ describe("VendorController", () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
         asrText: "Hello",
-        textbookId: "sample-textbook",
-        unitId: "unit-1",
       };
       const reply = {
         deviceId: "dev-001",
         responseText: "Hi there!",
-        context: {
-          textbookId: "sample-textbook",
-          unitId: "unit-1",
-          ragFound: true,
-        },
+        context: { mode: "english_chat" },
         ttsOptions: {},
       };
 

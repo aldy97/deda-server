@@ -3,7 +3,6 @@ import { INestApplication } from "@nestjs/common";
 import { io, Socket as ClientSocket } from "socket.io-client";
 import { AppModule } from "./../src/app.module";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
-import { RagService } from "./../src/modules/rag/rag.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
 
@@ -44,16 +43,6 @@ describe("Vendor WebSocket (e2e)", () => {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    textbook: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    unit: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
     adventureEpisode: {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
@@ -67,17 +56,6 @@ describe("Vendor WebSocket (e2e)", () => {
       create: jest.fn(),
       update: jest.fn(),
     },
-  };
-
-  const mockRagService = {
-    retrieve: jest.fn().mockResolvedValue({
-      textbookId: "sample-textbook",
-      unitId: "unit-1",
-      unitName: "Greetings",
-      content: "Hello! How are you?",
-      found: true,
-    }),
-    truncateContent: jest.fn((content: string) => content),
   };
 
   const mockLlmService = {
@@ -99,8 +77,6 @@ describe("Vendor WebSocket (e2e)", () => {
     })
       .overrideProvider(PrismaService)
       .useValue(mockPrismaService)
-      .overrideProvider(RagService)
-      .useValue(mockRagService)
       .overrideProvider(LlmService)
       .useValue(mockLlmService)
       .overrideProvider(ChildMemoriesService)
@@ -183,7 +159,7 @@ describe("Vendor WebSocket (e2e)", () => {
     expect(typeof pong.timestamp).toBe("number");
   });
 
-  it("should reply vendor:text:in as vendor:text:out via RAG/LLM", async () => {
+  it("should reply vendor:text:in as vendor:text:out via LLM", async () => {
     client = await connectClient();
 
     const reply = await new Promise<{

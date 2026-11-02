@@ -47,8 +47,8 @@ describe("ConversationModesService", () => {
         },
         {
           id: "cat-2",
-          key: "textbook_learning",
-          name: "教材学习",
+          key: "english_chat",
+          name: "英语对话",
           sortOrder: 1,
           isActive: true,
         },
@@ -127,7 +127,7 @@ describe("ConversationModesService", () => {
   });
 
   describe("findTree", () => {
-    it("should return categories with nested modes", async () => {
+    it("should return categories with nested free-chat modes only", async () => {
       prisma.conversationModeCategory.findMany.mockResolvedValue([
         {
           id: "cat-1",
@@ -139,8 +139,8 @@ describe("ConversationModesService", () => {
         },
         {
           id: "cat-2",
-          key: "textbook_learning",
-          name: "教材学习",
+          key: "english_chat",
+          name: "英语对话",
           description: null,
           sortOrder: 1,
           isActive: true,
@@ -158,17 +158,6 @@ describe("ConversationModesService", () => {
           configSchema: null,
           promptTemplate: null,
         },
-        {
-          id: "mode-2",
-          categoryId: "cat-2",
-          key: "textbook_follow",
-          name: "课文跟读",
-          description: null,
-          sortOrder: 0,
-          isActive: true,
-          configSchema: null,
-          promptTemplate: null,
-        },
       ]);
 
       const result = await service.findTree();
@@ -176,28 +165,29 @@ describe("ConversationModesService", () => {
       expect(result).toHaveLength(2);
       expect(result[0].modes).toHaveLength(1);
       expect(result[0].modes[0].key).toBe("free_chat_casual");
-      expect(result[1].modes[0].key).toBe("textbook_follow");
+      expect(result[1].modes).toEqual([]);
     });
   });
 
   describe("seedDefaults", () => {
-    it("should upsert default categories and modes", async () => {
+    it("should upsert two categories and three free-chat modes", async () => {
       prisma.conversationModeCategory.upsert
         .mockResolvedValueOnce({ id: "cat-free-chat" })
-        .mockResolvedValueOnce({ id: "cat-textbook" });
-      prisma.conversationModeCategory.findUnique
-        .mockResolvedValueOnce({ id: "cat-free-chat" })
-        .mockResolvedValueOnce({ id: "cat-textbook" })
-        .mockResolvedValueOnce({ id: "cat-free-chat" })
-        .mockResolvedValueOnce({ id: "cat-textbook" })
-        .mockResolvedValueOnce({ id: "cat-free-chat" })
-        .mockResolvedValueOnce({ id: "cat-textbook" });
+        .mockResolvedValueOnce({ id: "cat-english-chat" });
+      prisma.conversationModeCategory.findUnique.mockResolvedValue({
+        id: "cat-free-chat",
+      });
       prisma.conversationMode.upsert.mockResolvedValue({ id: "mode-1" });
 
       await service.seedDefaults();
 
       expect(prisma.conversationModeCategory.upsert).toHaveBeenCalledTimes(2);
-      expect(prisma.conversationMode.upsert).toHaveBeenCalledTimes(6);
+      expect(prisma.conversationMode.upsert).toHaveBeenCalledTimes(3);
+      expect(prisma.conversationModeCategory.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { key: "english_chat" },
+        }),
+      );
     });
   });
 });

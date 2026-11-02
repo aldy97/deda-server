@@ -3,7 +3,6 @@ import {
   Controller,
   Get,
   HttpCode,
-  Param,
   Post,
   Query,
   Req,
@@ -37,8 +36,6 @@ export class LearningStatsController {
     query: {
       deviceId?: string;
       range?: "today" | "week" | "month";
-      textbookId?: string;
-      unitId?: string;
       mode?: string;
       conversationModeKey?: string;
     },
@@ -48,8 +45,6 @@ export class LearningStatsController {
       query.deviceId,
       query.range,
       {
-        textbookId: query.textbookId,
-        unitId: query.unitId,
         mode: query.mode,
         conversationModeKey: query.conversationModeKey,
       },
@@ -63,8 +58,6 @@ export class LearningStatsController {
     query: {
       deviceId?: string;
       days?: string;
-      textbookId?: string;
-      unitId?: string;
       mode?: string;
       conversationModeKey?: string;
       scope?: "all";
@@ -75,8 +68,6 @@ export class LearningStatsController {
       query.deviceId,
       Number(query.days) || 7,
       {
-        textbookId: query.textbookId,
-        unitId: query.unitId,
         mode: query.mode,
         conversationModeKey: query.conversationModeKey,
         ...(query.scope === "all" ? { scope: "all" as const } : {}),
@@ -108,14 +99,6 @@ export class LearningStatsController {
     );
   }
 
-  @Get("unit-progress/:deviceId")
-  async unitProgress(
-    @Param("deviceId") deviceId: string,
-    @Req() req: RequestWithUser,
-  ) {
-    return this.learningStatsService.getUnitProgress(req.user.userId, deviceId);
-  }
-
   @Get("activities")
   async activities(
     @Req() req: RequestWithUser,
@@ -125,8 +108,6 @@ export class LearningStatsController {
       page?: string;
       pageSize?: string;
       range?: "today" | "week" | "month";
-      textbookId?: string;
-      unitId?: string;
       mode?: string;
       conversationModeKey?: string;
     },
@@ -138,8 +119,6 @@ export class LearningStatsController {
         page: Number(query.page) || 1,
         pageSize: Number(query.pageSize) || 10,
         range: query.range,
-        textbookId: query.textbookId,
-        unitId: query.unitId,
         mode: query.mode,
         conversationModeKey: query.conversationModeKey,
       },

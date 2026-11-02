@@ -7,7 +7,6 @@ import redisConfig from "./config/redis.config";
 import { UsersModule } from "./modules/users/users.module";
 import { DevicesModule } from "./modules/devices/devices.module";
 import { ChildProfilesModule } from "./modules/child-profiles/child-profiles.module";
-import { TextbooksModule } from "./modules/textbooks/textbooks.module";
 import { DeviceConfigsModule } from "./modules/device-configs/device-configs.module";
 import { ConversationsModule } from "./modules/conversations/conversations.module";
 import { LearningStatsModule } from "./modules/learning-stats/learning-stats.module";
@@ -16,7 +15,6 @@ import { ManufacturerModule } from "./modules/manufacturer/manufacturer.module";
 import { VendorModule } from "./modules/vendor/vendor.module";
 import { HealthModule } from "./modules/health/health.module";
 import { MusicModule } from "./modules/music/music.module";
-import { RagModule } from "./modules/rag/rag.module";
 import { LlmModule } from "./modules/llm/llm.module";
 import { RedisModule } from "./common/redis/redis.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
@@ -50,7 +48,6 @@ import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
     UsersModule,
     DevicesModule,
     ChildProfilesModule,
-    TextbooksModule,
     DeviceConfigsModule,
     ConversationsModule,
     LearningStatsModule,
@@ -59,7 +56,6 @@ import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
     VendorModule,
     HealthModule,
     MusicModule,
-    RagModule,
     LlmModule,
     AdventureModule,
     FeedbacksModule,

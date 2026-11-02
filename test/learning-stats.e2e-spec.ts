@@ -29,8 +29,6 @@ describe("LearningStats (e2e)", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
           conversationModeKey: "free_chat_casual",
           isActive: true,
         },
@@ -69,8 +67,7 @@ describe("LearningStats (e2e)", () => {
             content: "Hello",
             status: "completed",
             mode: "free_chat",
-            textbookId: null,
-            unitId: null,
+            conversationModeKey: "free_chat_casual",
             spokeAt: new Date(),
           },
         ]);
@@ -82,16 +79,6 @@ describe("LearningStats (e2e)", () => {
       findUnique: jest.fn().mockResolvedValue(null),
     },
     conversationMode: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    textbook: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    unit: {
       upsert: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),

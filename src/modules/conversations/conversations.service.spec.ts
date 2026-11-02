@@ -52,9 +52,7 @@ describe("ConversationsService", () => {
     role,
     content,
     status: "completed",
-    textbookId: "book-a",
-    unitId: "unit-1",
-    mode: "locked_unit",
+    mode: "english_chat",
     conversationModeKey: null,
     spokeAt,
     ...extra,
@@ -74,8 +72,6 @@ describe("ConversationsService", () => {
           {
             deviceId: "device-uuid-002",
             mode: "free_chat",
-            textbookId: null,
-            unitId: null,
           },
         ),
         makeMessage(
@@ -87,8 +83,6 @@ describe("ConversationsService", () => {
           {
             deviceId: "device-uuid-002",
             mode: "free_chat",
-            textbookId: null,
-            unitId: null,
           },
         ),
         makeMessage(
@@ -149,26 +143,18 @@ describe("ConversationsService", () => {
       expect(result.total).toBe(4);
     });
 
-    it("should filter by deviceId + textbookId + unitId", async () => {
+    it("should filter by deviceId without legacy content fields", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         { device: { id: "device-uuid-001", deviceId: "dev-001" } },
       ]);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.count.mockResolvedValue(0);
 
-      await service.list("user-001", {
-        deviceId: "dev-001",
-        textbookId: "book-a",
-        unitId: "unit-1",
-      });
+      await service.list("user-001", { deviceId: "dev-001" });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: {
-            deviceId: { in: ["device-uuid-001"] },
-            textbookId: "book-a",
-            unitId: "unit-1",
-          },
+          where: { deviceId: { in: ["device-uuid-001"] } },
           orderBy: { spokeAt: "desc" },
         }),
       );

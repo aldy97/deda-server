@@ -33,12 +33,6 @@ describe("LearningStatsService", () => {
               count: jest.fn(),
               groupBy: jest.fn(),
             },
-            textbook: {
-              findMany: jest.fn().mockResolvedValue([]),
-            },
-            unit: {
-              findMany: jest.fn().mockResolvedValue([]),
-            },
             conversationMode: {
               findMany: jest.fn().mockResolvedValue([]),
             },
@@ -77,9 +71,7 @@ describe("LearningStatsService", () => {
     role: "user",
     content,
     status: "completed",
-    mode: "locked_unit",
-    textbookId: "book-a",
-    unitId: "unit-1",
+    mode: "english_chat",
     spokeAt: new Date(),
     ...extra,
   });
@@ -90,9 +82,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
@@ -132,9 +122,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.childProfile.findMany.mockResolvedValue([
@@ -157,9 +145,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([]);
@@ -174,9 +160,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
@@ -206,9 +190,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       // 第一次 findMany=基线统计（全量）,第二次=range 范围查询（mock 按 gte 过滤后的结果）
@@ -248,32 +230,32 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany
         .mockResolvedValueOnce([
           makeUserMessage("m1-u", "t1", "today", { spokeAt: now }),
-          makeUserMessage("m2-u", "t2", "3d ago unit-2", {
+          makeUserMessage("m2-u", "t2", "3d ago free chat", {
             spokeAt: threeDaysAgo,
-            unitId: "unit-2",
+            mode: "free_chat",
+            conversationModeKey: "free_chat_casual",
           }),
           makeUserMessage("m3-u", "t3", "40d ago", { spokeAt: fortyDaysAgo }),
         ])
         .mockResolvedValueOnce([
           makeUserMessage("m1-u", "t1", "today", { spokeAt: now }),
-          makeUserMessage("m2-u", "t2", "3d ago unit-2", {
+          makeUserMessage("m2-u", "t2", "3d ago free chat", {
             spokeAt: threeDaysAgo,
-            unitId: "unit-2",
+            mode: "free_chat",
+            conversationModeKey: "free_chat_casual",
           }),
         ]);
 
       const result = await service.getDashboard("user-001", undefined, "week");
 
       expect(result.practiceCount).toBe(2);
-      expect(result.topicCount).toBe(2); // unit-1 + unit-2
+      expect(result.topicCount).toBe(2);
       expect(result.totalDurationMinutes).toBe(1);
     });
 
@@ -305,20 +287,20 @@ describe("LearningStatsService", () => {
       expect(gte.getTime()).toBe(monthStart.getTime());
     });
 
-    it("should scope range metrics to an explicit textbookId", async () => {
+    it("should scope range metrics to an explicit mode", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
       prisma.deviceConfig.findMany.mockResolvedValue([]);
       prisma.message.findMany.mockResolvedValue([]);
 
       await service.getDashboard("user-001", undefined, "week", {
-        textbookId: "book-b",
+        mode: "english_chat",
       });
 
       const calls = prisma.message.findMany.mock.calls;
       const rangeCall = calls[calls.length - 1][0];
       expect(rangeCall.where).toEqual(
         expect.objectContaining({
-          textbookId: "book-b",
+          mode: "english_chat",
           spokeAt: { gte: expect.any(Date) },
         }),
       );
@@ -329,9 +311,7 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
@@ -346,42 +326,6 @@ describe("LearningStatsService", () => {
     });
   });
 
-  describe("getUnitProgress", () => {
-    it("should list progress for all practiced units, not only the active one", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
-      prisma.message.findMany.mockResolvedValue([
-        makeUserMessage("m1-u", "t1", "Hello"),
-        makeUserMessage("m2-u", "t2", "Again"),
-        makeUserMessage("m3-u", "t3", "unit2", { unitId: "unit-2" }),
-        makeUserMessage("m4-u", "t4", "unit3", { unitId: "unit-3" }),
-      ]);
-
-      const result = await service.getUnitProgress("user-001", "dev-001");
-
-      expect(result).toHaveLength(3);
-      const byUnit = new Map(result.map((r) => [r.unitId, r]));
-      expect(byUnit.get("unit-1")?.conversationCount).toBe(2);
-      expect(byUnit.get("unit-2")?.conversationCount).toBe(1);
-      expect(byUnit.get("unit-3")?.conversationCount).toBe(1);
-    });
-
-    it("should return empty when user has no bound devices", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue([]);
-
-      const result = await service.getUnitProgress("user-001", "dev-001");
-
-      expect(result).toEqual([]);
-    });
-  });
-
   describe("getDailyTrend", () => {
     it("should return daily trend for last N days", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
@@ -389,15 +333,11 @@ describe("LearningStatsService", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
         makeUserMessage("m1-u", "t1", "Hi", {
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
         }),
       ]);
 
@@ -425,8 +365,6 @@ describe("LearningStatsService", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
@@ -452,71 +390,50 @@ describe("LearningStatsService", () => {
       });
     });
 
-    it("should count all textbook units (any textbook) and exclude free_chat on a textbook-mode device", async () => {
+    it("should use only the active top-level mode by default", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
-        makeUserMessage("m1-u", "t1", "unit-1 turn"),
-        makeUserMessage("m2-u", "t2", "unit-2 turn", { unitId: "unit-2" }),
-        makeUserMessage("m3-u", "t3", "other textbook", {
-          textbookId: "book-b",
-          unitId: "unit-1",
-        }),
-        makeUserMessage("m4-u", "t4", "free chat turn", {
-          mode: "free_chat",
-          textbookId: null,
-          unitId: null,
-          conversationModeKey: "free_chat_casual",
-        }),
+        makeUserMessage("m1-u", "t1", "Hello"),
+        makeUserMessage("m2-u", "t2", "How are you"),
       ]);
 
       const result = await service.getDailyTrend("user-001", undefined, 7);
 
-      // 默认=当前配置模式族（教材族）:where 带 mode in [...],不按单元隔离
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             role: "user",
-            mode: { in: ["locked_unit", "textbook_learning", "free_textbook"] },
+            mode: { in: ["english_chat"] },
           }),
         }),
       );
-      // 3 轮教材（两单元两教材）计入,free_chat 排除:3×0.5=1.5→2 分钟
-      expect(result[6].durationMinutes).toBe(2);
+      expect(result[6].durationMinutes).toBe(1);
     });
 
-    it("should scope daily to an explicit textbookId without touching device config", async () => {
+    it("should scope daily to an explicit top-level mode", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
-      prisma.deviceConfig.findMany.mockResolvedValue([
-        {
-          deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
-        },
-      ]);
+      prisma.deviceConfig.findMany.mockResolvedValue([]);
       prisma.message.findMany.mockResolvedValue([]);
 
       await service.getDailyTrend("user-001", "dev-001", 7, {
-        textbookId: "book-b",
+        mode: "english_chat",
       });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             role: "user",
-            textbookId: "book-b",
-            mode: { in: ["locked_unit", "textbook_learning", "free_textbook"] },
+            mode: "english_chat",
           }),
         }),
       );
+      expect(prisma.deviceConfig.findMany).not.toHaveBeenCalled();
     });
 
     it("should scope daily to free_chat when mode is explicit", async () => {
@@ -541,37 +458,46 @@ describe("LearningStatsService", () => {
   });
 
   describe("getTopicBreakdown", () => {
-    it("should return all learned contexts, not only the active config", async () => {
+    it("should group all learned contexts by mode and sub-mode", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
         makeUserMessage("m1-u", "t1", "Hello"),
         makeUserMessage("m2-u", "t2", "How are you"),
-        // unit-2 不在当前 active config,但属全量学习语境,应出现
-        makeUserMessage("m3-u", "t3", "seasons", { unitId: "unit-2" }),
+        makeUserMessage("m3-u", "t3", "Let's chat", {
+          mode: "free_chat",
+          conversationModeKey: "free_chat_casual",
+        }),
       ]);
 
       const result = await service.getTopicBreakdown("user-001");
 
-      // 全量：不按 active config 过滤（无 OR 过滤条件）
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.not.objectContaining({ OR: expect.anything() }),
         }),
       );
       expect(result).toHaveLength(2);
-      const u1 = result.find((t) => t.unitId === "unit-1");
-      const u2 = result.find((t) => t.unitId === "unit-2");
-      expect(u1).toEqual(expect.objectContaining({ count: 2, isActive: true }));
-      expect(u2).toEqual(
-        expect.objectContaining({ count: 1, isActive: false }),
+      const english = result.find((t) => t.mode === "english_chat");
+      const freeChat = result.find((t) => t.mode === "free_chat");
+      expect(english).toEqual(
+        expect.objectContaining({
+          id: "english_chat",
+          count: 2,
+          isActive: true,
+        }),
+      );
+      expect(freeChat).toEqual(
+        expect.objectContaining({
+          id: "free_chat|free_chat_casual",
+          count: 1,
+          isActive: false,
+        }),
       );
     });
 
@@ -580,23 +506,23 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
         makeUserMessage("m1-u", "t1", "I want to play football today"),
         makeUserMessage("m2-u", "t2", "My mother cooks noodles every day"),
-        makeUserMessage("m3-u", "t3", "我想说中文", { unitId: "unit-2" }),
+        makeUserMessage("m3-u", "t3", "我想说中文", {
+          mode: "adventure_story",
+        }),
       ]);
 
       const result = await service.getTopicBreakdown("user-001");
 
-      const u1 = result.find((t) => t.unitId === "unit-1");
-      const u2 = result.find((t) => t.unitId === "unit-2");
-      expect(u1.avgScore).toBe(93); // 全英文,平均 6 词 → 70 + 6/8×30 ≈ 93
-      expect(u2.avgScore).toBe(0); // 纯中文
+      const english = result.find((t) => t.mode === "english_chat");
+      const adventure = result.find((t) => t.mode === "adventure_story");
+      expect(english.avgScore).toBe(93);
+      expect(adventure.avgScore).toBe(0);
     });
 
     it("should group free_chat by sub-mode with resolved names and no score", async () => {
@@ -605,22 +531,16 @@ describe("LearningStatsService", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
           conversationModeKey: "free_chat_casual",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
         makeUserMessage("m1-u", "t1", "hello there my friend", {
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
           conversationModeKey: "free_chat_casual",
         }),
         makeUserMessage("m2-u", "t2", "once upon a time there was", {
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
           conversationModeKey: "free_chat_roleplay",
         }),
       ]);
@@ -653,25 +573,6 @@ describe("LearningStatsService", () => {
         }),
       );
     });
-
-    it("should resolve real textbook and unit names for textbook topics", async () => {
-      prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
-      prisma.deviceConfig.findMany.mockResolvedValue([]);
-      prisma.textbook.findMany.mockResolvedValue([
-        { id: "book-uuid", textbookId: "book-a", name: "Book A" },
-      ]);
-      prisma.unit.findMany.mockResolvedValue([
-        { textbookId: "book-uuid", unitId: "unit-1", name: "Unit One" },
-      ]);
-      prisma.message.findMany.mockResolvedValue([
-        makeUserMessage("m1-u", "t1", "hello"),
-      ]);
-
-      const result = await service.getTopicBreakdown("user-001");
-
-      expect(result[0].textbookName).toBe("Book A");
-      expect(result[0].unitName).toBe("Unit One");
-    });
   });
 
   describe("getTimeline", () => {
@@ -681,8 +582,6 @@ describe("LearningStatsService", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
         },
       ]);
       // 第一次 findMany：role='user' 分页;第二次：按 turnId 取 assistant
@@ -691,8 +590,6 @@ describe("LearningStatsService", () => {
           {
             ...makeUserMessage("m1-u", "t1", "Hello", {
               mode: "free_chat",
-              textbookId: null,
-              unitId: null,
             }),
             device: { deviceId: "dev-001", name: "DEV001" },
           },
@@ -739,8 +636,6 @@ describe("LearningStatsService", () => {
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          textbookId: null,
-          unitId: null,
         },
       ]);
       prisma.message.findMany
@@ -748,8 +643,6 @@ describe("LearningStatsService", () => {
           {
             ...makeUserMessage("m1-u", "t1", "Hello", {
               mode: "free_chat",
-              textbookId: null,
-              unitId: null,
             }),
             device: { deviceId: "dev-001", name: "DEV001" },
           },
@@ -778,9 +671,7 @@ describe("LearningStatsService", () => {
       role: "user",
       content,
       status: "completed",
-      mode: "locked_unit",
-      textbookId: "book-a",
-      unitId: "unit-1",
+      mode: "english_chat",
       spokeAt,
       ...extra,
     });
@@ -788,16 +679,9 @@ describe("LearningStatsService", () => {
     beforeEach(() => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
       prisma.deviceConfig.findMany.mockResolvedValue([]);
-      prisma.textbook.findMany.mockResolvedValue([
-        { id: "book-uuid", textbookId: "book-a", name: "Book A" },
-      ]);
-      prisma.unit.findMany.mockResolvedValue([
-        { textbookId: "book-uuid", unitId: "unit-1", name: "Unit One" },
-        { textbookId: "book-uuid", unitId: "unit-2", name: "Unit Two" },
-      ]);
     });
 
-    it("should aggregate user messages into daily study cards with turn counts and names", async () => {
+    it("should aggregate user messages into daily study cards with turn counts", async () => {
       prisma.message.findMany.mockResolvedValue([
         msg("m3", "t3", "third", new Date("2026-09-26T10:05:00")),
         msg("m2", "t2", "second", new Date("2026-09-26T10:00:00")),
@@ -809,53 +693,15 @@ describe("LearningStatsService", () => {
         pageSize: 10,
       });
 
-      expect(result.total).toBe(2); // 两个活跃日
+      expect(result.total).toBe(2);
       expect(result.items[0].date).toBe("2026-09-26");
       const study = result.items[0].events.find((e: any) => e.type === "study");
-      expect(study).toEqual(
-        expect.objectContaining({
-          type: "study",
-          textbookId: "book-a",
-          textbookName: "Book A",
-          unitId: "unit-1",
-          unitName: "Unit One",
-          turnCount: 2,
-        }),
-      );
-      expect(result.items[1].date).toBe("2026-09-25");
-    });
-
-    it("should emit an unlock card on the first practice day of a unit", async () => {
-      prisma.message.findMany.mockResolvedValue([
-        msg("m2", "t2", "u2 first", new Date("2026-09-20T10:00:00"), {
-          unitId: "unit-2",
-        }),
-        msg("m1", "t1", "u1 again", new Date("2026-09-20T09:00:00")),
-        msg("m0", "t0", "u1 first", new Date("2026-09-18T09:00:00")),
-      ]);
-
-      const result = await service.getActivities("user-001", "dev-001", {
-        page: 1,
-        pageSize: 10,
+      expect(study).toEqual({
+        type: "study",
+        mode: "english_chat",
+        turnCount: 2,
       });
-
-      const day920 = result.items.find((d: any) => d.date === "2026-09-20");
-      const unlock = day920.events.find((e: any) => e.type === "unlock");
-      expect(unlock).toEqual(
-        expect.objectContaining({
-          type: "unlock",
-          textbookId: "book-a",
-          unitId: "unit-2",
-          unitName: "Unit Two",
-        }),
-      );
-      // unit-1 的首练在 9/18,unlock 卡应在那天
-      const day918 = result.items.find((d: any) => d.date === "2026-09-18");
-      expect(
-        day918.events.some(
-          (e: any) => e.type === "unlock" && e.unitId === "unit-1",
-        ),
-      ).toBe(true);
+      expect(result.items[1].date).toBe("2026-09-25");
     });
 
     it("should emit a streak card on the last day of a consecutive run", async () => {
@@ -937,7 +783,7 @@ describe("LearningStatsService", () => {
       expect(result.items).toEqual([]);
     });
 
-    it("should filter days by range while computing streak/unlock on full history", async () => {
+    it("should filter days by range while computing streak on full history", async () => {
       const now = new Date();
       const monday = new Date(
         now.getFullYear(),
@@ -945,7 +791,7 @@ describe("LearningStatsService", () => {
         now.getDate() - ((now.getDay() + 6) % 7),
       );
       const inRange = new Date(monday.getTime() + 10 * 60 * 60 * 1000);
-      const outRange = new Date(monday.getTime() - 24 * 60 * 60 * 1000); // 上周日
+      const outRange = new Date(monday.getTime() - 24 * 60 * 60 * 1000);
 
       prisma.message.findMany.mockResolvedValue([
         msg("m2", "t2", "this week", inRange),
@@ -964,7 +810,6 @@ describe("LearningStatsService", () => {
         `${inRange.getFullYear()}-${String(inRange.getMonth() + 1).padStart(2, "0")}-${String(inRange.getDate()).padStart(2, "0")}`,
       );
 
-      // 缺省 range = 全量（兼容）
       const all = await service.getActivities("user-001", "dev-001", {
         page: 1,
         pageSize: 10,
@@ -972,23 +817,28 @@ describe("LearningStatsService", () => {
       expect(all.total).toBe(2);
     });
 
-    it("should scope activities to an explicit unit without touching device config", async () => {
-      // mock 模拟 DB 侧过滤后的结果（where 断言证明过滤已下发）
+    it("should scope activities to an explicit free-chat sub-mode", async () => {
       prisma.message.findMany.mockResolvedValue([
-        msg("m2", "t2", "unit-2 turn", new Date("2026-09-20T10:00:00"), {
-          unitId: "unit-2",
+        msg("m2", "t2", "free chat", new Date("2026-09-20T10:00:00"), {
+          mode: "free_chat",
+          conversationModeKey: "free_chat_casual",
         }),
       ]);
 
       const result = await service.getActivities("user-001", "dev-001", {
         page: 1,
         pageSize: 10,
-        unitId: "unit-2",
+        mode: "free_chat",
+        conversationModeKey: "free_chat_casual",
       });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ role: "user", unitId: "unit-2" }),
+          where: expect.objectContaining({
+            role: "user",
+            mode: "free_chat",
+            conversationModeKey: "free_chat_casual",
+          }),
         }),
       );
       expect(result.total).toBe(1);
@@ -1002,13 +852,9 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
-      prisma.textbook.findMany.mockResolvedValue([]);
-      prisma.unit.findMany.mockResolvedValue([]);
       prisma.conversationMode.findMany.mockResolvedValue([]);
     });
 
@@ -1057,13 +903,9 @@ describe("LearningStatsService", () => {
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
-          mode: "locked_unit",
-          textbookId: "book-a",
-          unitId: "unit-1",
+          mode: "english_chat",
         },
       ]);
-      prisma.textbook.findMany.mockResolvedValue([]);
-      prisma.unit.findMany.mockResolvedValue([]);
       prisma.conversationMode.findMany.mockResolvedValue([]);
     });
 
@@ -1247,14 +1089,12 @@ describe("LearningStatsService", () => {
     it("should provide stable labels for every known mode and a fallback for new modes", async () => {
       const labels = {
         free_chat: "自由对话",
+        english_chat: "英语对话",
         adventure_story: "每日冒险",
         english_story: "英语故事",
         idiom_story: "成语故事",
         free_story: "自由故事",
         sleep_story: "哄睡故事",
-        textbook_learning: "英语互动",
-        locked_unit: "英语互动",
-        free_textbook: "英语互动",
         future_mode: "其他",
       };
       prisma.device = {
@@ -1513,7 +1353,7 @@ describe("LearningStatsService", () => {
     it("should report a single actual day when bound on endDate itself", async () => {
       setupBoundDevice("2026-11-01T02:00:00Z"); // 绑定日 = endDate
       prisma.message.groupBy.mockResolvedValue([
-        { mode: "locked_unit", _count: { _all: 2 } },
+        { mode: "english_chat", _count: { _all: 2 } },
       ]);
 
       const result = await service.getModeUsage(

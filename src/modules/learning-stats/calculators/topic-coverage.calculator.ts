@@ -8,8 +8,6 @@ export interface TopicCoverage {
   topics: Array<{
     key: string;
     mode: string;
-    textbookId: string | null;
-    unitId: string | null;
     conversationModeKey: string | null;
     count: number;
     lastSpokeAt: Date;
@@ -22,8 +20,6 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
       string,
       {
         mode: string;
-        textbookId: string | null;
-        unitId: string | null;
         conversationModeKey: string | null;
         count: number;
         lastSpokeAt: Date;
@@ -43,8 +39,6 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
       } else {
         map.set(key, {
           mode: conv.mode ?? "unknown",
-          textbookId: conv.textbookId ?? null,
-          unitId: conv.unitId ?? null,
           conversationModeKey: conv.conversationModeKey ?? null,
           count: 1,
           lastSpokeAt: new Date(conv.spokeAt),
@@ -66,9 +60,7 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
   }
 
   private buildKey(conv: ConversationWithDevice): string {
-    // free_chat 按子模式分组;教材族按教材+单元分组
-    return [conv.mode, conv.textbookId, conv.unitId, conv.conversationModeKey]
-      .filter(Boolean)
-      .join("|");
+    // 顶层模式隔离；free_chat 继续按子模式分组。
+    return [conv.mode, conv.conversationModeKey].filter(Boolean).join("|");
   }
 }

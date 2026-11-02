@@ -29,7 +29,6 @@ describe("LearningStatsController", () => {
             getDailyTrend: jest.fn(),
             getTopicBreakdown: jest.fn(),
             getTimeline: jest.fn(),
-            getUnitProgress: jest.fn(),
             getInsights: jest.fn(),
             getHealth: jest.fn(),
             getModeUsage: jest.fn(),
@@ -78,8 +77,6 @@ describe("LearningStatsController", () => {
         "dev-001",
         undefined,
         {
-          textbookId: undefined,
-          unitId: undefined,
           mode: undefined,
           conversationModeKey: undefined,
         },
@@ -98,8 +95,6 @@ describe("LearningStatsController", () => {
         "dev-001",
         "week",
         {
-          textbookId: undefined,
-          unitId: undefined,
           mode: undefined,
           conversationModeKey: undefined,
         },
@@ -125,8 +120,6 @@ describe("LearningStatsController", () => {
         "dev-001",
         14,
         {
-          textbookId: undefined,
-          unitId: undefined,
           mode: undefined,
           conversationModeKey: undefined,
         },
@@ -151,8 +144,6 @@ describe("LearningStatsController", () => {
         "dev-001",
         7,
         {
-          textbookId: undefined,
-          unitId: undefined,
           mode: undefined,
           conversationModeKey: undefined,
           scope: "all",
@@ -219,8 +210,6 @@ describe("LearningStatsController", () => {
           page: 1,
           pageSize: 10,
           range: "week",
-          textbookId: undefined,
-          unitId: undefined,
           mode: undefined,
           conversationModeKey: undefined,
         },

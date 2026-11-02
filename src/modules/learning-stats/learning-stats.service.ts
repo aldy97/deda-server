@@ -10,7 +10,6 @@ import {
   DailyTrendPoint,
   TopicBreakdownItem,
   TimelineEvent,
-  UnitProgressItem,
   ActivityEventDto,
   ActivitiesPageDto,
   StatsRange,
@@ -35,30 +34,19 @@ import {
 interface ActiveConfig {
   deviceId: string;
   mode: string;
-  textbookId: string | null;
-  unitId: string | null;
   conversationModeKey: string | null;
 }
 
 @Injectable()
 export class LearningStatsService {
-  /** 教材学习族模式（自由对话之外的三个） */
-  private static readonly TEXTBOOK_MODES = [
-    "locked_unit",
-    "textbook_learning",
-    "free_textbook",
-  ];
-
   private static readonly MODE_LABELS: Record<string, string> = {
     free_chat: "自由对话",
+    english_chat: "英语对话",
     adventure_story: "每日冒险",
     english_story: "英语故事",
     idiom_story: "成语故事",
     free_story: "自由故事",
     sleep_story: "哄睡故事",
-    textbook_learning: "英语互动",
-    locked_unit: "英语互动",
-    free_textbook: "英语互动",
     unknown: "其他",
   };
 
@@ -411,7 +399,7 @@ export class LearningStatsService {
 
       const practiceCount = scoped.length;
       const topicKeys = new Set(
-        scoped.map((m) => `${m.mode}|${m.textbookId ?? ""}|${m.unitId ?? ""}`),
+        scoped.map((m) => `${m.mode}|${m.conversationModeKey ?? ""}`),
       );
 
       result.totalDurationMinutes = Math.round(practiceCount * 0.5);
@@ -503,26 +491,7 @@ export class LearningStatsService {
       msgsByTopicKey.set(key, list);
     }
 
-    // 名称联查：教材、单元、free_chat 子模式
-    const bizTextbookIds = Array.from(
-      new Set(conversations.map((c) => c.textbookId).filter(Boolean)),
-    ) as string[];
-    const textbooks = bizTextbookIds.length
-      ? await this.prisma.textbook.findMany({
-          where: { textbookId: { in: bizTextbookIds } },
-          select: { id: true, textbookId: true, name: true },
-        })
-      : [];
-    const textbookByBizId = new Map(textbooks.map((t) => [t.textbookId, t]));
-    const units = textbooks.length
-      ? await this.prisma.unit.findMany({
-          where: { textbookId: { in: textbooks.map((t) => t.id) } },
-          select: { textbookId: true, unitId: true, name: true },
-        })
-      : [];
-    const unitNameByKey = new Map(
-      units.map((u) => [`${u.textbookId}|${u.unitId}`, u.name]),
-    );
+    // free_chat 子模式名称联查
     const modeKeys = Array.from(
       new Set(conversations.map((c) => c.conversationModeKey).filter(Boolean)),
     ) as string[];
@@ -545,26 +514,13 @@ export class LearningStatsService {
       const isActive =
         !!activeConfig &&
         activeConfig.mode === topic.mode &&
-        activeConfig.textbookId === topic.textbookId &&
-        activeConfig.unitId === topic.unitId &&
         // free_chat 主题还要匹配到子模式
         (topic.mode !== "free_chat" ||
           activeConfig.conversationModeKey === topic.conversationModeKey);
 
-      const tb = topic.textbookId
-        ? textbookByBizId.get(topic.textbookId)
-        : undefined;
-
       return {
         id: topic.key,
         mode: topic.mode,
-        textbookId: topic.textbookId,
-        textbookName: tb?.name ?? null,
-        unitId: topic.unitId,
-        unitName:
-          tb && topic.unitId
-            ? (unitNameByKey.get(`${tb.id}|${topic.unitId}`) ?? null)
-            : null,
         conversationModeKey: topic.conversationModeKey,
         conversationModeName: topic.conversationModeKey
           ? (modeNameByKey.get(topic.conversationModeKey) ?? null)
@@ -572,7 +528,6 @@ export class LearningStatsService {
         count: topic.count,
         lastSpokeAt: topic.lastSpokeAt.toISOString(),
         isActive,
-        // 启发式英文开口分仅对教材语境计算;自由对话不评分,前端隐藏
         avgScore:
           topic.mode === "free_chat"
             ? null
@@ -647,39 +602,6 @@ export class LearningStatsService {
     }));
 
     return { items, total, page, pageSize };
-  }
-
-  async getUnitProgress(
-    userId: string,
-    deviceId: string,
-  ): Promise<UnitProgressItem[]> {
-    const { internalIds } = await this.getUserDevices(userId, deviceId);
-    if (internalIds.length === 0) return [];
-
-    const activeConfigs = await this.getActiveConfigs(internalIds);
-    // 单元进度覆盖全部练过的单元,不限于当前在学单元
-    const conversations = await this.getConversations(
-      internalIds,
-      activeConfigs,
-      false,
-    );
-    const coverage = this.topicCalculator.calculate(
-      conversations.filter(
-        (c) => c.mode === "locked_unit" || c.mode === "textbook_learning",
-      ),
-    );
-
-    return coverage.topics
-      .filter((t) => t.textbookId && t.unitId)
-      .map((topic) => ({
-        textbookId: topic.textbookId!,
-        textbookName: topic.textbookId!,
-        unitId: topic.unitId!,
-        unitName: topic.unitId!,
-        conversationCount: topic.count,
-        lastSpokeAt: topic.lastSpokeAt.toISOString(),
-        masteryLevel: null,
-      }));
   }
 
   /**
@@ -908,7 +830,7 @@ export class LearningStatsService {
   private formatTopicName(topic: TopicBreakdownItem): string {
     return (
       topic.conversationModeName ||
-      [topic.textbookName, topic.unitName].filter(Boolean).join(" · ") ||
+      LearningStatsService.MODE_LABELS[topic.mode] ||
       topic.mode
     );
   }
@@ -989,7 +911,7 @@ export class LearningStatsService {
     if (deviceInternalIds.length === 0) return [];
 
     // 统计口径：role='user' 的消息,一条 = 一轮（与原 conversation 行等价）
-    // scopeToConfig=false 时返回全量学习语境（topics/unit-progress 用）
+    // scopeToConfig=false 时返回全量学习语境（topics 用）
     const where: any = {
       role: "user",
       deviceId: { in: deviceInternalIds },
@@ -1013,24 +935,20 @@ export class LearningStatsService {
         deviceId: config.deviceId,
         mode: config.mode,
       };
-      if (config.textbookId) filter.textbookId = config.textbookId;
-      if (config.unitId) filter.unitId = config.unitId;
+      if (config.mode === "free_chat" && config.conversationModeKey) {
+        filter.conversationModeKey = config.conversationModeKey;
+      }
       return filter;
     });
   }
 
   private buildTopicKey(conv: any): string {
-    return [conv.mode, conv.textbookId, conv.unitId, conv.conversationModeKey]
-      .filter(Boolean)
-      .join("|");
+    return [conv.mode, conv.conversationModeKey].filter(Boolean).join("|");
   }
 
   private resolveTopicName(conv: any): string {
     if (conv.mode === "free_chat" && conv.conversationModeKey) {
       return conv.conversationModeKey;
-    }
-    if (conv.textbookId && conv.unitId) {
-      return `${conv.textbookId} · ${conv.unitId}`;
     }
     return conv.mode;
   }
@@ -1039,34 +957,21 @@ export class LearningStatsService {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
-  /** 设备当前配置的模式族（缺省统计语境）：全 free_chat → 自由对话;否则教材族 */
-  private async resolveModeFamily(
+  /** 缺省统计语境使用设备当前顶层模式；无配置设备默认 free_chat。 */
+  private async resolveConfiguredModes(
     deviceInternalIds: string[],
   ): Promise<string[]> {
     const configs = await this.getActiveConfigs(deviceInternalIds);
-    if (configs.length === 0) return LearningStatsService.TEXTBOOK_MODES;
-    return configs.every((c) => c.mode === "free_chat")
-      ? ["free_chat"]
-      : LearningStatsService.TEXTBOOK_MODES;
+    if (configs.length === 0) return ["free_chat"];
+    return Array.from(new Set(configs.map((config) => config.mode)));
   }
 
-  /**
-   * 统一构造统计 where：显式语境参数优先,缺省=配置模式族。
-   * 查看任何教材/单元都是只读操作,不需要改动设备配置。
-   */
+  /** 统一构造统计 where：显式语境参数优先，缺省=当前顶层配置。 */
   private async buildContextWhere(
     deviceInternalIds: string[],
     ctx: StatsContext,
   ): Promise<any> {
     const where: any = { role: "user", deviceId: { in: deviceInternalIds } };
-
-    if (ctx.textbookId || ctx.unitId) {
-      // 教材族:unitId 单独出现也蕴含教材语境
-      where.mode = { in: LearningStatsService.TEXTBOOK_MODES };
-      if (ctx.textbookId) where.textbookId = ctx.textbookId;
-      if (ctx.unitId) where.unitId = ctx.unitId;
-      return where;
-    }
 
     if (ctx.mode) {
       where.mode = ctx.mode;
@@ -1076,7 +981,7 @@ export class LearningStatsService {
       return where;
     }
 
-    where.mode = { in: await this.resolveModeFamily(deviceInternalIds) };
+    where.mode = { in: await this.resolveConfiguredModes(deviceInternalIds) };
     return where;
   }
 
@@ -1099,10 +1004,8 @@ export class LearningStatsService {
 
   /**
    * 学习动态：事件型卡片流（按日倒序分页）
-   * - study：某日某教材/单元（或 free_chat）的练习卡,轮数 = 当日 user 消息数
-   * - streak：连续学习 ≥2 天时,卡在该连续段的最后一天
-   * - unlock：某单元的首次练习日
-   * 动态是全量历史,不按当前 active config 过滤
+   * - study：某日某顶层模式的练习卡，轮数 = 当日 user 消息数
+   * - streak：连续学习 ≥2 天时，卡在该连续段的最后一天
    */
   async getActivities(
     userId: string,
@@ -1117,8 +1020,6 @@ export class LearningStatsService {
       page = 1,
       pageSize = 10,
       range,
-      textbookId,
-      unitId,
       mode,
       conversationModeKey,
     } = options;
@@ -1127,10 +1028,7 @@ export class LearningStatsService {
       return { items: [], total: 0, page, pageSize };
     }
 
-    // 缺省按配置模式族过滤;显式语境参数优先（只读查看,不改设备配置）
     const where = await this.buildContextWhere(internalIds, {
-      textbookId,
-      unitId,
       mode,
       conversationModeKey,
     });
@@ -1142,27 +1040,6 @@ export class LearningStatsService {
     if (messages.length === 0) {
       return { items: [], total: 0, page, pageSize };
     }
-
-    // 名称联查
-    const bizTextbookIds = Array.from(
-      new Set(messages.map((m) => m.textbookId).filter(Boolean)),
-    ) as string[];
-    const textbooks = bizTextbookIds.length
-      ? await this.prisma.textbook.findMany({
-          where: { textbookId: { in: bizTextbookIds } },
-          select: { id: true, textbookId: true, name: true },
-        })
-      : [];
-    const textbookByBizId = new Map(textbooks.map((t) => [t.textbookId, t]));
-    const units = textbooks.length
-      ? await this.prisma.unit.findMany({
-          where: { textbookId: { in: textbooks.map((t) => t.id) } },
-          select: { textbookId: true, unitId: true, name: true },
-        })
-      : [];
-    const unitNameByKey = new Map(
-      units.map((u) => [`${u.textbookId}|${u.unitId}`, u.name]),
-    );
 
     // 按日分组（本地日期）
     const dayMap = new Map<string, typeof messages>();
@@ -1190,20 +1067,7 @@ export class LearningStatsService {
       }
     }
 
-    // 每个单元的首练日
-    const firstDayByUnit = new Map<string, string>();
-    const byTimeAsc = [...messages].sort(
-      (a, b) => a.spokeAt.getTime() - b.spokeAt.getTime(),
-    );
-    for (const m of byTimeAsc) {
-      if (!m.textbookId || !m.unitId) continue;
-      const key = `${m.textbookId}|${m.unitId}`;
-      if (!firstDayByUnit.has(key)) {
-        firstDayByUnit.set(key, this.toDateString(new Date(m.spokeAt)));
-      }
-    }
-
-    // range 过滤日组;streak/unlock 已在全量历史上算完,语义不受窗口影响
+    // range 过滤日组；streak 已在全量历史上算完，语义不受窗口影响
     const scopedDays = range
       ? daysDesc.filter(
           (day) => day >= this.toDateString(this.rangeStart(range)),
@@ -1217,51 +1081,24 @@ export class LearningStatsService {
       const dayMsgs = dayMap.get(day)!;
       const events: ActivityEventDto[] = [];
 
-      // study 卡：按 mode/textbook/unit 分组
-      const byCtx = new Map<string, typeof dayMsgs>();
+      // study 卡：按顶层 mode 分组
+      const byMode = new Map<string, typeof dayMsgs>();
       for (const m of dayMsgs) {
-        const key = `${m.mode}|${m.textbookId ?? ""}|${m.unitId ?? ""}`;
-        const list = byCtx.get(key) ?? [];
+        const list = byMode.get(m.mode) ?? [];
         list.push(m);
-        byCtx.set(key, list);
+        byMode.set(m.mode, list);
       }
-      for (const ctxMsgs of byCtx.values()) {
-        const first = ctxMsgs[0];
-        const tb = first.textbookId
-          ? textbookByBizId.get(first.textbookId)
-          : undefined;
+      for (const modeMsgs of byMode.values()) {
         events.push({
           type: "study",
-          mode: first.mode,
-          textbookId: first.textbookId,
-          textbookName: tb?.name ?? null,
-          unitId: first.unitId,
-          unitName:
-            tb && first.unitId
-              ? (unitNameByKey.get(`${tb.id}|${first.unitId}`) ?? null)
-              : null,
-          turnCount: ctxMsgs.length,
+          mode: modeMsgs[0].mode,
+          turnCount: modeMsgs.length,
         });
       }
 
       const streak = streakByDay.get(day);
       if (streak) {
         events.push({ type: "streak", streakDays: streak });
-      }
-
-      for (const [key, firstDay] of firstDayByUnit) {
-        if (firstDay !== day) continue;
-        const [textbookId, unitId] = key.split("|");
-        const tb = textbookByBizId.get(textbookId);
-        events.push({
-          type: "unlock",
-          textbookId,
-          textbookName: tb?.name ?? null,
-          unitId,
-          unitName: tb
-            ? (unitNameByKey.get(`${tb.id}|${unitId}`) ?? null)
-            : null,
-        });
       }
 
       return { date: day, events };

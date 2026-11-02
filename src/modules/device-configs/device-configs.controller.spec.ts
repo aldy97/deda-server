@@ -55,15 +55,12 @@ describe("DeviceConfigsController", () => {
   describe("apply", () => {
     it("should apply device config", async () => {
       const dto: ApplyDeviceConfigDto = {
-        mode: "locked_unit",
-        textbookId: "unlock-l1-speaking-listening",
-        unitId: "unit-1",
+        mode: "english_chat",
       };
       const config = {
         deviceId: "dev-001",
-        mode: "locked_unit",
-        textbookId: "unlock-l1-speaking-listening",
-        unitId: "unit-1",
+        mode: "english_chat",
+        conversationModeKey: null,
       };
       service.apply.mockResolvedValue(config);
 

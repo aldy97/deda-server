@@ -20,7 +20,7 @@ export class ManufacturerService {
   }
 
   async switchConversationMode(deviceId: string, config: any) {
-    // TODO: 调用厂商切换对话模式接口，扩展参数：教材ID、单元ID、学习模式、CEFR等级
+    // TODO: 调用厂商切换对话模式接口，同步学习模式与 CEFR 等级
     return { success: true };
   }
 
@@ -30,8 +30,6 @@ export class ManufacturerService {
       mode: string;
       language?: string;
       speechRate?: string;
-      textbookId?: string;
-      unitId?: string;
     },
   ) {
     // TODO: 同步当前生效模式/语言/语速给机芯厂，确保 ASR/TTS 参数匹配

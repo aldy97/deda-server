@@ -14,19 +14,19 @@ const DEFAULT_CATEGORIES: Pick<
   {
     key: "free_chat",
     name: "自由对话模式",
-    description: "不绑定具体教材，围绕孩子兴趣自由交流",
+    description: "围绕孩子兴趣自由交流",
     sortOrder: 0,
   },
   {
-    key: "textbook_learning",
-    name: "教材学习",
-    description: "基于教材内容进行针对性练习",
+    key: "english_chat",
+    name: "英语对话",
+    description: "围绕孩子兴趣进行开放式英语对话",
     sortOrder: 1,
   },
 ];
 
 /**
- * 默认对话子模式
+ * 默认对话子模式：仅自由对话保留子模式。
  */
 const DEFAULT_MODES: (Pick<
   ConversationModeDto,
@@ -51,27 +51,6 @@ const DEFAULT_MODES: (Pick<
     key: "free_chat_qa",
     name: "百科问答",
     description: "孩子提问，AI 用适合儿童的方式解答",
-    sortOrder: 2,
-  },
-  {
-    categoryKey: "textbook_learning",
-    key: "textbook_follow",
-    name: "课文跟读",
-    description: "跟随教材原文进行朗读与模仿",
-    sortOrder: 0,
-  },
-  {
-    categoryKey: "textbook_learning",
-    key: "textbook_dialogue",
-    name: "情景对话",
-    description: "基于教材单元场景进行对话练习",
-    sortOrder: 1,
-  },
-  {
-    categoryKey: "textbook_learning",
-    key: "textbook_practice",
-    name: "句型练习",
-    description: "针对教材重点句型进行替换与扩展练习",
     sortOrder: 2,
   },
 ];

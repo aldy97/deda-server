@@ -80,7 +80,6 @@ describe("Parent report generation with PostgreSQL", () => {
           role: "user",
           content: "我想继续冒险",
           mode: "adventure_story",
-          hitUnitIds: [],
           spokeAt: new Date("2026-10-30T02:00:00Z"),
         },
         {
@@ -93,7 +92,6 @@ describe("Parent report generation with PostgreSQL", () => {
             answer: "我们一起去找风铃吧。",
           },
           mode: "adventure_story",
-          hitUnitIds: [],
           spokeAt: new Date("2026-10-30T02:00:02Z"),
         },
         {
@@ -101,7 +99,6 @@ describe("Parent report generation with PostgreSQL", () => {
           turnId: "turn-old",
           role: "user",
           content: "前一天的消息不应进入报告",
-          hitUnitIds: [],
           spokeAt: new Date("2026-10-29T15:59:59Z"),
         },
       ],
@@ -225,7 +222,6 @@ describe("Parent report generation with PostgreSQL", () => {
           role: "user",
           content: "继续每日冒险",
           mode: "adventure_story",
-          hitUnitIds: [],
           spokeAt: now,
         },
         {
@@ -234,7 +230,6 @@ describe("Parent report generation with PostgreSQL", () => {
           role: "user",
           content: "我要听哄睡故事",
           mode: "sleep_story",
-          hitUnitIds: [],
           spokeAt: now,
         },
       ],
