@@ -1,0 +1,40 @@
+我来逐个核实这些接口在前端代码里的真实调用情况。
+
+核实完毕。结论：**后端计划里要删的接口和字段，前端全部在用，直接删会 break 前端**。但后端计划的发布顺序（前端先改先发）是对的，只要按它执行就不会出事。以下是逐条核对结果。
+
+## 一、`/conversation-modes` 三个接口的前端调用
+
+| 接口 | 前端封装 | 调用页面 | 删除影响 |
+|---|---|---|---|
+| `GET /conversation-modes/categories` | `api.ts:575` `getConversationModeCategories` | `switch-mode.ts:52` 切换模式页加载分类 | **页面直接坏掉**（加载失败 toast，分类列表为空） |
+| `GET /conversation-modes?categoryKey=free_chat` | `api.ts:588` `getConversationModes` | `choose-free-chat-mode.ts:52` 自由对话子模式选择页 | **页面直接坏掉** |
+| `GET /conversation-modes/tree` | 无 | **前端没有调用**，只在后端联调脚本里 | 可安全删除 ✓ |
+
+所以文档里"前端正在使用"的说法属实，前两个接口不能在后端单独先删。
+
+## 二、其余删除项的前端断点清单
+
+**教材接口**（`GET /textbooks`、`/textbooks/:id`、`/textbooks/:id/units`）：
+- `textbook-learning.ts:35` 教材列表页
+- `choose-textbook-unit.ts:48` 单元选择页
+- `chat-history.ts:80,102` 对话记录页用它拼标题
+
+**`/learning-stats/unit-progress/:deviceId`**：
+- `device-analysis.ts:280`，设备分析页的"单元进度"模块（wxml 有对应整块 UI）
+
+**字段级删除**（DTO / 响应里去掉字段）影响更广：
+- `conversationModeKey/Name/Description`：`device-list.ts:121-192`（设备列表展示当前子模式）、`device-control.ts:81`（配置摘要）、`chat-history.ts:154`（标题与过滤）
+- `textbookId/unitId/textbookName/unitName`：`device-control.ts:85-94`、`chat-history.ts:158-167`、`choose-textbook-unit.ts:131`（`applyDeviceConfig` 提交 `locked_unit + textbookId + unitId`，DTO 删字段后这个提交会校验失败）
+- `mode` 枚举里的 `textbook_learning/locked_unit/free_textbook`：`device-control.ts:18-20` 模式名映射、`switch-mode.utils.ts:15` 页面路由、`learning-data.ts:48-50`、`chat-history.utils.ts:45-51` 过滤器推导——后端改成只有 `free_chat/english_chat` 后，这些分支变死代码，且**历史设备配置迁移成 `english_chat` 时前端要能识别这个新值**（目前 `device-control.ts` 的模式名映射表里没有 `english_chat`，会显示空白）
+- `GET /conversations` 的 `textbookId/unitId/conversationModeKey` 过滤参数：`chat-history` 在用
+- `learning-stats` 查询的 `LearningStatsContext.textbookId/unitId/conversationModeKey`：`learning-data.utils.ts:148-205` 话题筛选在用；响应里的 `conversationModeName/textbookName` 用于 `learning-analytics.ts:290`、`device-analysis.wxml:111` 展示
+
+**确认不受影响的**：`GET /learning-stats/mode-usage`（`learning-data.ts:316` 在用，后端计划保留 ✓）、孩子档案、设备、反馈、家长报告。
+
+## 三、结论与建议
+
+1. 后端计划**可以执行，但前提是它的第 4/8 步（前端先改先发）真正落地**——前端需要先删掉 4 个页面/入口（switch-mode 里的分类加载、choose-free-chat-mode、textbook-learning、choose-textbook-unit）和 5 个页面里的字段引用，并给模式映射表加上 `english_chat`
+2. 前后端之间有一个**协议空窗风险点**：后端 migration 把旧教材 mode 归一为 `english_chat` 的瞬间，如果线上旧版小程序还没下架，旧前端拿到 `english_chat` 会在多处显示空白/兜底文案。建议后端在迁移的同时，确认 `DeviceConfig` 响应里给旧前端的兜底（或接受短暂展示异常）
+3. `/conversation-modes/tree` 前端无调用，可以先行删除
+
+**要不要我把前端侧需要删改的完整清单整理成一份可执行的修改计划（页面、API 封装、测试用例逐批列出），作为后端批次 4 的对齐物？**

@@ -84,6 +84,11 @@ export class ConversationSessionService {
     });
   }
 
+  /** 定时进入哄睡：无条件覆写会话为 sleep_story（45 分钟 TTL）。 */
+  async activateSleepMode(deviceId: string): Promise<void> {
+    await this.activate(deviceId, "sleep_story");
+  }
+
   private async classifyAndActivate(
     deviceId: string,
     asrText: string,

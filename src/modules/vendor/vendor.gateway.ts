@@ -116,4 +116,28 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private emitError(client: Socket, event: string, message: string) {
     client.emit("vendor:error", { event, message, timestamp: Date.now() });
   }
+
+  /**
+   * 云端主动下行（如定时哄睡）：按设备推送 vendor:text:out。
+   * 设备未登记 socket（未连接或整晚未发言）时返回 false，调用方决定跳过策略。
+   */
+  pushSleepEntry(
+    deviceId: string,
+    reply: {
+      deviceId: string;
+      responseText: string;
+      context?: Record<string, any>;
+      ttsOptions?: Record<string, any>;
+    },
+  ): boolean {
+    const socketId = this.deviceSocketMap.get(deviceId);
+    if (!socketId) return false;
+    this.server.to(socketId).emit("vendor:text:out", reply);
+    void this.trafficRecorder.record("out", reply, {
+      event: "vendor:text:out",
+      deviceId,
+    });
+    this.logger.log(`Pushed sleep entry to ${deviceId}`);
+    return true;
+  }
 }

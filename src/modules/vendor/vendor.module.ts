@@ -21,6 +21,6 @@ import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.mod
     VendorTrafficRecorder,
   ],
   controllers: [VendorController],
-  exports: [VendorService],
+  exports: [VendorService, VendorGateway, ConversationSessionService],
 })
 export class VendorModule {}

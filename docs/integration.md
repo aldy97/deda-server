@@ -150,7 +150,9 @@
 - 跨字段规则：「生效 durationMode」= 入参 ?? 已存值 ?? `default`；生效为 `custom` 时 `durationMinutes` 必须有值（∈ {10,15,20,25,30}，显式 null 视为无值 → 400）；生效为 `default` 时忽略并清空 `durationMinutes`（存 null）。
 - `sleepTime` 必须匹配 `^([01]\d|2[0-3]):[0-5]\d$`；`contentType` 仅 `story/song/mixed`；枚举/格式违规返回 400。
 - 生命周期跟随设备：`sleep_configs.deviceId` 唯一外键指向设备内部 UUID，删除设备级联删除。
-- 定时进入、语音指令、强制哄睡拦截、哄睡统计口径为后续批次（需固件配合），本批仅配置 CRUD；字段级契约见 `MINI_PROGRAM_API.md` §10。
+- 定时进入（方式2）：配置 `SLEEP_SCHEDULER_ENABLED=true` 后每分钟扫描 `enabled=true` 的配置，北京时间到达 `sleepTime` 即触发（单一时区约定，忽略 `Device.timezone`）；到点无条件进入，覆写会话为 `sleep_story`（45 分钟 TTL）；每设备每天最多一次（`sleep_configs.lastTriggeredDate` 抢占标记，多实例安全）；设备离线（无已登记 WS socket）或 LLM 失败则跳过当天、不重试不补发。
+- 下行为服务端主动推送 `vendor:text:out`（payload 含 `context: { mode: "sleep_story", trigger: "scheduled" }`）；注意机芯厂 socket 目前仅在收到 `vendor:text:in` 后登记，设备整晚未发言时无映射会按离线跳过——联调需与机芯厂确认主动下行支持。
+- `song`/`mixed` 在儿歌内容源上线前降级为哄睡故事；`durationMinutes` 仅落库保存，暂不控制播放时长。定时推送不写 `messages` 表，哄睡统计口径待 §3.4 单独决策。
 
 ## 联调顺序
 
