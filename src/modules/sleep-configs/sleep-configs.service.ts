@@ -79,6 +79,36 @@ export class SleepConfigsService {
   }
 
   /**
+   * 查询指定设备的哄睡配置（语音链路按设备内部 ID，无需用户归属校验）
+   */
+  async getByDeviceId(deviceInternalId: string) {
+    return this.prisma.sleepConfig.findUnique({
+      where: { deviceId: deviceInternalId },
+    });
+  }
+
+  /**
+   * 语音链路部分更新哄睡配置：孩子的话以设备本身为身份，
+   * 仅允许 contentType / durationMode+durationMinutes / sleepTime
+   * （enabled / forceSleep 仅家长端可改，调用方负责白名单）。
+   */
+  async applyVoiceUpdate(
+    deviceInternalId: string,
+    patch: {
+      contentType?: string;
+      durationMode?: "custom";
+      durationMinutes?: number;
+      sleepTime?: string;
+    },
+  ) {
+    return this.prisma.sleepConfig.upsert({
+      where: { deviceId: deviceInternalId },
+      update: patch,
+      create: { deviceId: deviceInternalId, ...patch },
+    });
+  }
+
+  /**
    * 校验当前用户是否拥有该设备
    */
   private async ensureDeviceOwnership(userId: string, deviceId: string) {

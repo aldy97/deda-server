@@ -326,11 +326,20 @@ async function assertMessage(content: string, mode: string) {
   const payload = assistant.rawPayload as {
     filler?: unknown;
     answer?: unknown;
+    sleepConfig?: unknown;
+    safetyCategory?: unknown;
   } | null;
   if (typeof payload?.answer !== "string" || payload.answer.length === 0) {
     throw new Error(`Missing structured LLM answer for turn ${user.turnId}`);
   }
-  if (mode !== "adventure_story" && typeof payload.filler !== "string") {
+  // 确定性短链路回复（安全拦截 / 哄睡配置确认）不调大模型，无 filler，豁免
+  const isCannedReply =
+    payload?.safetyCategory !== undefined || payload?.sleepConfig !== undefined;
+  if (
+    mode !== "adventure_story" &&
+    typeof payload.filler !== "string" &&
+    !isCannedReply
+  ) {
     throw new Error(`Missing streamed filler for turn ${user.turnId}`);
   }
   const expectedContent = [payload.filler, payload.answer]

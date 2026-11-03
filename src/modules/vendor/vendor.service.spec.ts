@@ -13,6 +13,8 @@ import { AdventureService } from "@/modules/adventure/adventure.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
+import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -34,6 +36,11 @@ describe("VendorService", () => {
     markInjected: jest.Mock;
   };
   let replyUploader: { sendChunk: jest.Mock; sendFullReply: jest.Mock };
+  let sleepConfigsService: {
+    applyVoiceUpdate: jest.Mock;
+    getByDeviceId: jest.Mock;
+  };
+  let sleepVoiceConfigService: { handle: jest.Mock };
 
   async function* streamOf(
     deltas: string[],
@@ -152,6 +159,19 @@ describe("VendorService", () => {
         },
         // 真实安全服务：L1 纯正则、L2 走被 mock 的 llmService.complete
         ChildSafetyService,
+        {
+          provide: SleepConfigsService,
+          useValue: {
+            applyVoiceUpdate: jest.fn(),
+            getByDeviceId: jest.fn().mockResolvedValue(null),
+          },
+        },
+        {
+          provide: SleepVoiceConfigService,
+          useValue: {
+            handle: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -162,6 +182,8 @@ describe("VendorService", () => {
     adventureService = module.get(AdventureService) as any;
     childMemoriesService = module.get(ChildMemoriesService);
     replyUploader = module.get(VendorReplyUploader) as any;
+    sleepConfigsService = module.get(SleepConfigsService) as any;
+    sleepVoiceConfigService = module.get(SleepVoiceConfigService) as any;
 
     replyUploader.sendChunk.mockResolvedValue(undefined);
     replyUploader.sendFullReply.mockResolvedValue(undefined);
@@ -767,6 +789,184 @@ describe("VendorService", () => {
       const promptOptions = llmService.buildEnglishTutorPrompt.mock.calls[0][2];
       expect(promptOptions?.promptTemplate).toContain("不要提问");
       expect(promptOptions?.promptTemplate).toContain("不要邀请互动");
+    });
+
+    describe("sleep story voice config", () => {
+      it("should persist contentType=song when child asks for a sleep song", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
+        mockAnswerStream("月亮船儿轻轻摇。");
+
+        await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "我要听睡前儿歌",
+        });
+
+        expect(sleepConfigsService.applyVoiceUpdate).toHaveBeenCalledWith(
+          "uuid-s1",
+          { contentType: "song" },
+        );
+      });
+
+      it("should persist contentType=story when child asks for a sleep story", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
+        mockAnswerStream("月亮轻轻闭上了眼睛。");
+
+        await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "我要听睡前故事",
+        });
+
+        expect(sleepConfigsService.applyVoiceUpdate).toHaveBeenCalledWith(
+          "uuid-s1",
+          { contentType: "story" },
+        );
+      });
+
+      it("should not touch sleep config for plain sleep entry phrases", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
+        mockAnswerStream("该睡觉啦。");
+
+        await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "陪我睡觉",
+        });
+
+        expect(sleepConfigsService.applyVoiceUpdate).not.toHaveBeenCalled();
+      });
+
+      it("should fall back to story with a warning when configured content is song", async () => {
+        setupStreamingBase();
+        sleepConfigsService.getByDeviceId.mockResolvedValue({
+          contentType: "song",
+        });
+        llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
+        mockAnswerStream("月亮轻轻闭上了眼睛。");
+
+        await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "陪我睡觉",
+        });
+
+        // 儿歌内容源未上线：仍按故事播放
+        expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.any(Array),
+          expect.objectContaining({ mode: "sleep_story" }),
+        );
+      });
+    });
+
+    describe("sleep config intent", () => {
+      it("applies the voice update and replies without touching the adventure gate or main LLM", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_config" } as any);
+        sleepVoiceConfigService.handle.mockResolvedValue({
+          replyText: "好呀，以后哄睡时间就放睡前儿歌啦！",
+          applied: true,
+          field: "contentType",
+        });
+
+        const result = await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "以后睡前都听儿歌",
+        });
+
+        expect(sleepVoiceConfigService.handle).toHaveBeenCalledWith(
+          "uuid-s1",
+          "以后睡前都听儿歌",
+        );
+        expect(result).toEqual({
+          deviceId: "dev-s1",
+          responseText: "好呀，以后哄睡时间就放睡前儿歌啦！",
+          context: { sleepConfig: "contentType" },
+          ttsOptions: {},
+        });
+        // 修改配置不是冒险/故事入口：不查冒险门禁、不进大模型主链路
+        expect(adventureService.isCompletedToday).not.toHaveBeenCalled();
+        expect(adventureService.recordEntryBlocked).not.toHaveBeenCalled();
+        expect(llmService.completeStream).not.toHaveBeenCalled();
+
+        // 回复走 chunk 通道：单 answer + 显式收尾，全量兜底在后
+        const chunks = uploadedChunks();
+        expect(chunks.map((c) => c.seq)).toEqual([0, 1]);
+        expect(chunks[0]).toMatchObject({
+          source: "answer",
+          delta: "好呀，以后哄睡时间就放睡前儿歌啦！",
+          isFinal: false,
+        });
+        expect(chunks[1]).toMatchObject({
+          source: "answer",
+          delta: "",
+          isFinal: true,
+        });
+        expect(replyUploader.sendFullReply).toHaveBeenCalledWith(result);
+      });
+
+      it("persists the turn as free_chat messages with the applied field in rawPayload", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_config" } as any);
+        sleepVoiceConfigService.handle.mockResolvedValue({
+          replyText: "好呀，以后 21:30 我就来哄你睡觉啦！",
+          applied: true,
+          field: "sleepTime",
+        });
+
+        await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "明天九点半哄我睡觉",
+        });
+
+        const creates = prisma.message.create.mock.calls.map(
+          (call) => call[0].data,
+        );
+        expect(creates).toHaveLength(2);
+        expect(creates[0]).toMatchObject({
+          role: "user",
+          content: "明天九点半哄我睡觉",
+          mode: "free_chat",
+        });
+        expect(creates[1]).toMatchObject({
+          role: "assistant",
+          content: "好呀，以后 21:30 我就来哄你睡觉啦！",
+          mode: "free_chat",
+        });
+        expect(creates[1].rawPayload).toMatchObject({
+          filler: null,
+          answer: "好呀，以后 21:30 我就来哄你睡觉啦！",
+          sleepConfig: "sleepTime",
+        });
+      });
+
+      it("still replies with the fallback when the config cannot be applied", async () => {
+        setupStreamingBase();
+        llmService.complete.mockResolvedValue({ text: "sleep_config" } as any);
+        sleepVoiceConfigService.handle.mockResolvedValue({
+          replyText:
+            "这个时长我做不到哦，可以说哄睡 10 分钟、15 分钟、20 分钟、25 分钟或者 30 分钟。",
+          applied: false,
+          field: "durationMinutes",
+        });
+
+        const result = await service.handleTextIn({
+          deviceId: "dev-s1",
+          asrText: "哄睡改成12分钟",
+        });
+
+        expect(result.responseText).toContain("10 分钟");
+        expect(llmService.completeStream).not.toHaveBeenCalled();
+        const creates = prisma.message.create.mock.calls.map(
+          (call) => call[0].data,
+        );
+        expect(creates[1]).toMatchObject({
+          role: "assistant",
+          mode: "free_chat",
+          status: "completed",
+        });
+        expect(creates[1].rawPayload).toMatchObject({ sleepConfig: null });
+      });
     });
 
     it("should reset the persisted session after successfully starting an adventure", async () => {

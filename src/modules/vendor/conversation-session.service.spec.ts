@@ -72,8 +72,9 @@ describe("ConversationSessionService", () => {
     ["idiom_story", "idiom_story"],
     ["sleep_story", "sleep_story"],
     ["free_story", "free_story"],
+    ["sleep_config", "sleep_config"],
   ])(
-    "accepts only the six-label routing contract: %s",
+    "accepts only the seven-label routing contract: %s",
     async (output, expected) => {
       llmService.complete.mockResolvedValue({
         text: output,
@@ -100,6 +101,35 @@ describe("ConversationSessionService", () => {
 
     expect(llmService.complete).not.toHaveBeenCalled();
     expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
+  });
+
+  it("routes sleep-config modification speech to sleep_config without a persistent session", async () => {
+    llmService.complete.mockResolvedValue({
+      text: "sleep_config",
+    } as Awaited<ReturnType<LlmService["complete"]>>);
+
+    await expect(service.resolve("device-1", "以后睡前都听儿歌")).resolves.toBe(
+      "sleep_config",
+    );
+
+    // 配置修改是即时动作，不进入 45 分钟会话
+    expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
+  });
+
+  it("falls back to sleep_config for modification keywords when classification fails", async () => {
+    llmService.complete.mockRejectedValue(new Error("llm down"));
+
+    await expect(service.resolve("device-1", "哄睡改成20分钟")).resolves.toBe(
+      "sleep_config",
+    );
+  });
+
+  it("still falls back to sleep_story for entry keywords when classification fails", async () => {
+    llmService.complete.mockRejectedValue(new Error("llm down"));
+
+    await expect(service.resolve("device-1", "我要听睡前儿歌")).resolves.toBe(
+      "sleep_story",
+    );
   });
 
   it("keeps an active English session for continuation without classification", async () => {

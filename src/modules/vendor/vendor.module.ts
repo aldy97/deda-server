@@ -9,9 +9,15 @@ import { VendorTrafficRecorder } from "./traffic-recorder";
 import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
 import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
+import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module";
 
 @Module({
-  imports: [LlmModule, AdventureModule, ChildMemoriesModule],
+  imports: [
+    LlmModule,
+    AdventureModule,
+    ChildMemoriesModule,
+    SleepConfigsModule,
+  ],
   providers: [
     VendorGateway,
     VendorService,

@@ -294,6 +294,37 @@ describe("SleepConfigsService", () => {
       ).rejects.toThrow(ForbiddenException);
     });
   });
+
+  describe("applyVoiceUpdate", () => {
+    it("should upsert patch by internal device id without ownership check", async () => {
+      prisma.sleepConfig.upsert.mockResolvedValue(existingConfig);
+
+      await service.applyVoiceUpdate("device-uuid-001", {
+        contentType: "song",
+      });
+
+      expect(prisma.sleepConfig.upsert).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+        update: { contentType: "song" },
+        create: { deviceId: "device-uuid-001", contentType: "song" },
+      });
+      // 语音链路以设备本身为身份，不走用户绑定校验
+      expect(prisma.userDeviceBinding.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getByDeviceId", () => {
+    it("should return config by internal device id or null", async () => {
+      prisma.sleepConfig.findUnique.mockResolvedValue(existingConfig);
+
+      const result = await service.getByDeviceId("device-uuid-001");
+
+      expect(prisma.sleepConfig.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+      });
+      expect(result).toEqual(existingConfig);
+    });
+  });
 });
 
 describe("UpdateSleepConfigDto validation", () => {

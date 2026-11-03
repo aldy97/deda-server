@@ -156,6 +156,25 @@ FREE_TEXT="不想听故事了，我们随便聊聊。今天天气怎么样？"
 call_vendor "$FREE_TEXT"
 assert_message "$FREE_TEXT" "free_chat"
 
+# 语音修改哄睡配置（sleep_config 意图）：独立短链路，消息记 free_chat，
+# 配置实时落库并对家长端可见；内容类型、时长、睡觉时间三类字段各覆盖一条。
+call_vendor "以后睡前都听儿歌"
+assert_message "以后睡前都听儿歌" "free_chat"
+parent_get "/sleep-configs/device/$BUSINESS_DEVICE_ID"
+echo "$PARENT_RESPONSE" | jq -e '.data.contentType == "song"' >/dev/null
+pass "voice sleep config sets contentType=song"
+call_vendor "哄睡改成二十分钟"
+assert_message "哄睡改成二十分钟" "free_chat"
+parent_get "/sleep-configs/device/$BUSINESS_DEVICE_ID"
+echo "$PARENT_RESPONSE" | jq -e \
+  '.data.durationMode == "custom" and .data.durationMinutes == 20' >/dev/null
+pass "voice sleep config sets durationMinutes=20"
+call_vendor "明天晚上九点半哄我睡觉"
+assert_message "明天晚上九点半哄我睡觉" "free_chat"
+parent_get "/sleep-configs/device/$BUSINESS_DEVICE_ID"
+echo "$PARENT_RESPONSE" | jq -e '.data.sleepTime == "21:30"' >/dev/null
+pass "voice sleep config sets sleepTime=21:30"
+
 # 真实生成后仅回写测试消息时间，用于历史趋势和昨日日报。
 db backdate "$ENGLISH_TEXT" "$YESTERDAY"
 db backdate "继续讲。" "$YESTERDAY"
