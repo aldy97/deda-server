@@ -143,6 +143,15 @@
 - 返回真实 `startDate / endDate / actualDays`，前端不得自行推算；`actualDays` 为窗口内实际纳入统计的自然日数，某天互动为 0 也计入。
 - 窗口内无任何用户消息时返回空态：`{ deviceId, startDate: null, endDate: null, actualDays: 0, totalCount: 0, modeUsage: [] }`。
 
+## 哄睡配置
+
+- 查询：`GET /sleep-configs/device/:deviceId`；设备未绑定当前用户返回 403；从未设置过返回 `data: null`，前端展示默认值（`enabled=false, durationMode="default", durationMinutes=null, contentType="story", sleepTime="21:30", forceSleep=false`）。
+- 更新：`PATCH /sleep-configs/device/:deviceId`，所有字段可选、传什么改什么，返回更新后完整配置；首次 PATCH 按「默认值 + 入参」upsert 创建。
+- 跨字段规则：「生效 durationMode」= 入参 ?? 已存值 ?? `default`；生效为 `custom` 时 `durationMinutes` 必须有值（∈ {10,15,20,25,30}，显式 null 视为无值 → 400）；生效为 `default` 时忽略并清空 `durationMinutes`（存 null）。
+- `sleepTime` 必须匹配 `^([01]\d|2[0-3]):[0-5]\d$`；`contentType` 仅 `story/song/mixed`；枚举/格式违规返回 400。
+- 生命周期跟随设备：`sleep_configs.deviceId` 唯一外键指向设备内部 UUID，删除设备级联删除。
+- 定时进入、语音指令、强制哄睡拦截、哄睡统计口径为后续批次（需固件配合），本批仅配置 CRUD；字段级契约见 `MINI_PROGRAM_API.md` §10。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。

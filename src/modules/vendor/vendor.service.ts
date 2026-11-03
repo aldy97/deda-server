@@ -236,11 +236,17 @@ export class VendorService {
     }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
-    const mode = storyMode
-      ? storyIntent
-      : activeConfig?.mode === "english_chat"
-        ? "english_chat"
-        : "free_chat";
+    // 只有英语/成语/哄睡故事意图才戳对应模式；adventure_story/free_story
+    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置
+    // 戳 free_chat/english_chat，避免污染学习统计的冒险计数。
+    const mode =
+      storyIntent === "english_story" ||
+      storyIntent === "idiom_story" ||
+      storyIntent === "sleep_story"
+        ? storyIntent
+        : activeConfig?.mode === "english_chat"
+          ? "english_chat"
+          : "free_chat";
 
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
     const { history, recentFillers } = await this.getRecentHistory(
