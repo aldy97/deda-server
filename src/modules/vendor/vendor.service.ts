@@ -10,6 +10,8 @@ import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
+import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { LlmMessage } from "@/modules/llm/llm.service";
 import {
   AdventureReply,
@@ -42,6 +44,8 @@ export class VendorService {
     private readonly childMemoriesService: ChildMemoriesService,
     private readonly conversationSessionService: ConversationSessionService,
     private readonly childSafetyService: ChildSafetyService,
+    private readonly sleepConfigsService: SleepConfigsService,
+    private readonly sleepVoiceConfigService: SleepVoiceConfigService,
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
@@ -88,6 +92,42 @@ export class VendorService {
     return this.prisma.childProfile.findUnique({
       where: { deviceId: deviceInternalId },
     });
+  }
+
+  /**
+   * 哄睡语音指令持久化内容偏好（一律落库，家长端可见）：
+   * 「我要听睡前儿歌」→ contentType=song；「我要听睡前故事」→ story。
+   * 儿歌内容源上线前 song/mixed 降级为故事播放。
+   * 持久化失败不影响本轮哄睡回复。
+   */
+  private async applySleepVoiceConfig(
+    deviceInternalId: string,
+    asrText: string,
+  ): Promise<void> {
+    try {
+      if (/儿歌|童谣|唱歌|催眠曲/.test(asrText)) {
+        await this.sleepConfigsService.applyVoiceUpdate(deviceInternalId, {
+          contentType: "song",
+        });
+      } else if (/睡前故事|哄睡故事|晚安故事/.test(asrText)) {
+        await this.sleepConfigsService.applyVoiceUpdate(deviceInternalId, {
+          contentType: "story",
+        });
+      }
+      const config =
+        await this.sleepConfigsService.getByDeviceId(deviceInternalId);
+      if (config && config.contentType !== "story") {
+        this.logger.warn(
+          `sleep contentType=${config.contentType} not supported yet, playing story (device=${deviceInternalId})`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `applySleepVoiceConfig failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
@@ -208,6 +248,10 @@ export class VendorService {
         dto.asrText,
       );
     }
+    // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
+    if (storyIntent === "sleep_config") {
+      return this.sendSleepConfigReply(device, dto.asrText);
+    }
     const storyMode = storyIntent !== "free_chat";
     if (storyMode && storyIntent !== "sleep_story") {
       const completedToday = await this.adventureService.isCompletedToday(
@@ -247,6 +291,10 @@ export class VendorService {
         : activeConfig?.mode === "english_chat"
           ? "english_chat"
           : "free_chat";
+
+    if (storyIntent === "sleep_story") {
+      await this.applySleepVoiceConfig(device.id, dto.asrText);
+    }
 
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
     const { history, recentFillers } = await this.getRecentHistory(
@@ -517,6 +565,98 @@ export class VendorService {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(
         `Failed to upload full safety reply for deviceId=${device.deviceId}: ${message}`,
+      );
+    }
+
+    return reply;
+  }
+
+  /**
+   * 哄睡配置修改回复：孩子语音改哄睡设置（sleep_config 意图）。
+   * 与安全拦截同走 chunk 通道（单 answer chunk + 收尾 + 全量兜底），
+   * 话术由 SleepVoiceConfigService 确定性产出（确认或兜底），不调大模型。
+   * 落库：user 原文 + assistant 话术，mode 记 free_chat（配置修改不是故事/冒险），
+   * rawPayload.sleepConfig 记录实际修改的字段，供家长端审计。
+   */
+  private async sendSleepConfigReply(
+    device: { id: string; deviceId: string },
+    asrText: string,
+  ): Promise<VendorTextOutDto> {
+    const turnId = randomUUID();
+    const result = await this.sleepVoiceConfigService.handle(
+      device.id,
+      asrText,
+    );
+    const text = result.replyText;
+
+    const reply: VendorTextOutDto = {
+      deviceId: device.deviceId,
+      responseText: text,
+      context: { sleepConfig: result.applied ? (result.field ?? null) : null },
+      ttsOptions: {},
+    };
+
+    try {
+      await this.replyUploader.sendChunk({
+        deviceId: device.deviceId,
+        turnId,
+        seq: 0,
+        source: "answer",
+        delta: text,
+        isFinal: false,
+      });
+      await this.replyUploader.sendChunk({
+        deviceId: device.deviceId,
+        turnId,
+        seq: 1,
+        source: "answer",
+        delta: "",
+        isFinal: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Failed to upload sleep config chunk for deviceId=${device.deviceId}: ${message}`,
+      );
+    }
+
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "user",
+        content: asrText,
+        status: "completed",
+        mode: "free_chat",
+        conversationModeKey: null,
+        rawPayload: { asrText },
+        spokeAt: new Date(),
+      },
+    });
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "assistant",
+        content: text,
+        status: "completed",
+        mode: "free_chat",
+        conversationModeKey: null,
+        rawPayload: {
+          filler: null,
+          answer: text,
+          sleepConfig: result.applied ? (result.field ?? null) : null,
+        },
+        spokeAt: new Date(),
+      },
+    });
+
+    try {
+      await this.replyUploader.sendFullReply(reply);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Failed to upload full sleep config reply for deviceId=${device.deviceId}: ${message}`,
       );
     }
 

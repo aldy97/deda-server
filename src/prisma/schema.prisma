@@ -475,6 +475,7 @@ model SleepConfig {
   contentType     String   @default("story") // story / song / mixed
   sleepTime       String   @default("21:30") // 每晚定时进入时间，HH:mm（24h）
   forceSleep      Boolean  @default(false) // 强制哄睡开关
+  lastTriggeredDate String? // 定时进入最后触发日期（北京时区 YYYY-MM-DD），每天最多一次
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

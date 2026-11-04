@@ -8,7 +8,8 @@ export type ConversationIntent =
   | "english_story"
   | "idiom_story"
   | "sleep_story"
-  | "free_story";
+  | "free_story"
+  | "sleep_config";
 
 type PersistentConversationMode = Extract<
   ConversationIntent,
@@ -26,6 +27,7 @@ const CONVERSATION_INTENTS: ConversationIntent[] = [
   "adventure_story",
   "english_story",
   "idiom_story",
+  "sleep_config",
   "sleep_story",
   "free_story",
 ];
@@ -84,6 +86,11 @@ export class ConversationSessionService {
     });
   }
 
+  /** 定时进入哄睡：无条件覆写会话为 sleep_story（45 分钟 TTL）。 */
+  async activateSleepMode(deviceId: string): Promise<void> {
+    await this.activate(deviceId, "sleep_story");
+  }
+
   private async classifyAndActivate(
     deviceId: string,
     asrText: string,
@@ -113,7 +120,12 @@ export class ConversationSessionService {
               "你是儿童语音产品的对话意图分类器。只输出一个标签，禁止解释：" +
               "free_chat（普通聊天）；adventure_story（每日互动冒险、续听或重听已播冒险）；" +
               "english_story（英语故事或英语口语陪练）；idiom_story（成语故事）；" +
-              "sleep_story（哄睡故事，要求安静且不互动）；free_story（泛化听故事或自由创作故事）。" +
+              "sleep_config（修改哄睡设置，如调整哄睡时间、时长、内容偏好，" +
+              "例如「以后睡前都听儿歌」「九点半哄我睡觉」「哄睡改成20分钟」）；" +
+              "sleep_story（立刻进入哄睡、听睡前故事或儿歌，要求安静且不互动）；" +
+              "free_story（泛化听故事或自由创作故事）。" +
+              "修改设置与立刻进入的区别：含「以后/改成/换成/明天」等修改含义选 sleep_config；" +
+              "「我要听睡前儿歌」这类立刻要听的选 sleep_story。" +
               "孩子表达含糊时按字面选择最接近标签。",
           },
           { role: "user", content: `孩子的话：${asrText}` },
@@ -159,7 +171,7 @@ export class ConversationSessionService {
   }
 
   private isRoutingCandidate(asrText: string): boolean {
-    return /故事|冒险|风铃树|再听一遍|继续讲|接着讲|哄睡|晚安|睡觉|story|adventure|sleep/i.test(
+    return /故事|冒险|风铃树|再听一遍|继续讲|接着讲|哄睡|睡前|儿歌|晚安|睡觉|story|adventure|sleep/i.test(
       asrText,
     );
   }
@@ -190,7 +202,14 @@ export class ConversationSessionService {
   }
 
   private fallbackIntent(asrText: string): ConversationIntent {
-    if (/哄睡|睡觉|晚安|sleep/i.test(asrText)) {
+    // 修改含义优先于进入含义：「哄睡改成20分钟」是 sleep_config 而非 sleep_story
+    if (
+      /以后|改成|换成|调成|改为/.test(asrText) &&
+      /哄睡|睡前|睡觉|晚安/.test(asrText)
+    ) {
+      return "sleep_config";
+    }
+    if (/哄睡|睡前|儿歌|睡觉|晚安|sleep/i.test(asrText)) {
       return "sleep_story";
     }
     if (/英语|英文|english/i.test(asrText)) {

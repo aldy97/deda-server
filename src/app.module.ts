@@ -24,6 +24,7 @@ import { ConversationModesModule } from "./modules/conversation-modes/conversati
 import { AdventureModule } from "./modules/adventure/adventure.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
+import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module
     AdventureModule,
     FeedbacksModule,
     SleepConfigsModule,
+    SleepSchedulerModule,
   ],
 })
 export class AppModule {}
