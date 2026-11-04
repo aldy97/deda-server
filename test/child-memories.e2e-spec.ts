@@ -9,6 +9,8 @@ import { ChildMemoriesService } from "./../src/modules/child-memories/child-memo
 import { AdventureService } from "./../src/modules/adventure/adventure.service";
 import { ConversationSessionService } from "./../src/modules/vendor/conversation-session.service";
 import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service";
+import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-configs.service";
+import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
 
 const extraction = (value: string, operation = "assert") =>
   JSON.stringify([
@@ -188,6 +190,18 @@ describe("Child memories conversation pipeline (e2e)", () => {
             isCompletedToday: jest.fn().mockResolvedValue(false),
             registerTimeoutListener: jest.fn(),
           },
+        },
+        // 哄睡配置依赖：本链路不触及，仅满足 VendorService 构造签名
+        {
+          provide: SleepConfigsService,
+          useValue: {
+            applyVoiceUpdate: jest.fn(),
+            getByDeviceId: jest.fn().mockResolvedValue(null),
+          },
+        },
+        {
+          provide: SleepVoiceConfigService,
+          useValue: { handle: jest.fn() },
         },
       ],
     }).compile();
