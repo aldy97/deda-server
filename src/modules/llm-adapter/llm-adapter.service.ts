@@ -17,6 +17,10 @@ import {
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import {
+  AdventureReply,
+  AdventureService,
+} from "@/modules/adventure/adventure.service";
+import {
   BlockedSafetyCategory,
   ChildSafetyService,
 } from "@/modules/vendor/child-safety.service";
@@ -53,12 +57,19 @@ const STORY_INTENTS: ConversationIntent[] = [
  *
  * 编排（对齐 vendor 老链路 handleTextIn，老 WS 链路保持冻结作备份）：
  * Bearer 鉴权 → 设备解析（header 优先，fallback user 字段=设备 MAC）
- * → L1 安全闸 → L2 分类 + 意图路由并行 → sleep_config 确定性短链路
+ * → L1 安全闸 → 冒险等待态接管 → L2 分类 + 意图路由并行
+ * → sleep_config 确定性短链路 → 冒险每日门禁/开集
  * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
- * → LlmService.completeStream → assistant 落库 → markInjected。
+ * → filler（小模型打哈哈）+ 主模型流（后台泵并发）→ assistant 落库。
  *
- * 无设备标识时降级为匿名链路：不落库、无记忆、无意图路由、固定
- * free_chat、用客户端历史。
+ * 与老链路的原理性降级（已确认接受）：
+ * - 冒险 10s 沉默超时推送：新链路无服务器推送通道，交互点无限期等孩子
+ *   下一句话。适配层绝不调用 markPromptPlaybackComplete /
+ *   registerTimeoutListener（waitingSince 不落，超时扫描自动跳过）。
+ * - 21:30 定时哄睡进入同理不可用。
+ *
+ * 无设备标识时降级为匿名链路：不落库、无记忆、无意图路由、无冒险、
+ * 固定 free_chat、用客户端历史。
  */
 @Injectable()
 export class LlmAdapterService {
@@ -73,6 +84,7 @@ export class LlmAdapterService {
     private readonly conversationSession: ConversationSessionService,
     private readonly sleepVoiceConfig: SleepVoiceConfigService,
     private readonly sleepConfigs: SleepConfigsService,
+    private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
@@ -117,7 +129,7 @@ export class LlmAdapterService {
 
     const device = await this.resolveDevice(req, deviceHint);
 
-    // L1 安全闸：显式敏感词零延迟拦截，优先于一切 LLM 调用
+    // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const verdict = this.childSafety.checkL1(asrText);
     if (
       verdict.blocked &&
@@ -140,6 +152,18 @@ export class LlmAdapterService {
       }
       yield canned;
       return;
+    }
+
+    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事
+    if (device) {
+      const adventureReply = await this.adventure.handleChildReply(
+        device.id,
+        asrText,
+      );
+      if (adventureReply) {
+        yield* this.emitAdventureReply(device, adventureReply, asrText);
+        return;
+      }
     }
 
     // L2 语义安全分类与意图路由并行（同老链路 Promise.all）：
@@ -181,7 +205,7 @@ export class LlmAdapterService {
           }
         : null;
 
-    // 修改哄睡设置：独立短链路，确定性话术确认，不进大模型主链路
+    // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
     if (device && intent === "sleep_config") {
       const result = await this.sleepVoiceConfig.handle(device.id, asrText);
       await this.persistTurn(
@@ -199,9 +223,35 @@ export class LlmAdapterService {
       return;
     }
 
+    // 冒险每日门禁（对齐老链路）：故事类意图（除哄睡）在今日已完成时记
+    // entry_blocked；未完成时 adventure_story/free_story 优先进入冒险。
+    if (device && intent !== "free_chat" && intent !== "sleep_story") {
+      const completedToday = await this.adventure.isCompletedToday(device.id);
+      if (
+        !completedToday &&
+        (intent === "adventure_story" || intent === "free_story")
+      ) {
+        const startedAdventure = await this.adventure.startToday(
+          device.id,
+          true,
+        );
+        if (startedAdventure) {
+          await this.conversationSession.reset(device.id);
+          yield* this.emitAdventureReply(device, startedAdventure, asrText);
+          return;
+        }
+      }
+      if (completedToday) {
+        await this.adventure.recordEntryBlocked(
+          device.id,
+          intent === "adventure_story" ? "free_story" : intent,
+        );
+      }
+    }
+
     // mode 决策对齐老链路：故事类意图戳对应模式；adventure_story/free_story
-    // 在 2B 阶段冒险未接入，按老链路"冒险未开始"的降级处理戳设备配置；
-    // 其余按设备配置 english_chat/free_chat。
+    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置戳
+    // english_chat/free_chat，避免污染学习统计的冒险计数。
     const activeConfig = device
       ? await this.resolveActiveConfig(device.id)
       : null;
@@ -218,9 +268,14 @@ export class LlmAdapterService {
 
     // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史。
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
-    const history = device
-      ? await this.getDbHistory(device.id, mode)
-      : this.extractHistory(req);
+    // recentFillers 为最近 5 轮 filler 原文，供小模型禁用清单（防复读）。
+    let history: Array<{ role: "user" | "assistant"; content: string }>;
+    let recentFillers: string[] = [];
+    if (device) {
+      ({ history, recentFillers } = await this.getDbHistory(device.id, mode));
+    } else {
+      history = this.extractHistory(req);
+    }
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
     const turnId = randomUUID();
@@ -313,29 +368,92 @@ export class LlmAdapterService {
       ...built,
     ];
 
-    let yielded = false;
-    let answerText = "";
-    let llmFailed = false;
-    try {
-      const stream = this.llmService.completeStream({
-        messages,
-        maxTokens: 200,
-        thinking: { type: "disabled" },
-      });
-      for await (const chunk of stream) {
-        yielded = true;
-        answerText += chunk;
-        yield chunk;
+    // 双模型流式（对齐老链路 generateStreamReply）：大模型流后台泵入缓冲，
+    // filler（小模型打哈哈）先行外发，filler 结束后按序 drain 大模型缓冲。
+    // 新链路没有 seq 双通道，filler 直接作为 SSE 流前导 chunk，TTS 天然按序
+    // 播报。filler 失败静默跳过；大模型失败且无任何产出时回落兜底话术。
+    const fillerEnabled =
+      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
+
+    const buffered: string[] = [];
+    let pumpDone = false;
+    let pumpFailure: unknown = null;
+    let notify: (() => void) | null = null;
+    const wake = () => {
+      const fn = notify;
+      notify = null;
+      fn?.();
+    };
+    const pump = (async () => {
+      try {
+        const stream = this.llmService.completeStream({
+          messages,
+          maxTokens: 200,
+          thinking: { type: "disabled" },
+        });
+        for await (const chunk of stream) {
+          buffered.push(chunk);
+          wake();
+        }
+      } catch (error) {
+        pumpFailure = error;
+      } finally {
+        pumpDone = true;
+        wake();
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.error(`LLM upstream failed: ${message}`);
+    })();
+
+    let fillerText = "";
+    if (fillerEnabled) {
+      try {
+        const fillerStream = this.llmService.completeStream({
+          messages: this.llmService.buildFillerPrompt(asrText, recentFillers),
+          model: this.llmService.smallModelName,
+          maxTokens: 60,
+        });
+        for await (const delta of fillerStream) {
+          fillerText += delta;
+          yield delta;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Filler stream failed, skipped: ${message}`);
+      }
+    }
+
+    let answerText = "";
+    for (;;) {
+      const delta = buffered.shift();
+      if (delta !== undefined) {
+        answerText += delta;
+        yield delta;
+        continue;
+      }
+      if (pumpDone) break;
+      await new Promise<void>((resolve) => {
+        notify = resolve;
+      });
+    }
+    await pump;
+
+    let llmFailed = false;
+    if (pumpFailure) {
       llmFailed = true;
-      if (!yielded) {
+      const message =
+        pumpFailure instanceof Error
+          ? pumpFailure.message
+          : String(pumpFailure);
+      this.logger.error(`LLM upstream failed: ${message}`);
+      if (!answerText && !fillerText) {
         answerText = UPSTREAM_FALLBACK_TEXT;
         yield UPSTREAM_FALLBACK_TEXT;
       }
     }
+
+    // 用户实际播报全文：filler（如有）+ 大模型答案，作为最终回答落库
+    const responseText = fillerText
+      ? `${fillerText}\n${answerText}`
+      : answerText;
 
     // 补写 assistant 消息；LLM 失败时标 failed，与真实回答可区分
     if (device) {
@@ -344,11 +462,13 @@ export class LlmAdapterService {
           deviceId: device.id,
           turnId,
           role: "assistant",
-          content: answerText,
+          content: responseText,
           status: llmFailed ? "failed" : "completed",
           mode,
           conversationModeKey: activeConfig?.conversationModeKey ?? null,
-          rawPayload: { filler: null, answer: answerText },
+          // 边界标注同老链路：content 保持播报全文纯净，
+          // filler/answer 边界结构化存 rawPayload
+          rawPayload: { filler: fillerText || null, answer: answerText },
           spokeAt: new Date(),
         },
       });
@@ -376,6 +496,61 @@ export class LlmAdapterService {
       text += chunk;
     }
     return text;
+  }
+
+  /**
+   * 冒险回复播出：段落按序作为 SSE chunk 流出（TTS 天然按序播报），
+   * user/assistant 成对落库（mode=adventure_story，全文 \n 连接，
+   * interactionResult 存 rawPayload），最后 recordPresented 审计。
+   *
+   * 刻意不调 markPromptPlaybackComplete：新链路无推送通道，10s 沉默超时
+   * 兜底不可用；交互点无限期等孩子下一句话（waitingSince 保持 null，
+   * 超时扫描自动跳过这些记录）。
+   */
+  private async *emitAdventureReply(
+    device: { id: string; deviceId: string },
+    adventureReply: AdventureReply,
+    asrText: string,
+  ): AsyncGenerator<string> {
+    const turnId = randomUUID();
+    const responseText = adventureReply.texts.join("\n");
+
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "user",
+        content: asrText,
+        status: "completed",
+        mode: "adventure_story",
+        conversationModeKey: null,
+        rawPayload: { channel: "baidu-rtc" },
+        spokeAt: new Date(),
+      },
+    });
+
+    for (const text of adventureReply.texts) {
+      yield text;
+    }
+
+    await this.prisma.message.create({
+      data: {
+        deviceId: device.id,
+        turnId,
+        role: "assistant",
+        content: responseText,
+        status: "completed",
+        mode: "adventure_story",
+        conversationModeKey: null,
+        rawPayload: {
+          filler: null,
+          answer: responseText,
+          interactionResult: adventureReply.result ?? null,
+        },
+        spokeAt: new Date(),
+      },
+    });
+    await this.adventure.recordPresented(device.id, turnId, adventureReply);
   }
 
   /**
@@ -462,8 +637,8 @@ export class LlmAdapterService {
 
   /**
    * 故事意图的话术（复制自 vendor.service.ts storyPrompt，两处需同步修改）。
-   * 2C 接入冒险状态机前，adventure_story/free_story 统一走
-   * 「自由创作、不承诺冒险」的降级话术（对齐老链路冒险未开始分支）。
+   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或
+   * 无集可播），统一走「自由创作、不承诺冒险」的降级话术。
    */
   private storyPrompt(intent: ConversationIntent): string | undefined {
     switch (intent) {
@@ -527,12 +702,17 @@ export class LlmAdapterService {
 
   /**
    * 取设备最近消息历史（时间正序，按模式过滤），剥离 filler 只留
-   * answer；无边界信息的旧 assistant 行跳过。口径同老链路 getRecentHistory。
+   * answer；无边界信息的旧 assistant 行跳过。口径同老链路
+   * getRecentHistory；recentFillers 返回最近 5 轮 filler 原文
+   * （时间正序），供小模型禁用清单。
    */
   private async getDbHistory(
     deviceInternalId: string,
     mode: string,
-  ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+  ): Promise<{
+    history: Array<{ role: "user" | "assistant"; content: string }>;
+    recentFillers: string[];
+  }> {
     const rows = await this.prisma.message.findMany({
       where: { deviceId: deviceInternalId, mode },
       orderBy: { spokeAt: "desc" },
@@ -541,17 +721,23 @@ export class LlmAdapterService {
     });
 
     const history: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const fillers: string[] = [];
     for (const row of rows.reverse()) {
       if (row.role === "user") {
         history.push({ role: "user", content: row.content });
         continue;
       }
       const answer = LlmService.extractAnswer(row.content, row.rawPayload);
-      if (answer !== null) {
-        history.push({ role: "assistant", content: answer });
+      if (answer === null) {
+        continue;
+      }
+      history.push({ role: "assistant", content: answer });
+      const filler = (row.rawPayload as { filler?: unknown } | null)?.filler;
+      if (typeof filler === "string" && filler.length > 0) {
+        fillers.push(filler);
       }
     }
-    return history;
+    return { history, recentFillers: fillers.slice(-5) };
   }
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */

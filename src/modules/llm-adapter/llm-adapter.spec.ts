@@ -12,6 +12,7 @@ import { ChildMemoriesService } from "@/modules/child-memories/child-memories.se
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 
@@ -22,8 +23,11 @@ describe("LlmAdapterModule", () => {
   let controller: LlmAdapterController;
   let llm: {
     buildEnglishTutorPrompt: jest.Mock;
+    buildFillerPrompt: jest.Mock;
     completeStream: jest.Mock;
+    smallModelName: string;
   };
+  let configGet: jest.Mock;
   let childSafety: {
     checkL1: jest.Mock;
     classifyL2: jest.Mock;
@@ -41,9 +45,18 @@ describe("LlmAdapterModule", () => {
     extractAndStore: jest.Mock;
     markInjected: jest.Mock;
   };
-  let session: { resolve: jest.Mock };
+  let session: { resolve: jest.Mock; reset: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
+  let adventure: {
+    handleChildReply: jest.Mock;
+    startToday: jest.Mock;
+    isCompletedToday: jest.Mock;
+    recordEntryBlocked: jest.Mock;
+    recordPresented: jest.Mock;
+    markPromptPlaybackComplete: jest.Mock;
+    registerTimeoutListener: jest.Mock;
+  };
 
   const makeStream = (chunks: string[]) =>
     async function* () {
@@ -56,8 +69,18 @@ describe("LlmAdapterModule", () => {
         { role: "system", content: "built-system" },
         { role: "user", content: asrText },
       ]),
+      buildFillerPrompt: jest
+        .fn()
+        .mockReturnValue([{ role: "system", content: "filler-sys" }]),
       completeStream: jest.fn(),
+      smallModelName: "small-model",
     };
+    configGet = jest.fn((key: string) => {
+      if (key === "LLM_ADAPTER_API_KEY") return VALID_TOKEN;
+      // 测试默认关闭 filler，filler 用例内显式开启，避免干扰存量断言
+      if (key === "LLM_ADAPTER_FILLER") return "false";
+      return undefined;
+    });
     childSafety = {
       checkL1: jest.fn().mockReturnValue({
         blocked: false,
@@ -91,7 +114,10 @@ describe("LlmAdapterModule", () => {
       extractAndStore: jest.fn().mockResolvedValue(0),
       markInjected: jest.fn().mockResolvedValue(undefined),
     };
-    session = { resolve: jest.fn().mockResolvedValue("free_chat") };
+    session = {
+      resolve: jest.fn().mockResolvedValue("free_chat"),
+      reset: jest.fn().mockResolvedValue(undefined),
+    };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -102,6 +128,15 @@ describe("LlmAdapterModule", () => {
     sleepConfigs = {
       applyVoiceUpdate: jest.fn().mockResolvedValue({}),
       getByDeviceId: jest.fn().mockResolvedValue({ contentType: "story" }),
+    };
+    adventure = {
+      handleChildReply: jest.fn().mockResolvedValue(null),
+      startToday: jest.fn().mockResolvedValue(null),
+      isCompletedToday: jest.fn().mockResolvedValue(false),
+      recordEntryBlocked: jest.fn().mockResolvedValue(undefined),
+      recordPresented: jest.fn().mockResolvedValue(undefined),
+      markPromptPlaybackComplete: jest.fn().mockResolvedValue(undefined),
+      registerTimeoutListener: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -114,13 +149,11 @@ describe("LlmAdapterModule", () => {
         { provide: ConversationSessionService, useValue: session },
         { provide: SleepVoiceConfigService, useValue: sleepVoice },
         { provide: SleepConfigsService, useValue: sleepConfigs },
+        { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         {
           provide: ConfigService,
-          useValue: {
-            get: (key: string) =>
-              key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-          },
+          useValue: { get: configGet },
         },
       ],
     }).compile();
@@ -296,6 +329,166 @@ describe("LlmAdapterModule", () => {
       );
       expect(session.resolve).not.toHaveBeenCalled();
       expect(sleepVoice.handle).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("adventure & filler (2C)", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "我想玩每日冒险" }],
+    };
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    it("adventure awaiting_reply intercepts before intent routing", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["段落一", "段落二"],
+        action: "await_reply",
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["段落一", "段落二"]);
+      // 接管后不再做意图分类、不进主模型
+      expect(session.resolve).not.toHaveBeenCalled();
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      // user/assistant 成对落库，mode=adventure_story
+      expect(prisma.message.create).toHaveBeenCalledTimes(2);
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.mode).toBe("adventure_story");
+      expect(assistantCall.data).toMatchObject({
+        role: "assistant",
+        content: "段落一\n段落二",
+        mode: "adventure_story",
+      });
+      expect(assistantCall.data.turnId).toBe(userCall.data.turnId);
+      // 审计事件落库
+      expect(adventure.recordPresented).toHaveBeenCalledWith(
+        "dev-internal-1",
+        userCall.data.turnId,
+        expect.objectContaining({ action: "await_reply" }),
+      );
+      // 降级锁定：新链路无推送通道，绝不启用 10s 沉默超时机制
+      expect(adventure.markPromptPlaybackComplete).not.toHaveBeenCalled();
+      expect(adventure.registerTimeoutListener).not.toHaveBeenCalled();
+    });
+
+    it("enters adventure on adventure_story intent when today is not completed", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("adventure_story");
+      adventure.startToday.mockResolvedValue({
+        texts: ["冒险开场"],
+        action: "narrate",
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["冒险开场"]);
+      expect(adventure.startToday).toHaveBeenCalledWith("dev-internal-1", true);
+      expect(session.reset).toHaveBeenCalledWith("dev-internal-1");
+      expect(llm.completeStream).not.toHaveBeenCalled();
+    });
+
+    it("blocks entry and records it when today's adventure is completed", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("adventure_story");
+      adventure.isCompletedToday.mockResolvedValue(true);
+      llm.completeStream.mockReturnValue(makeStream(["自由故事"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["自由故事"]);
+      expect(adventure.startToday).not.toHaveBeenCalled();
+      expect(adventure.recordEntryBlocked).toHaveBeenCalledWith(
+        "dev-internal-1",
+        "free_story",
+      );
+      // 门禁后按自由创作降级
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "我想玩每日冒险",
+        expect.any(Array),
+        expect.objectContaining({
+          promptTemplate: expect.stringContaining("不要承诺开始"),
+        }),
+      );
+    });
+
+    it("falls back to free-story prompt when no episode is available", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("adventure_story");
+      adventure.startToday.mockResolvedValue(null);
+      llm.completeStream.mockReturnValue(makeStream(["自由故事"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["自由故事"]);
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "我想玩每日冒险",
+        expect.any(Array),
+        expect.objectContaining({
+          promptTemplate: expect.stringContaining("不要承诺开始"),
+        }),
+      );
+    });
+
+    it("streams filler before the answer and persists the boundary", async () => {
+      // 显式开启 filler（生产默认开，测试默认关）
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream
+        .mockImplementationOnce(() => makeStream(["正式", "答案"])()) // 主模型后台泵
+        .mockImplementationOnce(() => makeStream(["嗯——"])()); // filler
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["嗯——", "正式", "答案"]);
+      // 主模型先起后台泵（calls[0]），filler 小模型随后（calls[1]）；
+      // 播报顺序由 drain 保证 filler 在前
+      expect(llm.completeStream.mock.calls[1][0]).toMatchObject({
+        model: "small-model",
+        maxTokens: 60,
+      });
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith("我想玩每日冒险", []);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toEqual({
+        filler: "嗯——",
+        answer: "正式答案",
+      });
+      expect(assistantCall.data.content).toBe("嗯——\n正式答案");
+    });
+
+    it("skips filler silently when the filler stream fails", async () => {
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream
+        .mockImplementationOnce(() => makeStream(["答案"])()) // 主模型后台泵
+        .mockImplementationOnce(async function* () {
+          throw new Error("small model down");
+        }); // filler 失败
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["答案"]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toEqual({
+        filler: null,
+        answer: "答案",
+      });
+    });
+
+    it("never touches the adventure engine when anonymous", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(
+        service.streamReply({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: "我想玩每日冒险" }],
+        }),
+      );
+      expect(adventure.handleChildReply).not.toHaveBeenCalled();
+      expect(adventure.startToday).not.toHaveBeenCalled();
+      expect(adventure.isCompletedToday).not.toHaveBeenCalled();
     });
   });
 
@@ -738,6 +931,7 @@ describe("LlmAdapterModule", () => {
           { provide: ConversationSessionService, useValue: session },
           { provide: SleepVoiceConfigService, useValue: sleepVoice },
           { provide: SleepConfigsService, useValue: sleepConfigs },
+          { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
