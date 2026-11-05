@@ -11,6 +11,12 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService, LlmMessage } from "@/modules/llm/llm.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
+  ConversationIntent,
+  ConversationSessionService,
+} from "@/modules/vendor/conversation-session.service";
+import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import {
   BlockedSafetyCategory,
   ChildSafetyService,
 } from "@/modules/vendor/child-safety.service";
@@ -26,9 +32,6 @@ const MAX_HISTORY_TURNS = 10;
 /** 落库历史条数上限：与老链路 getRecentHistory 口径一致（12 条 ≈ 6 轮） */
 const DB_HISTORY_LIMIT = 12;
 
-/** 二期固定顶层模式；意图路由/模式切换在三期（2B）接入 */
-const ADAPTER_MODE = "free_chat";
-
 const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
   "sexual",
   "violence",
@@ -38,15 +41,24 @@ const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
 const MAC_PATTERN =
   /^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$/;
 
+/** 故事类意图 → 顶层模式快照（对齐老链路 handleTextIn 的 mode 决策） */
+const STORY_INTENTS: ConversationIntent[] = [
+  "english_story",
+  "idiom_story",
+  "sleep_story",
+];
+
 /**
  * LLM 适配服务：承接百度 RTC 的 OpenAI 兼容回调。
  *
  * 编排（对齐 vendor 老链路 handleTextIn，老 WS 链路保持冻结作备份）：
  * Bearer 鉴权 → 设备解析（header 优先，fallback user 字段=设备 MAC）
- * → L1 安全闸 → L2 语义分类 → DB 历史（有设备时替代客户端历史）
- * → user 落库 → 异步记忆提取 → 记忆注入 → LlmService.completeStream
- * → assistant 落库（filler/answer 边界同构 rawPayload）→ markInjected。
- * 无设备标识时降级为一期匿名链路：不落库、无记忆、用客户端历史。
+ * → L1 安全闸 → L2 分类 + 意图路由并行 → sleep_config 确定性短链路
+ * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
+ * → LlmService.completeStream → assistant 落库 → markInjected。
+ *
+ * 无设备标识时降级为匿名链路：不落库、无记忆、无意图路由、固定
+ * free_chat、用客户端历史。
  */
 @Injectable()
 export class LlmAdapterService {
@@ -58,6 +70,9 @@ export class LlmAdapterService {
     private readonly llmService: LlmService,
     private readonly childSafety: ChildSafetyService,
     private readonly childMemories: ChildMemoriesService,
+    private readonly conversationSession: ConversationSessionService,
+    private readonly sleepVoiceConfig: SleepVoiceConfigService,
+    private readonly sleepConfigs: SleepConfigsService,
     private readonly prisma: PrismaService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
@@ -127,45 +142,84 @@ export class LlmAdapterService {
       return;
     }
 
-    // L2 语义安全分类：补 L1 字面盲区；emotional_harm 不拦截，
-    // 注入共情引导 system 消息；分类异常 fail-open 由 L3 兜底。
-    let emotionalHarmGuidance: LlmMessage | null = null;
-    try {
-      const l2 = await this.childSafety.classifyL2(asrText);
-      if (
-        l2.blocked &&
-        l2.category &&
-        BLOCKED_CATEGORIES.includes(l2.category as BlockedSafetyCategory)
-      ) {
-        this.logger.warn(`L2 blocked category=${l2.category}`);
-        const canned = this.childSafety.cannedReply(
-          l2.category as BlockedSafetyCategory,
-        );
-        if (device) {
-          await this.persistTurn(device.id, asrText, canned, "completed", {
-            filler: null,
-            answer: canned,
-            safetyCategory: l2.category,
-            safetyLayer: "L2",
-          });
-        }
-        yield canned;
-        return;
+    // L2 语义安全分类与意图路由并行（同老链路 Promise.all）：
+    // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
+    // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
+    const [l2, intent] = await Promise.all([
+      this.safeClassifyL2(asrText),
+      device
+        ? this.safeResolveIntent(device.id, asrText)
+        : Promise.resolve<ConversationIntent>("free_chat"),
+    ]);
+
+    if (
+      l2?.blocked &&
+      l2.category &&
+      BLOCKED_CATEGORIES.includes(l2.category as BlockedSafetyCategory)
+    ) {
+      this.logger.warn(`L2 blocked category=${l2.category}`);
+      const canned = this.childSafety.cannedReply(
+        l2.category as BlockedSafetyCategory,
+      );
+      if (device) {
+        await this.persistTurn(device.id, asrText, canned, "completed", {
+          filler: null,
+          answer: canned,
+          safetyCategory: l2.category,
+          safetyLayer: "L2",
+        });
       }
-      if (l2.category === "emotional_harm") {
-        emotionalHarmGuidance = {
-          role: "system",
-          content: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
-        };
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`L2 classification failed, fail-open: ${message}`);
+      yield canned;
+      return;
+    }
+    // emotional_harm（攻击性气话）不拦截：注入共情引导 system 消息
+    const emotionalHarmGuidance: LlmMessage | null =
+      l2?.category === "emotional_harm"
+        ? {
+            role: "system",
+            content: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
+          }
+        : null;
+
+    // 修改哄睡设置：独立短链路，确定性话术确认，不进大模型主链路
+    if (device && intent === "sleep_config") {
+      const result = await this.sleepVoiceConfig.handle(device.id, asrText);
+      await this.persistTurn(
+        device.id,
+        asrText,
+        result.replyText,
+        "completed",
+        {
+          filler: null,
+          answer: result.replyText,
+          sleepConfig: result.applied ? (result.field ?? null) : null,
+        },
+      );
+      yield result.replyText;
+      return;
     }
 
-    // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史
+    // mode 决策对齐老链路：故事类意图戳对应模式；adventure_story/free_story
+    // 在 2B 阶段冒险未接入，按老链路"冒险未开始"的降级处理戳设备配置；
+    // 其余按设备配置 english_chat/free_chat。
+    const activeConfig = device
+      ? await this.resolveActiveConfig(device.id)
+      : null;
+    const mode = STORY_INTENTS.includes(intent)
+      ? intent
+      : activeConfig?.mode === "english_chat"
+        ? "english_chat"
+        : "free_chat";
+
+    // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）
+    if (device && intent === "sleep_story") {
+      await this.applySleepVoiceConfig(device.id, asrText);
+    }
+
+    // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史。
+    // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
     const history = device
-      ? await this.getDbHistory(device.id)
+      ? await this.getDbHistory(device.id, mode)
       : this.extractHistory(req);
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
@@ -179,8 +233,8 @@ export class LlmAdapterService {
           role: "user",
           content: asrText,
           status: "completed",
-          mode: ADAPTER_MODE,
-          conversationModeKey: null,
+          mode,
+          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: { channel: "baidu-rtc" },
           spokeAt: sourceOccurredAt,
         },
@@ -207,12 +261,12 @@ export class LlmAdapterService {
         });
     }
 
-    // 记忆召回注入（确定性查库，主路径不加 LLM 调用）
+    // 只在非故事主回答中注入相关记忆（同老链路口径）
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
     };
-    if (device) {
+    if (device && intent === "free_chat") {
       try {
         memoryPrompt = await this.childMemories.buildPromptBlock(
           device.id,
@@ -226,8 +280,29 @@ export class LlmAdapterService {
       }
     }
 
+    // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
+    // 孩子档案注入称呼/年龄上下文（均对齐老链路）
+    const childProfile = device ? await this.getChildProfile(device.id) : null;
+    const promptTemplate = STORY_INTENTS.includes(intent)
+      ? this.storyPrompt(intent)
+      : intent === "adventure_story" || intent === "free_story"
+        ? this.storyPrompt(intent)
+        : await this.resolvePromptTemplate(
+            mode,
+            activeConfig?.conversationModeKey,
+          );
+
     const built = this.llmService.buildEnglishTutorPrompt(asrText, history, {
-      mode: ADAPTER_MODE,
+      childProfile: childProfile
+        ? {
+            name: childProfile.name,
+            birthday: childProfile.birthday,
+            englishName: childProfile.englishName,
+          }
+        : undefined,
+      promptTemplate,
+      mode,
+      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     });
     const messages: LlmMessage[] = [
       ...baiduSystem,
@@ -271,8 +346,8 @@ export class LlmAdapterService {
           role: "assistant",
           content: answerText,
           status: llmFailed ? "failed" : "completed",
-          mode: ADAPTER_MODE,
-          conversationModeKey: null,
+          mode,
+          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: { filler: null, answer: answerText },
           spokeAt: new Date(),
         },
@@ -343,15 +418,123 @@ export class LlmAdapterService {
     return value.replace(/[:-]/g, "").toLowerCase();
   }
 
+  /** L2 语义分类包装：任何异常 fail-open 返回 null，由 L3 兜底 */
+  private async safeClassifyL2(asrText: string) {
+    try {
+      return await this.childSafety.classifyL2(asrText);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`L2 classification failed, fail-open: ${message}`);
+      return null;
+    }
+  }
+
+  /** 意图路由包装：会话服务异常时降级 free_chat，不让孩子面对沉默 */
+  private async safeResolveIntent(
+    deviceInternalId: string,
+    asrText: string,
+  ): Promise<ConversationIntent> {
+    try {
+      return await this.conversationSession.resolve(deviceInternalId, asrText);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `Intent resolution failed, fallback free_chat: ${message}`,
+      );
+      return "free_chat";
+    }
+  }
+
+  /** 查询设备当前生效配置（对齐老链路 resolveActiveConfig） */
+  private async resolveActiveConfig(deviceInternalId: string) {
+    return this.prisma.deviceConfig.findFirst({
+      where: { deviceId: deviceInternalId, isActive: true },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  /** 查询设备对应的孩子档案（对齐老链路 getChildProfile） */
+  private async getChildProfile(deviceInternalId: string) {
+    return this.prisma.childProfile.findUnique({
+      where: { deviceId: deviceInternalId },
+    });
+  }
+
   /**
-   * 取设备最近消息历史（时间正序），剥离 filler 只留 answer；
-   * 无边界信息的旧 assistant 行跳过。口径同老链路 getRecentHistory。
+   * 故事意图的话术（复制自 vendor.service.ts storyPrompt，两处需同步修改）。
+   * 2C 接入冒险状态机前，adventure_story/free_story 统一走
+   * 「自由创作、不承诺冒险」的降级话术（对齐老链路冒险未开始分支）。
+   */
+  private storyPrompt(intent: ConversationIntent): string | undefined {
+    switch (intent) {
+      case "english_story":
+        return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
+      case "idiom_story":
+        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
+      case "sleep_story":
+        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。";
+      case "adventure_story":
+      case "free_story":
+        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。";
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * 哄睡语音指令持久化内容偏好（复制自 vendor.service.ts
+   * applySleepVoiceConfig，两处需同步修改）：
+   * 「我要听睡前儿歌」→ contentType=song；「我要听睡前故事」→ story。
+   * 持久化失败不影响本轮哄睡回复。
+   */
+  private async applySleepVoiceConfig(
+    deviceInternalId: string,
+    asrText: string,
+  ): Promise<void> {
+    try {
+      if (/儿歌|童谣|唱歌|催眠曲/.test(asrText)) {
+        await this.sleepConfigs.applyVoiceUpdate(deviceInternalId, {
+          contentType: "song",
+        });
+      } else if (/睡前故事|哄睡故事|晚安故事/.test(asrText)) {
+        await this.sleepConfigs.applyVoiceUpdate(deviceInternalId, {
+          contentType: "story",
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `applySleepVoiceConfig failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /** 自由对话按 conversationModeKey 读取子模式 prompt 模板 */
+  private async resolvePromptTemplate(
+    mode: string,
+    conversationModeKey: string | null | undefined,
+  ): Promise<string | undefined> {
+    if (mode !== "free_chat" || !conversationModeKey) {
+      return undefined;
+    }
+    const conversationMode = await this.prisma.conversationMode.findFirst({
+      where: { key: conversationModeKey },
+      select: { promptTemplate: true },
+    });
+    return conversationMode?.promptTemplate ?? undefined;
+  }
+
+  /**
+   * 取设备最近消息历史（时间正序，按模式过滤），剥离 filler 只留
+   * answer；无边界信息的旧 assistant 行跳过。口径同老链路 getRecentHistory。
    */
   private async getDbHistory(
     deviceInternalId: string,
+    mode: string,
   ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
     const rows = await this.prisma.message.findMany({
-      where: { deviceId: deviceInternalId, mode: ADAPTER_MODE },
+      where: { deviceId: deviceInternalId, mode },
       orderBy: { spokeAt: "desc" },
       take: DB_HISTORY_LIMIT,
       select: { role: true, content: true, rawPayload: true },
@@ -387,7 +570,7 @@ export class LlmAdapterService {
         role: "user",
         content: asrText,
         status: "completed",
-        mode: ADAPTER_MODE,
+        mode: "free_chat",
         conversationModeKey: null,
         rawPayload: { channel: "baidu-rtc" },
         spokeAt: new Date(),
@@ -400,7 +583,7 @@ export class LlmAdapterService {
         role: "assistant",
         content: replyText,
         status,
-        mode: ADAPTER_MODE,
+        mode: "free_chat",
         conversationModeKey: null,
         rawPayload: assistantPayload,
         spokeAt: new Date(),

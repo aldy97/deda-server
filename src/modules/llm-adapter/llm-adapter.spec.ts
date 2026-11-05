@@ -9,6 +9,9 @@ import {
 import { LlmService } from "@/modules/llm/llm.service";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
+import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
+import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 
@@ -29,12 +32,18 @@ describe("LlmAdapterModule", () => {
   let prisma: {
     device: { findFirst: jest.Mock; create: jest.Mock };
     message: { create: jest.Mock; findMany: jest.Mock };
+    deviceConfig: { findFirst: jest.Mock };
+    childProfile: { findUnique: jest.Mock };
+    conversationMode: { findFirst: jest.Mock };
   };
   let memories: {
     buildPromptBlock: jest.Mock;
     extractAndStore: jest.Mock;
     markInjected: jest.Mock;
   };
+  let session: { resolve: jest.Mock };
+  let sleepVoice: { handle: jest.Mock };
+  let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
 
   const makeStream = (chunks: string[]) =>
     async function* () {
@@ -71,6 +80,9 @@ describe("LlmAdapterModule", () => {
         create: jest.fn().mockResolvedValue({}),
         findMany: jest.fn().mockResolvedValue([]),
       },
+      deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
+      childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
+      conversationMode: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     memories = {
       buildPromptBlock: jest
@@ -78,6 +90,18 @@ describe("LlmAdapterModule", () => {
         .mockResolvedValue({ text: "", memoryIds: [] }),
       extractAndStore: jest.fn().mockResolvedValue(0),
       markInjected: jest.fn().mockResolvedValue(undefined),
+    };
+    session = { resolve: jest.fn().mockResolvedValue("free_chat") };
+    sleepVoice = {
+      handle: jest.fn().mockResolvedValue({
+        replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
+        applied: true,
+        field: "durationMinutes",
+      }),
+    };
+    sleepConfigs = {
+      applyVoiceUpdate: jest.fn().mockResolvedValue({}),
+      getByDeviceId: jest.fn().mockResolvedValue({ contentType: "story" }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -87,6 +111,9 @@ describe("LlmAdapterModule", () => {
         { provide: LlmService, useValue: llm },
         { provide: ChildSafetyService, useValue: childSafety },
         { provide: ChildMemoriesService, useValue: memories },
+        { provide: ConversationSessionService, useValue: session },
+        { provide: SleepVoiceConfigService, useValue: sleepVoice },
+        { provide: SleepConfigsService, useValue: sleepConfigs },
         { provide: PrismaService, useValue: prisma },
         {
           provide: ConfigService,
@@ -100,6 +127,176 @@ describe("LlmAdapterModule", () => {
 
     service = module.get(LlmAdapterService);
     controller = module.get(LlmAdapterController);
+  });
+
+  describe("intent routing & modes (2B)", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "讲一个英语故事" }],
+    };
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    it("resolves intent per turn and snapshots the resolved mode on messages", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("english_story");
+      llm.completeStream.mockReturnValue(makeStream(["Once upon..."])());
+      await collect(service.streamReply(boundRequest));
+      expect(session.resolve).toHaveBeenCalledWith(
+        "dev-internal-1",
+        "讲一个英语故事",
+      );
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("english_story");
+      // 历史按解析出的模式过滤，与老链路口径一致
+      expect(prisma.message.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ mode: "english_story" }),
+        }),
+      );
+      // 故事模式注入故事 prompt（经 promptTemplate 传给 prompt 组装），不注入长期记忆
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "讲一个英语故事",
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "english_story",
+          promptTemplate: expect.stringContaining("English story"),
+        }),
+      );
+      expect(memories.buildPromptBlock).not.toHaveBeenCalled();
+    });
+
+    it("short-circuits sleep_config to a deterministic reply without the main LLM", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("sleep_config");
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "哄睡改成二十分钟" }],
+      };
+      const chunks = await collect(service.streamReply(req));
+      expect(chunks).toEqual(["好呀，以后哄睡时间就改成 20 分钟啦！"]);
+      expect(sleepVoice.handle).toHaveBeenCalledWith(
+        "dev-internal-1",
+        "哄睡改成二十分钟",
+      );
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        sleepConfig: "durationMinutes",
+      });
+    });
+
+    it("persists voice content preference on sleep_story with 儿歌 keyword", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("sleep_story");
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "我要听睡前儿歌" }],
+      };
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+      await collect(service.streamReply(req));
+      expect(sleepConfigs.applyVoiceUpdate).toHaveBeenCalledWith(
+        "dev-internal-1",
+        { contentType: "song" },
+      );
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("sleep_story");
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "我要听睡前儿歌",
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "sleep_story",
+          promptTemplate: expect.stringContaining("哄睡"),
+        }),
+      );
+    });
+
+    it("routes free_story to free_chat mode with a no-adventure-promise prompt", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("free_story");
+      llm.completeStream.mockReturnValue(makeStream(["故事来了"])());
+      await collect(service.streamReply(boundRequest));
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("free_chat");
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "讲一个英语故事",
+        expect.any(Array),
+        expect.objectContaining({
+          promptTemplate: expect.stringContaining("不要承诺开始"),
+        }),
+      );
+    });
+
+    it("uses deviceConfig english_chat when intent is free_chat", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "english_chat",
+        conversationModeKey: null,
+      });
+      session.resolve.mockResolvedValue("free_chat");
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "讲一个英语故事",
+        [],
+        expect.objectContaining({ mode: "english_chat" }),
+      );
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("english_chat");
+    });
+
+    it("applies the conversationMode prompt template for free_chat submodes", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+        conversationModeKey: "free_chat_casual",
+      });
+      prisma.conversationMode.findFirst.mockResolvedValue({
+        promptTemplate: "SUBMODE-TPL",
+      });
+      session.resolve.mockResolvedValue("free_chat");
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "讲一个英语故事",
+        expect.any(Array),
+        expect.objectContaining({
+          promptTemplate: "SUBMODE-TPL",
+        }),
+      );
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.conversationModeKey).toBe("free_chat_casual");
+    });
+
+    it("degrades to free_chat when intent resolution throws", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockRejectedValue(new Error("session db down"));
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["ok"]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("free_chat");
+    });
+
+    it("skips intent resolution when anonymous", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(
+        service.streamReply({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: "讲一个英语故事" }],
+        }),
+      );
+      expect(session.resolve).not.toHaveBeenCalled();
+      expect(sleepVoice.handle).not.toHaveBeenCalled();
+    });
   });
 
   describe("parseChatCompletionRequest", () => {
@@ -538,6 +735,9 @@ describe("LlmAdapterModule", () => {
           { provide: LlmService, useValue: llm },
           { provide: ChildSafetyService, useValue: childSafety },
           { provide: ChildMemoriesService, useValue: memories },
+          { provide: ConversationSessionService, useValue: session },
+          { provide: SleepVoiceConfigService, useValue: sleepVoice },
+          { provide: SleepConfigsService, useValue: sleepConfigs },
           { provide: PrismaService, useValue: prisma },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
