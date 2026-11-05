@@ -38,12 +38,18 @@ export class LlmAdapterController {
       throw new BadRequestException(parsed.message);
     }
     const request = parsed.value;
+    // 显式设备标识 header 优先；service 内部 fallback 到请求体 user 字段
+    const deviceHeader = req.headers["x-deda-device-id"];
+    const deviceHint =
+      typeof deviceHeader === "string" && deviceHeader.trim().length > 0
+        ? deviceHeader.trim()
+        : undefined;
 
     const id = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
 
     if (!request.stream) {
-      const content = await this.adapter.completeReply(request);
+      const content = await this.adapter.completeReply(request, deviceHint);
       res.json({
         id,
         object: "chat.completion",
@@ -78,7 +84,7 @@ export class LlmAdapterController {
       ],
     });
 
-    for await (const text of this.adapter.streamReply(request)) {
+    for await (const text of this.adapter.streamReply(request, deviceHint)) {
       writeChunk({
         id,
         object: "chat.completion.chunk",

@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { LlmModule } from "@/modules/llm/llm.module";
+import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { LlmAdapterController } from "./llm-adapter.controller";
 import { LlmAdapterService } from "./llm-adapter.service";
@@ -9,10 +10,10 @@ import { LlmAdapterService } from "./llm-adapter.service";
  *
  * ChildSafetyService 未被 VendorModule 导出，这里直接作为 provider
  * 实例化（其唯一依赖 LlmService 由 LlmModule 导出提供），避免改动
- * vendor 老链路的模块边界。
+ * vendor 老链路的模块边界。PrismaService 由全局 PrismaModule 提供。
  */
 @Module({
-  imports: [LlmModule],
+  imports: [LlmModule, ChildMemoriesModule],
   controllers: [LlmAdapterController],
   providers: [LlmAdapterService, ChildSafetyService],
 })

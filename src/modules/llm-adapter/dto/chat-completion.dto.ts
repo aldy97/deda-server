@@ -16,6 +16,11 @@ export interface ChatCompletionRequest {
   model: string;
   messages: ChatCompletionMessage[];
   stream: boolean;
+  /**
+   * OpenAI 标准 user 字段。百度 RTC 用它携带设备 userid（机芯厂约定 = 设备
+   * MAC，重启/烧录/OTA 不变），适配层据此解析设备身份；缺省走匿名链路。
+   */
+  user?: string;
 }
 
 export type ParseResult =
@@ -64,6 +69,10 @@ export function parseChatCompletionRequest(body: unknown): ParseResult {
           : "deda-english-tutor",
       messages,
       stream: raw.stream === true,
+      user:
+        typeof raw.user === "string" && raw.user.trim().length > 0
+          ? raw.user.trim()
+          : undefined,
     },
   };
 }

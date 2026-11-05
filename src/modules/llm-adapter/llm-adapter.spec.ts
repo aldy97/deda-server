@@ -8,6 +8,8 @@ import {
 } from "./dto/chat-completion.dto";
 import { LlmService } from "@/modules/llm/llm.service";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
+import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
+import { PrismaService } from "@/common/prisma/prisma.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 
 const VALID_TOKEN = "test-adapter-key";
@@ -21,7 +23,17 @@ describe("LlmAdapterModule", () => {
   };
   let childSafety: {
     checkL1: jest.Mock;
+    classifyL2: jest.Mock;
     cannedReply: jest.Mock;
+  };
+  let prisma: {
+    device: { findFirst: jest.Mock; create: jest.Mock };
+    message: { create: jest.Mock; findMany: jest.Mock };
+  };
+  let memories: {
+    buildPromptBlock: jest.Mock;
+    extractAndStore: jest.Mock;
+    markInjected: jest.Mock;
   };
 
   const makeStream = (chunks: string[]) =>
@@ -43,7 +55,29 @@ describe("LlmAdapterModule", () => {
         category: null,
         layer: null,
       }),
+      classifyL2: jest.fn().mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+      }),
       cannedReply: jest.fn().mockReturnValue("这个话题不适合小朋友聊哦。"),
+    };
+    prisma = {
+      device: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn(),
+      },
+      message: {
+        create: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    };
+    memories = {
+      buildPromptBlock: jest
+        .fn()
+        .mockResolvedValue({ text: "", memoryIds: [] }),
+      extractAndStore: jest.fn().mockResolvedValue(0),
+      markInjected: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -52,6 +86,8 @@ describe("LlmAdapterModule", () => {
         LlmAdapterService,
         { provide: LlmService, useValue: llm },
         { provide: ChildSafetyService, useValue: childSafety },
+        { provide: ChildMemoriesService, useValue: memories },
+        { provide: PrismaService, useValue: prisma },
         {
           provide: ConfigService,
           useValue: {
@@ -88,6 +124,27 @@ describe("LlmAdapterModule", () => {
       });
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value.stream).toBe(true);
+    });
+
+    it("captures the OpenAI user field as device hint", () => {
+      const result = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+        user: "AA:BB:CC:DD:EE:FF",
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.user).toBe("AA:BB:CC:DD:EE:FF");
+    });
+
+    it("leaves user undefined when absent or not a string", () => {
+      const absent = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+      });
+      expect(absent.ok && absent.value.user).toBeUndefined();
+      const nonString = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+        user: 42,
+      });
+      expect(nonString.ok && nonString.value.user).toBeUndefined();
     });
 
     it("rejects non-object body", () => {
@@ -208,6 +265,42 @@ describe("LlmAdapterModule", () => {
       expect(llm.completeStream).not.toHaveBeenCalled();
     });
 
+    it("runs L2 after L1 pass and blocks on L2 verdict without upstream call", async () => {
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "self_harm",
+        layer: "L2",
+      });
+      const chunks = await collect(service.streamReply(request));
+      expect(childSafety.classifyL2).toHaveBeenCalledWith("I like apples");
+      expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
+      expect(childSafety.cannedReply).toHaveBeenCalledWith("self_harm");
+      expect(llm.completeStream).not.toHaveBeenCalled();
+    });
+
+    it("injects emotional_harm guidance system message without blocking", async () => {
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: "emotional_harm",
+        layer: "L2",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const chunks = await collect(service.streamReply(request));
+      expect(chunks).toEqual(["ok"]);
+      const callArgs = llm.completeStream.mock.calls[0][0];
+      const systemContents = callArgs.messages
+        .filter((m: { role: string }) => m.role === "system")
+        .map((m: { content: string }) => m.content);
+      expect(systemContents.some((c: string) => c.includes("共情"))).toBe(true);
+    });
+
+    it("fails open when L2 classification throws", async () => {
+      childSafety.classifyL2.mockRejectedValue(new Error("small model down"));
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const chunks = await collect(service.streamReply(request));
+      expect(chunks).toEqual(["ok"]);
+    });
+
     it("returns fallback sentence when upstream fails before first chunk", async () => {
       llm.completeStream.mockImplementation(async function* () {
         throw new Error("upstream down");
@@ -238,6 +331,205 @@ describe("LlmAdapterModule", () => {
     });
   });
 
+  describe("device-bound behavior (2A)", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "hello deda" }],
+    };
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    it("resolves device by deviceId and persists user before upstream, assistant after", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["Hi", " there"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["Hi", " there"]);
+
+      expect(prisma.message.create).toHaveBeenCalledTimes(2);
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data).toMatchObject({
+        deviceId: "dev-internal-1",
+        role: "user",
+        content: "hello deda",
+        mode: "free_chat",
+      });
+      // user 落库必须先于上游调用，LLM 故障也不丢孩子的话
+      expect(prisma.message.create.mock.invocationCallOrder[0]).toBeLessThan(
+        llm.completeStream.mock.invocationCallOrder[0],
+      );
+      expect(assistantCall.data).toMatchObject({
+        deviceId: "dev-internal-1",
+        role: "assistant",
+        content: "Hi there",
+        status: "completed",
+        mode: "free_chat",
+      });
+      expect(assistantCall.data.turnId).toBe(userCall.data.turnId);
+      expect(assistantCall.data.rawPayload).toEqual({
+        filler: null,
+        answer: "Hi there",
+      });
+    });
+
+    it("creates the device when the hint is unknown", async () => {
+      prisma.device.findFirst.mockResolvedValue(null);
+      prisma.device.create.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(prisma.device.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ deviceId: "dev-1001" }),
+      });
+    });
+
+    it("matches MAC-like hints case/separator-insensitively", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        user: "AA:BB:CC:DD:EE:FF",
+      };
+      await collect(service.streamReply(req));
+      const where = prisma.device.findFirst.mock.calls[0][0].where;
+      const flat = JSON.stringify(where);
+      expect(flat).toContain("aabbccddeeff");
+      expect(flat).toContain("AA:BB:CC:DD:EE:FF");
+    });
+
+    it("prefers the explicit header over the user field", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest, "dev-header-9"));
+      const where = prisma.device.findFirst.mock.calls[0][0];
+      expect(JSON.stringify(where)).toContain("dev-header-9");
+      expect(JSON.stringify(where)).not.toContain("dev-1001");
+    });
+
+    it("uses DB history instead of client-supplied history when bound", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.message.findMany.mockResolvedValue([
+        {
+          role: "assistant",
+          content: "db-a1-full",
+          rawPayload: { filler: "f1", answer: "db-a1" },
+        },
+        { role: "user", content: "db-u1", rawPayload: null },
+      ]);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [
+          { role: "user", content: "client-u1" },
+          { role: "assistant", content: "client-a1" },
+          { role: "user", content: "hello deda" },
+        ],
+      };
+      await collect(service.streamReply(req));
+      // findMany 返回时间倒序，service 应翻转为正序且剥离 filler
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "hello deda",
+        [
+          { role: "user", content: "db-u1" },
+          { role: "assistant", content: "db-a1" },
+        ],
+        expect.objectContaining({ mode: "free_chat" }),
+      );
+    });
+
+    it("injects the memory prompt block and marks injected on success", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      memories.buildPromptBlock.mockResolvedValue({
+        text: "MEMBLOCK",
+        memoryIds: ["m1", "m2"],
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(memories.buildPromptBlock).toHaveBeenCalledWith(
+        "dev-internal-1",
+        "hello deda",
+      );
+      const callArgs = llm.completeStream.mock.calls[0][0];
+      const systemContents = callArgs.messages
+        .filter((m: { role: string }) => m.role === "system")
+        .map((m: { content: string }) => m.content);
+      expect(systemContents).toContain("MEMBLOCK");
+      expect(memories.markInjected).toHaveBeenCalledWith(["m1", "m2"]);
+    });
+
+    it("extracts memories asynchronously with the previous assistant turn", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.message.findMany.mockResolvedValue([
+        {
+          role: "assistant",
+          content: "prev-full",
+          rawPayload: { filler: null, answer: "prev-answer" },
+        },
+      ]);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(memories.extractAndStore).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deviceId: "dev-internal-1",
+          asrText: "hello deda",
+          previousAssistant: "prev-answer",
+        }),
+      );
+    });
+
+    it("persists the safety pair on L1 block without calling upstream", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.checkL1.mockReturnValue({
+        blocked: true,
+        category: "violence",
+        layer: "L1",
+        matched: "x",
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      expect(prisma.message.create).toHaveBeenCalledTimes(2);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        safetyCategory: "violence",
+        safetyLayer: "L1",
+      });
+    });
+
+    it("marks assistant failed when the upstream fails before first chunk", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockImplementation(async function* () {
+        throw new Error("upstream down");
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks.length).toBe(1);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("failed");
+      expect(memories.markInjected).not.toHaveBeenCalled();
+    });
+
+    it("never touches prisma when anonymous", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(
+        service.streamReply({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
+      expect(prisma.device.findFirst).not.toHaveBeenCalled();
+      expect(prisma.message.create).not.toHaveBeenCalled();
+      expect(memories.buildPromptBlock).not.toHaveBeenCalled();
+      expect(memories.extractAndStore).not.toHaveBeenCalled();
+    });
+  });
+
   describe("service without configured api key", () => {
     it("rejects every token when LLM_ADAPTER_API_KEY is unset", async () => {
       const module: TestingModule = await Test.createTestingModule({
@@ -245,6 +537,8 @@ describe("LlmAdapterModule", () => {
           LlmAdapterService,
           { provide: LlmService, useValue: llm },
           { provide: ChildSafetyService, useValue: childSafety },
+          { provide: ChildMemoriesService, useValue: memories },
+          { provide: PrismaService, useValue: prisma },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
       }).compile();
@@ -366,6 +660,26 @@ describe("LlmAdapterModule", () => {
       expect(res.jsonBody).toMatchObject({
         error: { type: "invalid_request_error" },
       });
+    });
+
+    it("forwards the x-deda-device-id header to the service", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const spy = jest.spyOn(service, "streamReply");
+      const res = makeRes();
+      const req = makeReq(
+        {
+          model: "deda-english-tutor",
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        },
+        `Bearer ${VALID_TOKEN}`,
+      );
+      req.headers["x-deda-device-id"] = "dev-header-9";
+      await callController(req, res);
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: true }),
+        "dev-header-9",
+      );
     });
 
     it("returns aggregated JSON for non-stream requests", async () => {
