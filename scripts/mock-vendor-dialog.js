@@ -1,4 +1,9 @@
 /**
+ * 【DEPRECATED — 备选链路专用】2026-11 起主链路为百度 RTC 直连
+ * （POST /v1/chat/completions，本仓 src/modules/llm-adapter/）。
+ * 本脚本仅在老 vendor WS 链路（降级备份）回归测试时使用；
+ * 新链路请用 scripts/mock-baidu-dialog.js。
+ *
  * 手工联调脚本：模拟机芯厂云连续推 10 轮 ASR 文字（覆盖 edge cases），
  * 真实调用小模型 filler + 大模型 answer，并真实落库。
  * 用法：先启动服务（APP_PORT=3100 npm run start），再 node scripts/mock-vendor-dialog.js
