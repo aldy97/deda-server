@@ -13,6 +13,11 @@ import { VendorTrafficRecorder } from "./traffic-recorder";
 
 /**
  * 机芯厂 ↔ 我方服务器 WebSocket 文字通道
+ *
+ * 【当前状态：备选链路 / backup】2026-11 起主链路切换为百度 RTC 直连
+ * （设备 ⇄ 百度 RTC → OpenAI 兼容回调本服务 POST /v1/chat/completions，
+ * 见 src/modules/llm-adapter/）。本 WS 链路保留作为百度直连不可用时的
+ * 降级备份，不再新增功能；老链路联调脚本见 scripts/mock-vendor-*.js。
  * 事件：
  *   vendor:text:in  - 机芯厂发送 ASR 文字
  *   vendor:text:out - 我方返回 TTS 文字

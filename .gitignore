@@ -45,3 +45,6 @@ lerna-debug.log*
 
 # vendor traffic recorder 录制文件（本地对账用，永不进 git）
 /records/
+
+# 本地资料（立项书/链路图/聊天截图等，永不进 git）
+/local-assets/

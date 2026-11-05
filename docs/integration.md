@@ -77,7 +77,50 @@
 
 前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts` 需按上表提交；英语对话直接提交 `mode=english_chat`，不再进入子模式或教材选择页。
 
-## 机芯厂 WS 流式协议（vendor namespace）
+## 百度 RTC 直连主链路（当前主链路，2026-11 起）
+
+语音对话主链路：**设备 ⇄ 百度 RTC 云（ASR + TTS + 传输）⇄ 本服务 LLM 适配层**。机芯厂（智安芯）只负责机芯/固件与 MQTT 设备管理，不在语音链路上。
+
+```
+设备 ⇄(RTC 音频流) 百度 RTC 云
+                      │ ASR 出文字后 HTTPS 回调
+                      ▼
+        本服务 POST /v1/chat/completions（OpenAI 兼容，Bearer 鉴权）
+        llm-adapter 模块：L1 安全闸 → prompt 组装 → 上游 LLM 流式
+                      │ SSE 流式返回文字
+                      ▼
+        百度 TTS 合成 → RTC 下行 → 设备播报
+
+设备 ⇄(MQTT) 设备管理：电量、音量、版本、睡眠、重启、OTA（协议见机芯厂 MQTT 文档）
+```
+
+- 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"user":"deda-toy","thinking":{"type":"disabled"}}`。
+- 适配层约定：容忍 `llm_eb` 注入的未知 body 字段；`llm_sys` 注入的 system 消息保留在最前，动态 prompt 追加其后；`model` 不校验、原样回显；SSE 帧为 role 帧 → content 增量帧 → `finish_reason:"stop"` → `data: [DONE]`。
+- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份：请求体 `user` 字段（机芯厂约定 = 设备 MAC，重启/烧录/OTA 不变），或显式 header `X-Deda-Device-Id`（优先）；两者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
+- **能力对齐矩阵**（老链路 vendor WS → 新链路 llm-adapter）：
+
+| 能力 | 老链路 | 新链路 | 说明 |
+| --- | --- | --- | --- |
+| L1 显式敏感词拦截 | ✅ | ✅ | 拦截话术走 SSE 兜底，落库含 safetyCategory |
+| L2 语义安全分类 | ✅ | ✅ | emotional_harm 注入共情引导；异常 fail-open |
+| L3 主模型安全系统提示 | ✅ | ✅ | 经 buildEnglishTutorPrompt |
+| 设备识别/建档 | ✅ | ✅ | MAC 归一化，deviceId/macAddress 双列匹配 |
+| 对话落库（filler/answer 边界） | ✅ | ✅ | rawPayload 同构 |
+| 长期记忆（提取/注入/markInjected） | ✅ | ✅ | 仅 free_chat 注入，同老链路口径 |
+| 意图路由/模式切换/会话 TTL | ✅ | ✅ | 共享 ConversationSessionService |
+| 哄睡语音配置 | ✅ | ✅ | 共享 SleepVoiceConfigService 确定性短链路 |
+| 冒险状态机/每日门禁/审计事件 | ✅ | ✅ | 共享 AdventureService 单例 |
+| filler 打哈哈首响 | ✅ | ✅ | SSE 前导 chunk，LLM_ADAPTER_FILLER=false 可关 |
+| 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
+| 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
+| 主动播报（提醒/家长推送） | ✅ WS | 待确认 | 走百度服务端 API（interrupt/extra_msg），AK/SK 账号归属待与机芯厂确认 |
+
+- 延时预算：百度官方口径「第三方模型首句延时 + 约 1.0s」；立项书验收甲方处理段 ≤0.8s，因此上游调用强制 `thinking: disabled` + 流式。
+- 联调脚本：`scripts/simulate-baidu-llm.sh`（冒烟）、`scripts/mock-baidu-dialog.js`（17 轮 edge case + 意图/哄睡/冒险场景，`DEVICE_ID` 触发设备链路）。
+
+## 机芯厂 WS 流式协议（vendor namespace）【备选链路 / backup】
+
+> **状态**：2026-11 起降级为备选链路。仅当百度 RTC 直连不可用时启用；不再新增功能。以下内容为老链路契约，原样保留。
 
 语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端双模型流式生成 → **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
 
@@ -105,14 +148,26 @@
 - 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
 - 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
 
-## 儿童安全三层防护（vendor 链路）
+## 儿童安全三层防护
 
-- L1 正则闸（`src/modules/vendor/child-safety.service.ts`）：显式敏感词（色情/自杀自残/血腥暴力，中英文）零延迟拦截，优先于冒险状态机与一切 LLM 调用；刻意不收裸「杀/打/枪/刀」等字样，孩子的攻击性气话（如「我要杀了我的弟弟」）不在此拦截。
-- L2 小模型安全分类：每轮一次 small model 调用（与意图路由并行），标签 `safe / sexual / violence / self_harm / emotional_harm`；前三者拦截，`emotional_harm`（情绪气话）放行并向大模型注入共情引导 system 消息；分类失败 fail-open 放行，由 L3 兜底。
-- L3 prompt 硬约束（`llm.service.ts` `buildEnglishTutorPrompt`）：全模式常驻儿童安全规则（不生成/不复述敏感内容、温和转移、气话先共情）。
-- 拦截回复：不调 LLM，直接播报类别兜底话术（self_harm 引导告诉家长/信任的大人）；走既有 answer chunk 通道。
-- 落库：拦截轮 user 原文 + assistant 兜底话术，`mode=free_chat`，assistant `rawPayload` 含 `safetyCategory / safetyLayer`，供家长端敏感事件时间线与告警（家长端展示与推送为后续工作）。
-- 人工验收：`scripts/test-child-safety.sh`（真实链路，需本地后端 + 真实 LLM key，会写入测试对话，不自动运行）。
+三层防线（L1/L2/L3）的职责划分：
+
+| 层 | 机制 | 拦截什么 | 延迟 | 实现 |
+|---|---|---|---|---|
+| L1 | 正则关键词闸 | 字面露骨词（色情/自杀自残/血腥暴力，中英文）；**刻意不收**裸「杀/打/枪/刀」，避免误伤气话 | 零延迟 | `child-safety.service.ts` `checkL1` |
+| L2 | 小模型语义分类 | 绕过字面的敏感表达（性好奇暗示、轻生信号、拼音/谐音变体）；把攻击性气话识别为 `emotional_harm` 放行 | 一次小模型调用（约 200ms） | `child-safety.service.ts` `classifyL2` |
+| L3 | 大模型 system prompt 硬约束 | 前两层失效后的兜底：不生成/不复述敏感内容、温和转移、气话先共情 | 零额外延迟 | `llm.service.ts` `buildEnglishTutorPrompt` 常驻 |
+
+为什么 L1 不够：孩子会语义绕过（「大人关门以后在干什么呀」无任何敏感词）、变体绕过（拼音/谐音/中英混拼），且关键词无法区分真暴力与情绪气话——L1 收「杀」会误伤气话，不收则漏真暴力，这个分寸只能靠 L2 的语义判断。
+
+**各链路接入状态**：
+
+- 百度 RTC 主链路（llm-adapter）：**L1 + L2 + L3 已全部接入**（L1/L2 拦截后均以 SSE 返回兜底话术；emotional_harm 注入共情引导 system 消息；L2 异常 fail-open）。设备绑定链路落库并注入长期记忆；匿名链路（无设备标识）不落库。
+- vendor WS 备选链路：L1/L2/L3 全量在线，落库与安全标注（`safetyCategory/safetyLayer`）完整，见下方老链路说明。
+
+老链路（vendor）细节：拦截轮 user 原文 + assistant 兜底话术落库，`mode=free_chat`，assistant `rawPayload` 含 `safetyCategory / safetyLayer`，供家长端敏感事件时间线与告警（家长端展示与推送为后续工作）。
+
+- 人工验收：`scripts/test-child-safety.sh`（主链路版：真实 HTTP + 真实 LLM，打 `/v1/chat/completions`，需 `ADAPTER_KEY`，不做落库断言；老链路落库与安全标注验收随备选链路保留）。
 
 ## “更懂 TA”统计契约
 
