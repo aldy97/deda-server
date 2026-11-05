@@ -25,6 +25,7 @@ import { AdventureModule } from "./modules/adventure/adventure.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
+import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.mo
     FeedbacksModule,
     SleepConfigsModule,
     SleepSchedulerModule,
+    LlmAdapterModule,
   ],
 })
 export class AppModule {}

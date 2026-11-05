@@ -1,4 +1,9 @@
 /**
+ * 【DEPRECATED — 备选链路专用】2026-11 起主链路为百度 RTC 直连
+ * （POST /v1/chat/completions，本仓 src/modules/llm-adapter/）。
+ * 本脚本仅在老 vendor WS 链路（降级备份）回归测试时使用；
+ * 新链路冒烟请用 scripts/simulate-baidu-llm.sh。
+ *
  * 手工联调脚本：模拟机芯厂云通过入站 WS 推一条用户 ASR 文字，
  * 走完整链路（小模型 filler + 大模型 answer），等待 vendor:text:out 应答。
  * 用法：先启动服务（npm run start），再 node scripts/mock-vendor-text-in.js

@@ -14,6 +14,12 @@ import {
 
 @ApiTags("机芯厂对接")
 @Controller("vendor")
+/**
+ * 【当前状态：备选链路 / backup】2026-11 起语音对话主链路为百度 RTC
+ * 直连（见 src/modules/llm-adapter/，POST /v1/chat/completions）。
+ * 本控制器（含 POST /vendor/text）保留作为百度直连失效时的降级备份，
+ * 不再新增功能。
+ */
 export class VendorController {
   constructor(private readonly vendorService: VendorService) {}
 
