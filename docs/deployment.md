@@ -72,7 +72,7 @@ chmod 600 /opt/deda/env/.env.*
 
 | Secret | 说明 |
 | --- | --- |
-| `ACR_REGISTRY` | 如 `registry.cn-hangzhou.aliyuncs.com` |
+| `ACR_REGISTRY` | 如 `registry.cn-shanghai.aliyuncs.com` |
 | `ACR_NAMESPACE` | ACR 命名空间 |
 | `ACR_USERNAME` / `ACR_PASSWORD` | ACR 访问凭证 |
 | `ECS_HOST` | ECS 公网 IP |
