@@ -2,31 +2,65 @@ version: '3.8'
 
 # 基础编排：基础设施 + app 服务
 # 本地开发使用 docker-compose.override.yml 覆盖
+# staging 使用 docker-compose.staging.yml 覆盖
 # 生产环境使用 docker-compose.prod.yml 覆盖
+#
+# 服务器部署时通过 --env-file 注入对应环境变量文件：
+#   docker compose --env-file env/.env.staging -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
+#   docker compose --env-file env/.env.prod    -f docker/docker-compose.yml -f docker/docker-compose.prod.yml    up -d
 
 services:
   app:
+    # 服务器部署拉取 ACR 镜像；本地可退回 build（docker compose build app）
+    image: ${ACR_IMAGE:-deda-server}:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: deda-server
     restart: always
-    ports:
-      - '3000:3000'
+    # 端口由各环境 override 文件声明（compose 对 ports 是并集合并，不能放 base）
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
+      APP_NAME: ${APP_NAME:-deda-server}
       APP_PORT: 3000
-      DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/deda?schema=public
-      REDIS_URL: redis://redis:6379/0
-      # MQTT broker 地址；若使用自管 broker，可改为 mqtt://mqtt:1883
-      MQTT_URL: ${MQTT_URL}
-      MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
-      # 厂商 API 基地址，部署时替换
-      MANUFACTURER_BASE_URL: ${MANUFACTURER_BASE_URL}
-      # 微信小程序配置，部署时替换
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/${DB_NAME:-deda}?schema=public
+      REDIS_URL: redis://redis:6379/${REDIS_DB:-0}
+      # 微信小程序
       WECHAT_APPID: ${WECHAT_APPID}
       WECHAT_SECRET: ${WECHAT_SECRET}
+      # JWT
       JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      # CORS
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      # 机芯厂
+      MANUFACTURER_BASE_URL: ${MANUFACTURER_BASE_URL}
+      MANUFACTURER_API_KEY: ${MANUFACTURER_API_KEY:-}
+      MANUFACTURER_WEBHOOK_SECRET: ${MANUFACTURER_WEBHOOK_SECRET:-}
+      MQTT_URL: ${MQTT_URL}
+      MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
+      # LLM 适配层与主模型
+      LLM_ADAPTER_API_KEY: ${LLM_ADAPTER_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.deepseek.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-flash}
+      # 首响小模型（DashScope）
+      SMALL_LLM_BASE_URL: ${SMALL_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      SMALL_LLM_API_KEY: ${SMALL_LLM_API_KEY:-}
+      SMALL_LLM_MODEL: ${SMALL_LLM_MODEL:-qwen-flash}
+      LLM_STREAM_ENABLED: ${LLM_STREAM_ENABLED:-true}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-30000}
+      # 机芯厂回复上传
+      VENDOR_WS_UPLOAD_URL: ${VENDOR_WS_UPLOAD_URL:-}
+      VENDOR_UPLOAD_ACK_TIMEOUT_MS: ${VENDOR_UPLOAD_ACK_TIMEOUT_MS:-5000}
+      # 流量录制
+      VENDOR_TRAFFIC_RECORD: ${VENDOR_TRAFFIC_RECORD:-off}
+      VENDOR_TRAFFIC_RECORD_DIR: ${VENDOR_TRAFFIC_RECORD_DIR:-records}
+      VENDOR_TRAFFIC_RECORD_RETENTION_DAYS: ${VENDOR_TRAFFIC_RECORD_RETENTION_DAYS:-7}
+      # 哄睡调度
+      SLEEP_SCHEDULER_ENABLED: ${SLEEP_SCHEDULER_ENABLED:-false}
     depends_on:
       - postgres
       - redis
@@ -40,11 +74,10 @@ services:
     environment:
       POSTGRES_USER: deda
       POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: deda
+      POSTGRES_DB: ${DB_NAME:-deda}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - '5432:5432'
+    # 端口见各 override（回环绑定）
     networks:
       - deda-network
 
@@ -54,8 +87,7 @@ services:
     restart: always
     volumes:
       - redis-data:/data
-    ports:
-      - '6379:6379'
+    # 端口见各 override（回环绑定）
     networks:
       - deda-network
 

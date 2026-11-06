@@ -1,0 +1,38 @@
+version: '3.8'
+
+# staging 环境覆盖配置
+# 用法（服务器上）：
+#   docker compose --env-file env/.env.staging \
+#     -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
+#
+# 与生产同机部署，通过容器名 / 端口 / 数据卷完全隔离：
+#   - app 对公网暴露 3001（备案期间走 http://ECS公网IP:3001）
+#   - 独立 postgres（回环 5433）与 redis（回环 6380），杜绝与生产串库
+#   - 不启动 nginx（备案完成前用不到域名反代）
+
+services:
+  app:
+    container_name: deda-server-staging
+    restart: always
+    ports:
+      - '3001:3000'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 768M
+
+  postgres:
+    container_name: deda-postgres-staging
+    ports:
+      - '127.0.0.1:5433:5432'
+
+  redis:
+    container_name: deda-redis-staging
+    ports:
+      - '127.0.0.1:6380:6379'
+
+  nginx:
+    # staging 不部署 nginx；profiles 使其不会被 up -d 自动拉起
+    profiles:
+      - disabled-in-staging

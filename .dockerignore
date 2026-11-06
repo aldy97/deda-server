@@ -1,0 +1,29 @@
+# 版本控制与 IDE
+.git
+.github
+.vscode
+.husky
+
+# 依赖与构建产物（镜像内重新安装/构建）
+node_modules
+dist
+coverage
+
+# 密钥与本地环境：严禁打入镜像
+.env
+.env.*
+!.env.example
+
+# 本地运行产物
+logs
+records
+local-assets
+*.log
+
+# 文档与临时分析文件（构建不需要）
+docs
+*.md
+bug-report.txt
+frontend-feedback.txt
+interface-check.log
+mode-names.png
