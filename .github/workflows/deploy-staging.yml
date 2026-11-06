@@ -1,0 +1,55 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+# 同一环境串行部署，避免并发部署互相踩踏
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t "deda-server:staging-${{ github.sha }}" .
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ECS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.ECS_HOST }}" >> ~/.ssh/known_hosts
+
+      # 不用镜像仓库：构建产物经 SSH 直传 ECS 并加载
+      - name: Transfer image to ECS
+        run: |
+          docker save "deda-server:staging-${{ github.sha }}" | gzip | \
+            ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "gunzip | docker load"
+
+      - name: Sync compose files to ECS
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "mkdir -p /opt/deda"
+          scp -r docker nginx "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}:/opt/deda/"
+
+      - name: Deploy on ECS
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<EOF
+          set -e
+          cd /opt/deda
+          docker tag deda-server:staging-${{ github.sha }} deda-server:staging-latest
+          export IMAGE_TAG="staging-${{ github.sha }}"
+          docker compose -p deda-staging --env-file env/.env.staging \
+            -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
+          EOF
+
+      - name: Health check
+        run: |
+          curl -fsS --retry 8 --retry-delay 5 --retry-all-errors \
+            "http://${{ secrets.ECS_HOST }}:3001/api/docs" > /dev/null

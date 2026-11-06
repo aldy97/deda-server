@@ -1,0 +1,56 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # GitHub Environments：如需「人工确认后发布」，在仓库 Settings → Environments
+    # → production 中开启 Required reviewers 即可，无需改动本文件
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t "deda-server:prod-${{ github.sha }}" .
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ECS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.ECS_HOST }}" >> ~/.ssh/known_hosts
+
+      # 不用镜像仓库：构建产物经 SSH 直传 ECS 并加载
+      - name: Transfer image to ECS
+        run: |
+          docker save "deda-server:prod-${{ github.sha }}" | gzip | \
+            ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "gunzip | docker load"
+
+      - name: Sync compose files to ECS
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "mkdir -p /opt/deda"
+          scp -r docker nginx "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}:/opt/deda/"
+
+      - name: Deploy on ECS
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<EOF
+          set -e
+          cd /opt/deda
+          docker tag deda-server:prod-${{ github.sha }} deda-server:prod-latest
+          export IMAGE_TAG="prod-${{ github.sha }}"
+          docker compose -p deda-prod --env-file env/.env.prod \
+            -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+          EOF
+
+      - name: Health check (loopback on ECS)
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+            "curl -fsS --retry 8 --retry-delay 5 --retry-all-errors http://127.0.0.1:3000/api/docs > /dev/null"

@@ -1,17 +1,36 @@
 version: '3.8'
 
 # 生产环境覆盖配置
-# 用法：docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+# 用法（服务器上）：
+#   docker compose --env-file env/.env.prod \
+#     -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# 备案完成前：app 仅绑定回环地址，生产不对外提供服务。
+# 备案完成后：nginx 监听 80/443，经 nginx.prod.conf 反代到 app。
 
 services:
   app:
     container_name: deda-server-prod
     restart: always
+    ports:
+      # 仅回环：健康检查与备案后 nginx 反代走内网，公网不直接暴露
+      - '127.0.0.1:3000:3000'
     deploy:
       resources:
         limits:
           cpus: '1'
           memory: 1G
+
+  postgres:
+    container_name: deda-postgres-prod
+    ports:
+      # 仅回环：服务器上排查/备份用，不对公网暴露
+      - '127.0.0.1:5432:5432'
+
+  redis:
+    container_name: deda-redis-prod
+    ports:
+      - '127.0.0.1:6379:6379'
 
   nginx:
     container_name: deda-nginx-prod
@@ -19,6 +38,9 @@ services:
     ports:
       - '80:80'
       - '443:443'
+    # 备案后 nginx 需要反代 staging 子域名时，经宿主回环访问 staging app(3001)
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     volumes:
       - ../nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
