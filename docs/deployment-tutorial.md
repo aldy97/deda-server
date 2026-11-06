@@ -1,7 +1,7 @@
 # 零基础部署手把手教程（deda-server → 阿里云 ECS）
 
 > 适合对象：第一次做部署和后端运维的开发者。
-> 读完做完大约需要 **1.5～2 小时**。每一步都有「验证方法」，通过后再走下一步。
+> 读完做完大约需要 **1～1.5 小时**。每一步都有「验证方法」，通过后再走下一步。
 >
 > 本文是操作手册；架构原理和命令速查见同目录 `deployment.md`。
 
@@ -10,32 +10,29 @@
 ## 0. 先搞懂这条链路（3 分钟）
 
 ```
-你的电脑                    GitHub                        阿里云
-┌──────────┐   git push   ┌──────────────┐  构建镜像   ┌─────────────┐
-│ 写代码    │ ───────────▶ │ Actions 机器人 │ ─────────▶ │ ACR 镜像仓库 │
-└──────────┘              └──────┬───────┘            └──────▲──────┘
-                                 │ SSH 远程执行命令            │ 拉取镜像
-                                 ▼                           │
-                          ┌─────────────────────────────────┴───┐
-                          │ ECS 服务器（跑 Docker 容器）          │
-                          │  deda-server-staging → 端口 3001      │
-                          │  deda-server-prod    → 端口 3000      │
-                          └──────────────────────────────────────┘
+你的电脑                    GitHub                          阿里云
+┌──────────┐   git push   ┌──────────────┐   SSH 直传镜像  ┌────────────────┐
+│ 写代码    │ ───────────▶ │ Actions 机器人 │ ─────────────▶ │ ECS 服务器      │
+└──────────┘              │ （构建镜像）   │   + 远程执行命令 │ （跑 Docker 容器）│
+                          └──────────────┘                │  staging → 3001 │
+                                                          │  prod    → 3000 │
+                                                          └────────────────┘
 ```
 
-你只需要记住 4 个名词：
+你只需要记住 3 个名词：
 
 | 名词 | 是什么 | 类比 |
 | --- | --- | --- |
 | **ECS** | 你买的那台阿里云服务器 | 一台永远开着的远程电脑 |
 | **Docker / 镜像 / 容器** | 把代码+依赖打包成一个「盒子」运行 | 镜像是安装包，容器是运行中的程序 |
-| **ACR** | 阿里云的镜像仓库 | 镜像的「网盘」 |
 | **GitHub Actions** | GitHub 提供的自动化机器人 | 你一 push 代码，它就自动干活 |
 
-** secrets（密钥）分两边放**：
+> 注：本方案**不使用镜像仓库**——Actions 构建完镜像后通过 SSH 直接传给 ECS（`docker save` → `docker load`）。因为 ACR 个人版要求个人实名认证账号，企业认证账号无法开通；单服务器场景下直传更简单、 Secrets 更少。
+
+**密钥分两边放**：
 
 - 服务器上：`/opt/deda/env/.env.staging` 和 `.env.prod`（数据库密码、微信密钥、LLM key 等，只存在服务器上）
-- GitHub 上：仓库 Secrets（Actions 机器人登录 ACR 和 SSH 登录 ECS 用的凭证）
+- GitHub 上：仓库 Secrets（Actions 机器人 SSH 登录 ECS 用的凭证，只有 3 个）
 
 ---
 
@@ -43,12 +40,18 @@
 
 确认你手上有这些东西：
 
-- [ ] 阿里云账号，已买 ECS（4G 内存），**记下 ECS 的公网 IP**（控制台首页能看到）
-- [ ] ECS 的操作系统是 **Ubuntu 22.04** 或 Alibaba Cloud Linux 3（如果还没装系统或想重装，控制台 → 实例 → 更换操作系统，选 Ubuntu 22.04 64位）
+- [ ] 阿里云账号，ECS 已购买（你的：华东2上海，2核4G，Ubuntu 22.04，公网 IP `8.133.236.127`）
+- [ ] ECS 的登录密钥文件 `~/.ssh/_valleyletters.pem`（✅ 已确认可登录）
 - [ ] 你的 GitHub 账号对 `aldy97/deda-server` 有管理员权限（你是 owner，有）
 - [ ] 本地 `.env` 文件里的真实密钥（DeepSeek API Key、微信小程序 AppID/Secret 等，等下要抄到服务器上）
 
-> ⚠️ 重装系统会清空 ECS 数据。刚买的新机器无所谓。
+> 后文约定：**`[ECS]`** 开头表示在服务器上执行（SSH 会话里，提示符是 `root@...:~#`），**`[本地]`** 表示在你 Mac 上执行（提示符是 `xiong@...%`）。
+
+**登录服务器**（`[本地]`）：
+
+```bash
+ssh -i ~/.ssh/_valleyletters.pem root@8.133.236.127
+```
 
 ---
 
@@ -71,52 +74,44 @@ ECS 有一堵「防火墙」叫**安全组**，默认只开了 22 端口（SSH�
 
 ---
 
-## 3. 第一次 SSH 登录服务器（5 分钟）
+## 3. 在 ECS 上安装 Docker（10 分钟）
 
-在你**自己电脑**的终端（Mac 的「终端」App）执行：
-
-```bash
-ssh root@你的ECS公网IP
-```
-
-- 如果买的时候设了密码，输入密码即可
-- 如果买的是密钥登录，用 `ssh -i 你的密钥.pem root@你的ECS公网IP`
-- 第一次连接会问 `Are you sure you want to continue connecting?`，输入 `yes`
-
-看到命令行提示符变成 `root@iZxxxxxZ:~#` 之类的，就成功了。
-
-> 后文约定：**`[ECS]`** 开头表示在服务器上执行，**`[本地]`** 表示在你 Mac 上执行。
-
----
-
-## 4. 在 ECS 上安装 Docker（10 分钟）
+> ⚠️ **不要用** `get.docker.com` 官方脚本——国内服务器连不上。用下面的阿里云镜像源。
 
 `[ECS]` 依次执行：
 
 ```bash
-# 1. 安装 Docker（官方一键脚本，Ubuntu 和 Alibaba Cloud Linux 都支持）
-curl -fsSL https://get.docker.com | sh
+# 1. 添加阿里云 Docker 软件源
+curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-# 2. 启动 Docker 并设置开机自启
-systemctl enable --now docker
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://mirrors.aliyun.com/docker-ce/linux/ubuntu jammy stable" > /etc/apt/sources.list.d/docker.list
+
+apt-get update
+
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+> 安装中途可能弹出紫色界面的「服务重启确认」（Package configuration），一路回车即可。
+
+```bash
+# 2. 配置镜像加速器（否则拉 postgres/redis 镜像会很慢）
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": ["https://e6bgth1z.mirror.aliyuncs.com"]
+}
+EOF
+systemctl restart docker
 
 # 3. 验证
 docker version
 docker compose version
+docker info | grep -A1 "Registry Mirrors"
 ```
 
-✅ **验证**：`docker version` 显示 Client 和 Server 两部分版本号；`docker compose version` 显示 `v2.x.x`。
+✅ **验证**：`docker version` 显示 Client 和 Server 两部分版本号；`docker compose version` 显示 `v2.x.x`；最后一条显示加速器地址。
 
-如果 `docker compose version` 报错找不到命令（老系统可能没装插件）：
-
-```bash
-# Ubuntu
-apt-get install -y docker-compose-plugin
-# Alibaba Cloud Linux
-dnf install -y docker-compose-plugin
-```
-
-**创建部署目录并退出 root**（后续用普通用户更安全，也可全程用 root，教程按 root 写）：
+**创建部署目录**：
 
 ```bash
 mkdir -p /opt/deda/env /opt/deda/backups
@@ -124,30 +119,9 @@ mkdir -p /opt/deda/env /opt/deda/backups
 
 ---
 
-## 5. 开通 ACR 镜像仓库（10 分钟）
+## 4. 生成 GitHub Actions 专用的 SSH 密钥（5 分钟）
 
-1. 打开[容器镜像服务控制台](https://cr.console.aliyun.com)，**左上角地域选「华东2（上海）」**（与 ECS 同地域，推拉镜像快）
-2. 选择**个人实例**（免费）→ 创建实例
-3. 首次使用会要求设置 **Registry 登录密码**——设置后**记下来**，这就是后面的 `ACR_PASSWORD`
-4. 进入实例 → 「命名空间」→ 创建命名空间，比如叫 `deda`（这就是 `ACR_NAMESPACE`）
-5. 「访问凭证」页面能看到：
-   - 登录地址 `registry.cn-shanghai.aliyuncs.com`（这就是 `ACR_REGISTRY`）
-   - 登录用户名（这就是 `ACR_USERNAME`，通常是你的阿里云账号名）
-
-> 地域建议和 ECS 选同一个（比如都在杭州），推送/拉取速度快。镜像仓库不需要手动创建，第一次推送会自动生成。
-
-✅ **验证**：`[ECS]` 上执行（把地址换成你页面上的）：
-
-```bash
-docker login --username=你的用户名 registry.cn-shanghai.aliyuncs.com
-# 输入刚才设置的 Registry 密码，看到 Login Succeeded 即可
-```
-
----
-
-## 6. 生成 GitHub Actions 专用的 SSH 密钥（5 分钟）
-
-Actions 机器人需要一个「钥匙」来登录你的 ECS。**不要**复用你自己的钥匙，单独生成一对：
+Actions 机器人需要一个「钥匙」来登录你的 ECS。**不要**复用你自己的 `_valleyletters.pem`，单独生成一对：
 
 `[本地]` Mac 终端执行：
 
@@ -162,17 +136,17 @@ cat ~/.ssh/deda-github-actions.pub
 cat ~/.ssh/deda-github-actions
 ```
 
-`[ECS]` 把**公钥**（`.pub` 那一行）追加到服务器：
+`[ECS]` 把**公钥**（`.pub` 输出的那一整行）追加到服务器：
 
 ```bash
 echo "把公钥完整粘贴到这里" >> ~/.ssh/authorized_keys
 ```
 
-✅ **验证**：`[本地]` 执行 `ssh -i ~/.ssh/deda-github-actions root@你的ECS公网IP`，能免密登录就成功，然后 `exit` 退出。
+✅ **验证**：`[本地]` 执行 `ssh -i ~/.ssh/deda-github-actions root@8.133.236.127`，能免密登录就成功，然后 `exit` 退出。
 
 ---
 
-## 7. 在 ECS 上创建环境变量文件（15 分钟）
+## 5. 在 ECS 上创建环境变量文件（15 分钟）
 
 这是最「有料」的一步——把密钥填进服务器。创建两个文件，内容模板如下。
 
@@ -190,7 +164,8 @@ WECHAT_SECRET=你的AppSecret
 
 # 机芯厂（没有就先占位）
 MANUFACTURER_BASE_URL=https://api.manufacturer.example.com
-MQTT_URL=mqtt://你的MQTT地址:1883
+# MQTT 暂无 broker：填占位地址，应用正常启动，设备状态推送链路待接入机芯厂后再改
+MQTT_URL=mqtt://127.0.0.1:1883
 # staging 用独立 topic 前缀，避免和生产串消息
 MQTT_STATUS_TOPIC=staging/zhianxin/event/report
 
@@ -218,76 +193,66 @@ chmod 600 /opt/deda/env/.env.staging /opt/deda/env/.env.prod
 
 ---
 
-## 8. 配置 GitHub Secrets（10 分钟）
+## 6. 配置 GitHub Secrets（5 分钟）
 
-这些密钥告诉 Actions 机器人「怎么登录 ACR」和「怎么登录 ECS」。
+这些密钥告诉 Actions 机器人「怎么登录 ECS」。只需要 **3 个**。
 
 1. 浏览器打开 `https://github.com/aldy97/deda-server/settings/secrets/actions`
-2. 点 **New repository secret**，逐个添加下面 7 个：
+2. 点 **New repository secret**，逐个添加：
 
-| Name | 值从哪来 |
+| Name | 值 |
 | --- | --- |
-| `ACR_REGISTRY` | 第 5 步 ACR 访问凭证页的地址，如 `registry.cn-shanghai.aliyuncs.com` |
-| `ACR_NAMESPACE` | 第 5 步创建的命名空间，如 `deda` |
-| `ACR_USERNAME` | 第 5 步的用户名 |
-| `ACR_PASSWORD` | 第 5 步设置的 Registry 密码 |
-| `ECS_HOST` | ECS 公网 IP |
-| `ECS_USER` | `root`（如果全程用 root） |
-| `ECS_SSH_KEY` | 第 6 步**私钥**的全部内容（`-----BEGIN` 到 `END` 整段，多行直接粘贴） |
+| `ECS_HOST` | `8.133.236.127` |
+| `ECS_USER` | `root` |
+| `ECS_SSH_KEY` | 第 4 步**私钥**的全部内容（`-----BEGIN` 到 `END` 整段，多行直接粘贴） |
 
-✅ **验证**：Secrets 列表里能看到 7 个条目（值本身永远不可见，这是正常的）。
+✅ **验证**：Secrets 列表里能看到 3 个条目（值本身永远不可见，这是正常的）。
 
 ---
 
-## 9. 第一次部署：merge 到 staging（15 分钟）
+## 7. 第一次部署：merge 到 staging（15 分钟）
 
 现在链路全部就位，让流水线跑起来。
 
-### 9.1 推送部署分支并开 PR
+### 7.1 开 PR
 
-`[本地]` 在仓库目录执行：
+部署分支 `feat/deploy-pipeline` 已推送到远端。打开 GitHub 仓库页面 → Pull requests → New pull request：
 
-```bash
-# 确认在部署分支上（feat/deploy-pipeline，代码已 commit）
-git push -u origin feat/deploy-pipeline
-```
+- base: `staging` ← compare: `feat/deploy-pipeline`
+- 点 Create pull request
 
-然后打开 GitHub 仓库页面 → 会出现「Compare & pull request」提示 → 点它：
-
-- **base 分支确认是 `staging`**（因为默认分支已改成 staging，通常自动就是）
-- 标题随意，点 Create pull request
-
-### 9.2 等 CI 变绿，然后合并
+### 7.2 等 CI 变绿，然后合并
 
 - PR 页面下方会自动跑 `ci` 检查（lint + 编译 + 单测 + e2e，约几分钟）
 - 绿色 ✅ 后点 **Merge pull request** → Confirm
 - 如果红了，点 Details 看日志，把报错发给 Kimi 分析
 
-### 9.3 观察自动部署
+### 7.3 观察自动部署
 
 合并后，仓库 **Actions** 标签页会出现 `Deploy Staging` 运行记录，点进去看它干活：
 
-1. Build and push image（构建镜像推 ACR，第一次较慢，5~10 分钟）
-2. Sync compose files to ECS
-3. Deploy on ECS（服务器拉镜像、起容器）
-4. Health check（访问 `http://你的IP:3001/api/docs`）
+1. Build image（构建镜像，第一次较慢，5~10 分钟）
+2. Transfer image to ECS（镜像经 SSH 直传服务器，1~3 分钟）
+3. Sync compose files to ECS
+4. Deploy on ECS（服务器起容器，自动跑数据库 migration）
+5. Health check（访问 `http://8.133.236.127:3001/api/docs`）
 
 全绿 = 部署成功。
 
-✅ **最终验证**：浏览器打开 `http://你的ECS公网IP:3001/api/docs`，能看到 Swagger 接口文档页面。🎉
+✅ **最终验证**：浏览器打开 `http://8.133.236.127:3001/api/docs`，能看到 Swagger 接口文档页面。🎉
 
 **如果 Deploy Staging 红了**，按顺序排查：
 
 | 报错位置 | 大概率原因 |
 | --- | --- |
-| Login to ACR | `ACR_USERNAME`/`ACR_PASSWORD` 填错 |
-| Setup SSH / Sync | `ECS_SSH_KEY` 没粘全，或第 6 步公钥没加到服务器 |
+| Build image | 代码编译问题；把日志发 Kimi |
+| Setup SSH / Transfer / Sync | `ECS_SSH_KEY` 没粘全，或第 4 步公钥没加到服务器 |
 | Deploy on ECS | 服务器上 `.env.staging` 缺变量；服务器上手动跑 `docker compose ... config` 看报错 |
 | Health check | ECS 安全组没放行 3001；或容器挂了，`[ECS]` 上 `docker logs deda-server-staging` 看日志 |
 
 ---
 
-## 10. 发布到生产：staging → main（10 分钟）
+## 8. 发布到生产：staging → main（10 分钟）
 
 staging 验证没问题后：
 
@@ -307,14 +272,14 @@ docker ps   # 应该看到 deda-server-prod、deda-postgres-prod、deda-redis-pr
 
 ---
 
-## 11. 日常工作流（以后每天只用记住这个）
+## 9. 日常工作流（以后每天只用记住这个）
 
 ```
 写代码：git checkout -b feat/新功能 staging
    ↓
 提 PR 到 staging（默认就是）→ CI 绿 → 合并 → 自动部署 staging
    ↓
-浏览器/小程序开发工具访问 http://IP:3001 验证
+浏览器/小程序开发工具访问 http://8.133.236.127:3001 验证
    ↓
 攒一批后，开 staging→main 的 PR → 合并 → 自动部署生产
 ```
@@ -326,7 +291,7 @@ docker ps   # 应该看到 deda-server-prod、deda-postgres-prod、deda-redis-pr
 docker logs -f deda-server-staging
 docker logs -f deda-server-prod
 
-# 回滚到上一个版本（把 <旧sha> 换成 commit 号前 7 位）
+# 回滚到上一个版本（先 docker images | grep deda-server 找到旧 tag，把 <旧sha> 换成 commit 号前 7 位）
 cd /opt/deda
 IMAGE_TAG=prod-<旧sha> docker compose -p deda-prod --env-file env/.env.prod \
   -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d app
@@ -337,7 +302,7 @@ docker image prune -a
 
 ---
 
-## 12. 配置数据库每日备份（10 分钟，建议做）
+## 10. 配置数据库每日备份（10 分钟，建议做）
 
 1. 开通阿里云 **OSS**（对象存储），创建一个 Bucket，如 `deda-backup`（私有读写）
 2. `[ECS]` 安装 ossutil：
@@ -361,7 +326,7 @@ crontab -e
 
 ---
 
-## 13. 名词速查 & 求助姿势
+## 11. 名词速查 & 求助姿势
 
 遇到问题时，把以下三样发给 Kimi 就能快速定位：
 

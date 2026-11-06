@@ -10,9 +10,6 @@ concurrency:
   group: deploy-staging
   cancel-in-progress: false
 
-env:
-  IMAGE: ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/deda-server
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -20,18 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to ACR
-        run: |
-          echo "${{ secrets.ACR_PASSWORD }}" | docker login \
-            --username="${{ secrets.ACR_USERNAME }}" --password-stdin ${{ secrets.ACR_REGISTRY }}
-
-      - name: Build and push image
-        run: |
-          docker build -f docker/Dockerfile \
-            -t "$IMAGE:staging-${{ github.sha }}" \
-            -t "$IMAGE:staging-latest" .
-          docker push "$IMAGE:staging-${{ github.sha }}"
-          docker push "$IMAGE:staging-latest"
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t "deda-server:staging-${{ github.sha }}" .
 
       - name: Setup SSH
         run: |
@@ -39,6 +26,12 @@ jobs:
           echo "${{ secrets.ECS_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.ECS_HOST }}" >> ~/.ssh/known_hosts
+
+      # 不用镜像仓库：构建产物经 SSH 直传 ECS 并加载
+      - name: Transfer image to ECS
+        run: |
+          docker save "deda-server:staging-${{ github.sha }}" | gzip | \
+            ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "gunzip | docker load"
 
       - name: Sync compose files to ECS
         run: |
@@ -50,11 +43,8 @@ jobs:
           ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<EOF
           set -e
           cd /opt/deda
-          echo "${{ secrets.ACR_PASSWORD }}" | docker login \
-            --username="${{ secrets.ACR_USERNAME }}" --password-stdin ${{ secrets.ACR_REGISTRY }}
+          docker tag deda-server:staging-${{ github.sha }} deda-server:staging-latest
           export IMAGE_TAG="staging-${{ github.sha }}"
-          docker compose -p deda-staging --env-file env/.env.staging \
-            -f docker/docker-compose.yml -f docker/docker-compose.staging.yml pull app
           docker compose -p deda-staging --env-file env/.env.staging \
             -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
           EOF

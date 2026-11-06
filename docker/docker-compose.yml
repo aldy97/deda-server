@@ -11,8 +11,8 @@ version: '3.8'
 
 services:
   app:
-    # 服务器部署拉取 ACR 镜像；本地可退回 build（docker compose build app）
-    image: ${ACR_IMAGE:-deda-server}:${IMAGE_TAG:-latest}
+    # 部署时镜像由 CI 经 SSH 直传并在服务器上 docker load；本地可退回 build（docker compose build app）
+    image: deda-server:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile

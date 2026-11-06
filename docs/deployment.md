@@ -9,9 +9,11 @@ GitHub push
   ├─ staging 分支 → Deploy Staging workflow ─┐
   └─ main 分支    → Deploy Production workflow ┤
                                                 ▼
-                              Actions 构建镜像 → 推阿里云 ACR
+                              Actions 构建镜像（不用镜像仓库）
                                                 ▼
-                              SSH 到 ECS → docker compose pull && up -d
+              镜像经 SSH 直传 ECS（docker save | ssh | docker load）
+                                                ▼
+                              ECS 上 docker compose up -d
                                                 ▼
         ┌──────────────────────── ECS（一台，4G 内存）────────────────────────┐
         │  project deda-staging:  app(0.0.0.0:3001) + postgres + redis        │
@@ -64,17 +66,13 @@ chmod 600 /opt/deda/env/.env.*
 
 **阿里云控制台侧**：
 
-1. 开通容器镜像服务 ACR（个人实例免费），创建命名空间，记录 registry 地址与访问凭证。
-2. ECS 安全组放行入方向：`3001`（staging，备案期间临时用）、`22`（SSH，建议限制来源 IP）。**不要**对公网放行 3000/5432/6379。
-3. 为 GitHub Actions 创建专用 SSH 密钥对，公钥加入 ECS `~/.ssh/authorized_keys`。
+1. ECS 安全组放行入方向：`3001`（staging，备案期间临时用）、`22`（SSH，建议限制来源 IP）。**不要**对公网放行 3000/5432/6379。
+2. 为 GitHub Actions 创建专用 SSH 密钥对，公钥加入 ECS `~/.ssh/authorized_keys`。
 
 **GitHub 仓库 Secrets**（Settings → Secrets and variables → Actions，建议配在 `staging` / `production` 两个 Environment 里）：
 
 | Secret | 说明 |
 | --- | --- |
-| `ACR_REGISTRY` | 如 `registry.cn-shanghai.aliyuncs.com` |
-| `ACR_NAMESPACE` | ACR 命名空间 |
-| `ACR_USERNAME` / `ACR_PASSWORD` | ACR 访问凭证 |
 | `ECS_HOST` | ECS 公网 IP |
 | `ECS_USER` | SSH 登录用户 |
 | `ECS_SSH_KEY` | SSH 私钥（ed25519 全文） |
@@ -83,13 +81,13 @@ chmod 600 /opt/deda/env/.env.*
 
 ## 4. 日常操作
 
-### 手动部署 / 重拉镜像
+### 手动部署 / 重启
+
+镜像由 CI 直传到服务器（`docker images | grep deda-server` 可查看）。手动重启或切换到已存在的镜像版本：
 
 ```bash
 cd /opt/deda
 # staging
-IMAGE_TAG=staging-latest docker compose -p deda-staging --env-file env/.env.staging \
-  -f docker/docker-compose.yml -f docker/docker-compose.staging.yml pull app
 IMAGE_TAG=staging-latest docker compose -p deda-staging --env-file env/.env.staging \
   -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
 # prod 同理：-p deda-prod、--env-file env/.env.prod、-f docker/docker-compose.prod.yml、IMAGE_TAG=prod-latest
