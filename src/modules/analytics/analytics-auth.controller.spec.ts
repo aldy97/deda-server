@@ -4,6 +4,7 @@ import { JwtService } from "@nestjs/jwt";
 import { Test, TestingModule } from "@nestjs/testing";
 import { scryptSync } from "crypto";
 import { AnalyticsAuthService } from "./analytics-auth.service";
+import { ANALYTICS_JWT_SERVICE } from "./analytics-auth.service";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
 import { AnalyticsJwtStrategy } from "./strategies/analytics-jwt.strategy";
 
@@ -36,19 +37,18 @@ const VALID_USERS = JSON.stringify([
 
 describe("AnalyticsAuthService", () => {
   let service: AnalyticsAuthService;
-  let jwtService: JwtService;
+  const jwtService = new JwtService({ secret: SECRET });
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AnalyticsAuthService,
         { provide: ConfigService, useValue: buildConfig(VALID_USERS) },
-        { provide: JwtService, useValue: new JwtService({ secret: SECRET }) },
+        { provide: ANALYTICS_JWT_SERVICE, useValue: jwtService },
       ],
     }).compile();
 
     service = module.get(AnalyticsAuthService);
-    jwtService = module.get(JwtService);
   });
 
   it("登录成功返回 token 与 adminInfo，token 带 analytics scope", async () => {
@@ -81,7 +81,10 @@ describe("AnalyticsAuthService", () => {
       providers: [
         AnalyticsAuthService,
         { provide: ConfigService, useValue: buildConfig("not-json") },
-        { provide: JwtService, useValue: new JwtService({ secret: SECRET }) },
+        {
+          provide: ANALYTICS_JWT_SERVICE,
+          useValue: new JwtService({ secret: SECRET }),
+        },
       ],
     }).compile();
     const broken = module.get(AnalyticsAuthService);

@@ -1,7 +1,14 @@
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { scryptSync, timingSafeEqual } from "crypto";
+
+/**
+ * 管理员 JWT 签发服务的注入 token。
+ * 不走 JwtModule 全局注册：避免根模块出现多个 JwtService 实例，
+ * 导致 app.get(JwtService) 二义性（e2e 与小程序链路共用同一个实例）。
+ */
+export const ANALYTICS_JWT_SERVICE = "ANALYTICS_JWT_SERVICE";
 
 interface AdminAccount {
   username: string;
@@ -24,6 +31,7 @@ export interface AdminInfo {
 export class AnalyticsAuthService {
   constructor(
     private readonly configService: ConfigService,
+    @Inject(ANALYTICS_JWT_SERVICE)
     private readonly jwtService: JwtService,
   ) {}
 

@@ -1,9 +1,12 @@
 import { Module } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { JwtModule } from "@nestjs/jwt";
+import { JwtService } from "@nestjs/jwt";
 import { PassportModule } from "@nestjs/passport";
 import { AnalyticsAuthController } from "./analytics-auth.controller";
-import { AnalyticsAuthService } from "./analytics-auth.service";
+import {
+  ANALYTICS_JWT_SERVICE,
+  AnalyticsAuthService,
+} from "./analytics-auth.service";
 import { AnalyticsJwtStrategy } from "./strategies/analytics-jwt.strategy";
 import { OverviewController } from "./overview.controller";
 import { OverviewService } from "./overview.service";
@@ -21,21 +24,7 @@ import { ContentService } from "./content.service";
 import { QualityService } from "./quality.service";
 
 @Module({
-  imports: [
-    PassportModule,
-    JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        secret:
-          configService.get<string>("ANALYTICS_JWT_SECRET") ||
-          "dev-analytics-jwt-secret",
-        signOptions: {
-          expiresIn:
-            configService.get<string>("ANALYTICS_JWT_EXPIRES_IN") || "12h",
-        },
-      }),
-    }),
-  ],
+  imports: [PassportModule],
   controllers: [
     AnalyticsAuthController,
     OverviewController,
@@ -46,6 +35,20 @@ import { QualityService } from "./quality.service";
     QualityController,
   ],
   providers: [
+    {
+      provide: ANALYTICS_JWT_SERVICE,
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) =>
+        new JwtService({
+          secret:
+            configService.get<string>("ANALYTICS_JWT_SECRET") ||
+            "dev-analytics-jwt-secret",
+          signOptions: {
+            expiresIn:
+              configService.get<string>("ANALYTICS_JWT_EXPIRES_IN") || "12h",
+          },
+        }),
+    },
     AnalyticsAuthService,
     AnalyticsJwtStrategy,
     OverviewService,
