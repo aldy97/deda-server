@@ -44,3 +44,4 @@ services:
     volumes:
       - ../nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /opt/deda/dashboard:/opt/deda/dashboard:ro
