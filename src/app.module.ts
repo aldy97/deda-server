@@ -26,6 +26,7 @@ import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
 import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
+import { AnalyticsModule } from "./modules/analytics/analytics.module";
 
 @Module({
   imports: [
@@ -65,6 +66,7 @@ import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
     SleepConfigsModule,
     SleepSchedulerModule,
     LlmAdapterModule,
+    AnalyticsModule,
   ],
 })
 export class AppModule {}
