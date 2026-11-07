@@ -27,7 +27,7 @@ function queryBoolean({ value }: { value: unknown }): unknown {
   return normalized;
 }
 
-class ParentReportFeedbacksQueryDto {
+export class ParentReportFeedbacksQueryDto {
   @IsOptional()
   @Transform(({ value }) => emptyToUndefined(value))
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: DATE_MESSAGE })
@@ -57,7 +57,7 @@ class ParentReportFeedbacksQueryDto {
   pageSize?: number = 20;
 }
 
-class UserFeedbacksQueryDto {
+export class UserFeedbacksQueryDto {
   @IsOptional()
   @Transform(({ value }) => emptyToUndefined(value))
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: DATE_MESSAGE })
