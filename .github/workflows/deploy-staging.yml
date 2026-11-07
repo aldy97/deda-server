@@ -35,7 +35,8 @@ jobs:
 
       - name: Sync compose files to ECS
         run: |
-          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "mkdir -p /opt/deda"
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+            "mkdir -p /opt/deda /opt/deda/dashboard/staging"
           scp -r docker nginx "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}:/opt/deda/"
 
       - name: Deploy on ECS

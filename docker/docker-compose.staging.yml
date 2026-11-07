@@ -16,6 +16,11 @@ services:
     restart: always
     ports:
       - '3001:3000'
+    volumes:
+      # deda-dashboard SPA 产物（dashboard 仓库流水线 scp 至此），由 app 托管在 /dashboard
+      - /opt/deda/dashboard/staging:/opt/deda/dashboard/staging:ro
+    environment:
+      DASHBOARD_DIST_PATH: /opt/deda/dashboard/staging
     deploy:
       resources:
         limits:

@@ -146,6 +146,26 @@ chmod +x /opt/deda/backup.sh
 6. 验证：`curl -I https://xxxx.com/api/docs`、`curl -I https://staging.xxxx.com/api/docs`。
 7. 可选：安全组收回 `3001`（staging 此后走域名）。
 
+## 6.1 deda-dashboard 静态托管
+
+dashboard SPA（deda-dashboard 仓库）由两条通道承载，共用同一份产物目录：
+
+| 通道 | 适用期 | 入口 |
+| --- | --- | --- |
+| Nest 内嵌托管（ServeStaticModule，`serveRoot=/dashboard`） | 备案期间 staging 直连 | `http://<ECS_IP>:3001/dashboard/` |
+| nginx `location /dashboard/`（alias + SPA 回退） | 备案后正式形态，Nest 保留为兜底 | `https://xxxx.com/dashboard/`、`https://staging.xxxx.com/dashboard/` |
+
+产物目录约定（**由 deda-dashboard 仓库流水线负责 build 并 scp**，本仓库 CI 只 `mkdir -p`）：
+
+- staging：`/opt/deda/dashboard/staging/`（compose 只读挂载进 app，`DASHBOARD_DIST_PATH` 已在 compose 固定）
+- prod：`/opt/deda/dashboard/prod/`
+
+本地开发要预览托管效果：在 deda-dashboard 里 `npm run build`，然后
+`DASHBOARD_DIST_PATH=<deda-dashboard>/dist npm run start:dev`，访问 `http://localhost:<APP_PORT>/dashboard/`。
+`DASHBOARD_DIST_PATH` 目录不存在时静态托管自动跳过，不影响 API 启动。
+
+注意：静态壳本身无鉴权（内部工具约定），数据接口仍走 `/analytics/*` 的 JWT 鉴权。
+
 ## 7. 故障排查
 
 | 症状 | 排查 |

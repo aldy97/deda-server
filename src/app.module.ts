@@ -1,6 +1,9 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { LoggerModule } from "nestjs-pino";
+import { ServeStaticModule } from "@nestjs/serve-static";
+import { existsSync } from "fs";
+import { resolve } from "path";
 import appConfig from "./config/app.config";
 import databaseConfig from "./config/database.config";
 import redisConfig from "./config/redis.config";
@@ -27,6 +30,25 @@ import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
 import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
+
+/**
+ * deda-dashboard SPA 静态托管（备案期间 staging 直连 :3001/dashboard 的承载方式；
+ * 备案完成后 nginx 在前、本模块作为兜底，两者共用同一份 dist 目录）。
+ * dist 由 deda-dashboard 仓库流水线 scp 到 ECS /opt/deda/dashboard/{staging,prod}/，
+ * 经 compose 只读挂载进容器；目录不存在时跳过注册，不影响 API 启动。
+ */
+const dashboardDistPath = resolve(
+  process.env.DASHBOARD_DIST_PATH || "/opt/deda/dashboard/staging",
+);
+
+const staticImports = existsSync(dashboardDistPath)
+  ? [
+      ServeStaticModule.forRoot({
+        rootPath: dashboardDistPath,
+        serveRoot: "/dashboard",
+      }),
+    ]
+  : [];
 
 @Module({
   imports: [
@@ -67,6 +89,7 @@ import { AnalyticsModule } from "./modules/analytics/analytics.module";
     SleepSchedulerModule,
     LlmAdapterModule,
     AnalyticsModule,
+    ...staticImports,
   ],
 })
 export class AppModule {}

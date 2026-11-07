@@ -15,6 +15,11 @@ services:
     ports:
       # 仅回环：健康检查与备案后 nginx 反代走内网，公网不直接暴露
       - '127.0.0.1:3000:3000'
+    volumes:
+      # deda-dashboard SPA 产物兜底托管（备案后 nginx 在前，此为备用通道）
+      - /opt/deda/dashboard/prod:/opt/deda/dashboard/prod:ro
+    environment:
+      DASHBOARD_DIST_PATH: /opt/deda/dashboard/prod
     deploy:
       resources:
         limits:
