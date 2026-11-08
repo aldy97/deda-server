@@ -128,6 +128,24 @@ GET /analytics/quality/llm-usage
 → 501 一期未落库；二期（llm_usage_logs）上线
 ```
 
+## 消息明细（P1.5）
+
+```
+GET /analytics/messages
+  ?startDate=&endDate=&deviceId=&role=&status=&mode=&conversationModeKey=
+  &turnId=&conversationId=&keyword=&sort=spokeAt_desc&page=1&pageSize=20
+→ { total, page, pageSize,
+    items: [{ id, turnId, conversationId, role, content, status, mode,
+              conversationModeKey, cefrLevel, spokeAt, createdAt,
+              device: { deviceId, deviceCode, characterKey } }] }
+   // 列表不含 rawPayload；deviceId 为业务设备 ID（内部 resolve 成 UUID）；
+   // spokeAt 区间闭区间、Asia/Shanghai 当日边界；keyword 大小写不敏感 ≤50 字；
+   // sort 白名单仅 spokeAt_asc / spokeAt_desc；范围倒置 / 非法枚举 / pageSize 越界 → 400
+
+GET /analytics/messages/:id
+→ 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
+```
+
 ## 二期预告（需 schema 审批）
 
 - `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。

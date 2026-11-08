@@ -24,6 +24,8 @@ import { ContentService } from "./content.service";
 import { QualityService } from "./quality.service";
 import { FeedbackAnalyticsController } from "./feedback-analytics.controller";
 import { FeedbackAnalyticsService } from "./feedback-analytics.service";
+import { MessagesAnalyticsController } from "./messages-analytics.controller";
+import { MessagesAnalyticsService } from "./messages-analytics.service";
 
 @Module({
   imports: [PassportModule],
@@ -36,6 +38,7 @@ import { FeedbackAnalyticsService } from "./feedback-analytics.service";
     ContentController,
     QualityController,
     FeedbackAnalyticsController,
+    MessagesAnalyticsController,
   ],
   providers: [
     {
@@ -61,6 +64,7 @@ import { FeedbackAnalyticsService } from "./feedback-analytics.service";
     ContentService,
     QualityService,
     FeedbackAnalyticsService,
+    MessagesAnalyticsService,
   ],
 })
 export class AnalyticsModule {}
