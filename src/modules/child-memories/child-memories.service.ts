@@ -41,6 +41,8 @@ export class ChildMemoriesService {
       where: { deviceId: input.deviceId, status: "active" },
     });
     const result = await this.llmService.complete({
+      scene: "memory_extract",
+      deviceId: input.deviceId,
       model: this.llmService.smallModelName,
       temperature: 0,
       maxTokens: 300,

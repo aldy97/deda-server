@@ -239,7 +239,7 @@ export class VendorService {
     // L2 安全分类与意图路由并行：小模型一次调用，补 L1 语义盲区
     const [storyIntent, l2Verdict] = await Promise.all([
       this.conversationSessionService.resolve(device.id, dto.asrText),
-      this.childSafetyService.classifyL2(dto.asrText),
+      this.childSafetyService.classifyL2(dto.asrText, device.id),
     ]);
     if (l2Verdict.blocked) {
       return this.sendSafetyReply(
@@ -408,10 +408,20 @@ export class VendorService {
     let answer = "";
     if (streamEnabled) {
       ({ responseText, llmFailed, filler, answer } =
-        await this.generateStreamReply(dto, turnId, messages, recentFillers));
+        await this.generateStreamReply(
+          dto,
+          turnId,
+          messages,
+          recentFillers,
+          device.id,
+        ));
     } else {
       try {
-        const llmResult = await this.llmService.complete({ messages });
+        const llmResult = await this.llmService.complete({
+          scene: "chat_main",
+          deviceId: device.id,
+          messages,
+        });
         responseText = llmResult.text;
       } catch (error) {
         llmFailed = true;
@@ -789,6 +799,7 @@ export class VendorService {
     turnId: string,
     messages: LlmMessage[],
     recentFillers: string[] = [],
+    deviceInternalId?: string,
   ): Promise<{
     responseText: string;
     llmFailed: boolean;
@@ -824,7 +835,11 @@ export class VendorService {
 
     const pump = (async () => {
       try {
-        const answerStream = this.llmService.completeStream({ messages });
+        const answerStream = this.llmService.completeStream({
+          scene: "chat_main",
+          deviceId: deviceInternalId,
+          messages,
+        });
         for await (const delta of answerStream) {
           buffered.push(delta);
           wake();
@@ -842,6 +857,8 @@ export class VendorService {
     let fillerText = "";
     try {
       const fillerStream = this.llmService.completeStream({
+        scene: "filler",
+        deviceId: deviceInternalId,
         messages: this.llmService.buildFillerPrompt(dto.asrText, recentFillers),
         model: this.llmService.smallModelName,
         maxTokens: 60,

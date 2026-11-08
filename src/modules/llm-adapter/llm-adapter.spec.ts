@@ -662,7 +662,10 @@ describe("LlmAdapterModule", () => {
         layer: "L2",
       });
       const chunks = await collect(service.streamReply(request));
-      expect(childSafety.classifyL2).toHaveBeenCalledWith("I like apples");
+      expect(childSafety.classifyL2).toHaveBeenCalledWith(
+        "I like apples",
+        undefined,
+      );
       expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
       expect(childSafety.cannedReply).toHaveBeenCalledWith("self_harm");
       expect(llm.completeStream).not.toHaveBeenCalled();

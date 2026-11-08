@@ -160,6 +160,8 @@ export class ParentReportGeneratorService
         })),
       });
       const result = await this.llmService.complete({
+        scene: "parent_report",
+        deviceId,
         temperature: 0.2,
         maxTokens: 900,
         messages: [

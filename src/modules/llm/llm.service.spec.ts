@@ -1,19 +1,27 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmService } from "./llm.service";
+import { PrismaService } from "@/common/prisma/prisma.service";
 import axios from "axios";
 import { Readable } from "stream";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
 
+const PRISMA_MOCK = {
+  provide: PrismaService,
+  useValue: { llmUsageLog: { create: jest.fn().mockResolvedValue({}) } },
+};
+
 describe("LlmService", () => {
   let service: LlmService;
+  let prismaMock: { llmUsageLog: { create: jest.Mock } };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LlmService,
+        PRISMA_MOCK,
         {
           provide: ConfigService,
           useValue: {
@@ -22,6 +30,7 @@ describe("LlmService", () => {
                 OPENAI_BASE_URL: "https://api.deepseek.com/v1",
                 OPENAI_API_KEY: "sk-test",
                 OPENAI_MODEL: "deepseek-flash",
+                SMALL_LLM_MODEL: "qwen-flash",
                 LLM_TIMEOUT_MS: "30000",
               };
               return map[key];
@@ -32,6 +41,7 @@ describe("LlmService", () => {
     }).compile();
 
     service = module.get<LlmService>(LlmService);
+    prismaMock = module.get(PrismaService);
   });
 
   afterEach(() => {
@@ -62,6 +72,7 @@ describe("LlmService", () => {
       } as any);
 
       const result = await service.complete({
+        scene: "chat_main",
         messages: [
           { role: "system", content: "You are a tutor." },
           { role: "user", content: "How are you?" },
@@ -99,6 +110,7 @@ describe("LlmService", () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           LlmService,
+          PRISMA_MOCK,
           {
             provide: ConfigService,
             useValue: {
@@ -111,6 +123,7 @@ describe("LlmService", () => {
 
       await expect(
         noKeyService.complete({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
         }),
       ).rejects.toThrow("LLM API key is not configured");
@@ -124,6 +137,7 @@ describe("LlmService", () => {
 
       await expect(
         service.complete({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
         }),
       ).rejects.toThrow("LLM request failed");
@@ -347,6 +361,7 @@ describe("LlmService", () => {
 
       const deltas = await collectStream(
         service.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "我喜欢上海的天气" }],
         }),
       );
@@ -373,6 +388,7 @@ describe("LlmService", () => {
 
       await collectStream(
         service.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
           model: "small-model",
         }),
@@ -389,6 +405,7 @@ describe("LlmService", () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           LlmService,
+          PRISMA_MOCK,
           {
             provide: ConfigService,
             useValue: {
@@ -419,6 +436,7 @@ describe("LlmService", () => {
 
       await collectStream(
         dualModelService.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "我喜欢上海的天气" }],
           model: "qwen-flash",
         }),
@@ -440,6 +458,7 @@ describe("LlmService", () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           LlmService,
+          PRISMA_MOCK,
           {
             provide: ConfigService,
             useValue: {
@@ -465,6 +484,7 @@ describe("LlmService", () => {
       } as any);
 
       await dualModelService.complete({
+        scene: "chat_main",
         messages: [{ role: "user", content: "我想吃冰淇淋" }],
         model: "qwen-flash",
       });
@@ -484,6 +504,7 @@ describe("LlmService", () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           LlmService,
+          PRISMA_MOCK,
           {
             provide: ConfigService,
             useValue: {
@@ -511,6 +532,7 @@ describe("LlmService", () => {
 
       await collectStream(
         fallbackService.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
           model: "qwen-flash",
         }),
@@ -541,6 +563,7 @@ describe("LlmService", () => {
 
       const deltas = await collectStream(
         service.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
         }),
       );
@@ -561,6 +584,7 @@ describe("LlmService", () => {
 
       const deltas = await collectStream(
         service.completeStream({
+          scene: "chat_main",
           messages: [{ role: "user", content: "Hi" }],
         }),
       );
@@ -572,6 +596,7 @@ describe("LlmService", () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           LlmService,
+          PRISMA_MOCK,
           {
             provide: ConfigService,
             useValue: {
@@ -583,6 +608,7 @@ describe("LlmService", () => {
       const noKeyService = module.get<LlmService>(LlmService);
 
       const gen = noKeyService.completeStream({
+        scene: "chat_main",
         messages: [{ role: "user", content: "Hi" }],
       });
 
@@ -596,6 +622,7 @@ describe("LlmService", () => {
       } as any);
 
       const gen = service.completeStream({
+        scene: "chat_main",
         messages: [{ role: "user", content: "Hi" }],
       });
 
@@ -714,5 +741,214 @@ describe("LlmService", () => {
         expect(system).toContain("empathy first");
       },
     );
+  });
+
+  describe("usage logging (模型监控埋点)", () => {
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+    it("complete 成功时写入成功日志（tier/model/token/延迟）", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          choices: [{ message: { content: "你好呀" } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        },
+      } as any);
+
+      await service.complete({
+        scene: "intent_classify",
+        deviceId: "device-uuid-1",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          scene: "intent_classify",
+          model: "deepseek-flash",
+          tier: "main",
+          success: true,
+          failureReason: null,
+          firstTokenMs: null,
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          deviceId: "device-uuid-1",
+        }),
+      });
+      const latency =
+        prismaMock.llmUsageLog.create.mock.calls[0][0].data.latencyMs;
+      expect(typeof latency).toBe("number");
+      expect(latency).toBeGreaterThanOrEqual(0);
+    });
+
+    it("complete 返回空文本时记 empty_response 失败", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "  " } }] },
+      } as any);
+
+      await service.complete({
+        scene: "filler",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          success: false,
+          failureReason: "empty_response",
+          deviceId: null,
+        }),
+      });
+    });
+
+    it("complete 失败原因归一化：429→rate_limit，ECONNABORTED→timeout，其他→upstream_error", async () => {
+      const cases = [
+        [{ response: { status: 429, data: {} }, message: "429" }, "rate_limit"],
+        [
+          { code: "ECONNABORTED", message: "timeout of 30000ms exceeded" },
+          "timeout",
+        ],
+        [{ message: "socket hang up" }, "upstream_error"],
+      ] as const;
+      for (const [error, expected] of cases) {
+        mockedAxios.post.mockRejectedValueOnce(error as any);
+        await expect(
+          service.complete({
+            scene: "safety_l2",
+            messages: [{ role: "user", content: "Hi" }],
+          }),
+        ).rejects.toThrow("LLM request failed");
+      }
+      await flush();
+
+      const reasons = prismaMock.llmUsageLog.create.mock.calls.map(
+        (call) => call[0].data.failureReason,
+      );
+      expect(reasons).toEqual(["rate_limit", "timeout", "upstream_error"]);
+    });
+
+    it("completeStream 记录 TTFT，并捕获末 chunk 的 usage", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"你"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"好"}}]}\n\n',
+          'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const gen = service.completeStream({
+        scene: "chat_main",
+        deviceId: "device-uuid-2",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      for await (const _ of gen) {
+        // drain
+      }
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          scene: "chat_main",
+          success: true,
+          failureReason: null,
+          promptTokens: 3,
+          totalTokens: 5,
+          deviceId: "device-uuid-2",
+        }),
+      });
+      const data = prismaMock.llmUsageLog.create.mock.calls[0][0].data;
+      expect(data.firstTokenMs).not.toBeNull();
+      expect(data.firstTokenMs).toBeLessThanOrEqual(data.latencyMs);
+    });
+
+    it("completeStream 零内容流记 empty_response", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from(["data: [DONE]\n\n"]),
+      } as any);
+
+      const gen = service.completeStream({
+        scene: "filler",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      for await (const _ of gen) {
+        // drain
+      }
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          success: false,
+          failureReason: "empty_response",
+          firstTokenMs: null,
+        }),
+      });
+    });
+
+    it("completeStream 请求失败记日志后继续抛错", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        code: "ECONNABORTED",
+        message: "timeout of 30000ms exceeded",
+      } as any);
+
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await expect(gen.next()).rejects.toThrow("LLM request failed");
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          success: false,
+          failureReason: "timeout",
+        }),
+      });
+    });
+
+    it("埋点写库失败不影响主链路（fire-and-forget）", async () => {
+      prismaMock.llmUsageLog.create.mockRejectedValueOnce(new Error("db down"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "你好" } }] },
+      } as any);
+
+      const result = await service.complete({
+        scene: "parent_report",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await flush();
+
+      expect(result.text).toBe("你好");
+    });
+
+    it("缺少 API key 时也记失败日志", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          PRISMA_MOCK,
+          {
+            provide: ConfigService,
+            useValue: { get: jest.fn().mockReturnValue("") },
+          },
+        ],
+      }).compile();
+      const noKeyService = module.get<LlmService>(LlmService);
+      const noKeyPrisma = module.get(PrismaService);
+
+      await expect(
+        noKeyService.complete({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      ).rejects.toThrow("LLM API key is not configured");
+      await flush();
+
+      expect(noKeyPrisma.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          success: false,
+          failureReason: "upstream_error",
+        }),
+      });
+    });
   });
 });

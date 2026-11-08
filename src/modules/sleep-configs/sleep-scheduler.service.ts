@@ -153,6 +153,8 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     const nameHint = childName !== "宝贝" ? `孩子叫${childName}。` : "";
     const result = await this.llmService.complete({
+      scene: "sleep_story_generate",
+      deviceId: config.device.id,
       temperature: 0.8,
       maxTokens: 600,
       messages: [

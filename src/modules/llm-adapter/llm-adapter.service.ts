@@ -170,7 +170,7 @@ export class LlmAdapterService {
     // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
     // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
     const [l2, intent] = await Promise.all([
-      this.safeClassifyL2(asrText),
+      this.safeClassifyL2(asrText, device?.id),
       device
         ? this.safeResolveIntent(device.id, asrText)
         : Promise.resolve<ConversationIntent>("free_chat"),
@@ -387,6 +387,8 @@ export class LlmAdapterService {
     const pump = (async () => {
       try {
         const stream = this.llmService.completeStream({
+          scene: "chat_main",
+          deviceId: device?.id,
           messages,
           maxTokens: 200,
           thinking: { type: "disabled" },
@@ -407,6 +409,8 @@ export class LlmAdapterService {
     if (fillerEnabled) {
       try {
         const fillerStream = this.llmService.completeStream({
+          scene: "filler",
+          deviceId: device?.id,
           messages: this.llmService.buildFillerPrompt(asrText, recentFillers),
           model: this.llmService.smallModelName,
           maxTokens: 60,
@@ -594,9 +598,9 @@ export class LlmAdapterService {
   }
 
   /** L2 语义分类包装：任何异常 fail-open 返回 null，由 L3 兜底 */
-  private async safeClassifyL2(asrText: string) {
+  private async safeClassifyL2(asrText: string, deviceId?: string) {
     try {
-      return await this.childSafety.classifyL2(asrText);
+      return await this.childSafety.classifyL2(asrText, deviceId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`L2 classification failed, fail-open: ${message}`);

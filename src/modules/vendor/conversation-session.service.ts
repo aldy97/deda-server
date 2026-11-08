@@ -96,7 +96,7 @@ export class ConversationSessionService {
     asrText: string,
     hadActiveSession: boolean,
   ): Promise<ConversationIntent> {
-    const intent = await this.classify(asrText);
+    const intent = await this.classify(asrText, deviceId);
     const persistentIntent = this.persistentMode(intent);
     if (persistentIntent) {
       await this.activate(deviceId, persistentIntent);
@@ -106,10 +106,15 @@ export class ConversationSessionService {
     return intent;
   }
 
-  private async classify(asrText: string): Promise<ConversationIntent> {
+  private async classify(
+    asrText: string,
+    deviceId?: string,
+  ): Promise<ConversationIntent> {
     // TODO(可用性)：灰度补充分类模型超时、限流与非法输出的真实指标。
     try {
       const result = await this.llmService.complete({
+        scene: "intent_classify",
+        deviceId,
         model: this.llmService.smallModelName,
         temperature: 0,
         maxTokens: 10,
