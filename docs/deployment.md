@@ -155,10 +155,15 @@ dashboard SPA（deda-dashboard 仓库）由两条通道承载，共用同一份�
 | Nest 内嵌托管（ServeStaticModule，`serveRoot=/dashboard`） | 备案期间 staging 直连 | `http://<ECS_IP>:3001/dashboard/` |
 | nginx `location /dashboard/`（alias + SPA 回退） | 备案后正式形态，Nest 保留为兜底 | `https://xxxx.com/dashboard/`、`https://staging.xxxx.com/dashboard/` |
 
-产物目录约定（**由 deda-dashboard 仓库流水线负责 build 并 scp**，本仓库 CI 只 `mkdir -p`）：
+产物目录约定（**由 deda-dashboard 仓库流水线负责 build 并投递**，本仓库 CI 只 `mkdir -p`）：
 
-- staging：`/opt/deda/dashboard/staging/`（compose 只读挂载进 app，`DASHBOARD_DIST_PATH` 已在 compose 固定）
+- staging：`/opt/deda/dashboard/staging/`（`DASHBOARD_DIST_PATH` 已在 compose 固定）
 - prod：`/opt/deda/dashboard/prod/`
+
+app 容器挂载的是**父目录** `/opt/deda/dashboard`（只读），而非子目录本身：流水线投递时
+删建 staging/prod 子目录对容器透明，无需 recreate 容器。切勿把 compose 改回挂载子目录
+——bind mount 绑定的是目录 inode，子目录被删后容器会永久看到空目录（/dashboard 404，
+`ENOENT ... stat index.html`），只能 recreate 容器才能恢复。
 
 本地开发要预览托管效果：在 deda-dashboard 里 `npm run build`，然后
 `DASHBOARD_DIST_PATH=<deda-dashboard>/dist npm run start:dev`，访问 `http://localhost:<APP_PORT>/dashboard/`。
@@ -175,3 +180,4 @@ dashboard SPA（deda-dashboard 仓库）由两条通道承载，共用同一份�
 | 健康检查失败 | ECS 上 `curl -v 127.0.0.1:3001/api/docs`；查安全组 3001 是否放行 |
 | staging/prod 串数据 | 不可能共用库；确认 `-p` 项目名与 `--env-file` 没写错 |
 | 磁盘满 | `docker system df`；`docker image prune -a` 清理旧镜像 |
+| `/dashboard` 突然 404（ENOENT stat index.html） | 容器内 `ls /opt/deda/dashboard/staging` 为空而宿主机有文件 → 挂载失效（多因 compose 挂了子目录且流水线删建目录）；确认 compose 挂的是父目录后 `up -d --force-recreate app` |
