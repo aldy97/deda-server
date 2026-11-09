@@ -1,0 +1,336 @@
+import { Test, TestingModule } from "@nestjs/testing";
+import { BadRequestException } from "@nestjs/common";
+import { DeviceLinkService } from "./device-link.service";
+import { MqttService } from "@/common/mqtt/mqtt.service";
+import { RedisService } from "@/common/redis/redis.service";
+import { PrismaService } from "@/common/prisma/prisma.service";
+
+const flushPromises = async (ticks = 3) => {
+  for (let i = 0; i < ticks; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
+describe("DeviceLinkService", () => {
+  let service: DeviceLinkService;
+  let mqttService: any;
+  let redisService: any;
+  let prisma: any;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        DeviceLinkService,
+        {
+          provide: MqttService,
+          useValue: {
+            subscribe: jest.fn(),
+            publish: jest.fn(),
+            onMessage: jest.fn(),
+          },
+        },
+        {
+          provide: RedisService,
+          useValue: {
+            getValue: jest.fn().mockResolvedValue(null),
+            setValue: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: PrismaService,
+          useValue: {
+            device: {
+              upsert: jest.fn().mockResolvedValue({}),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get<DeviceLinkService>(DeviceLinkService);
+    mqttService = module.get(MqttService);
+    redisService = module.get(RedisService);
+    prisma = module.get(PrismaService);
+  });
+
+  it("should be defined", () => {
+    expect(service).toBeDefined();
+  });
+
+  describe("onModuleInit", () => {
+    it("should subscribe loginMac and device/up/+ topics", () => {
+      service.onModuleInit();
+
+      expect(mqttService.subscribe).toHaveBeenCalledWith("loginMac");
+      expect(mqttService.subscribe).toHaveBeenCalledWith("device/up/+");
+      expect(mqttService.onMessage).toHaveBeenCalledWith(expect.any(Function));
+    });
+  });
+
+  describe("loginMac 入库", () => {
+    it("should upsert device by normalized mac and touch lastSeenAt", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({ device: "aa:bb:cc:dd:ee:ff" }),
+      );
+
+      service.handleMessage("loginMac", payload);
+      await flushPromises();
+
+      expect(prisma.device.upsert).toHaveBeenCalledWith({
+        where: { deviceId: "AABBCCDDEEFF" },
+        create: { deviceId: "AABBCCDDEEFF", macAddress: "AABBCCDDEEFF" },
+        update: { macAddress: "AABBCCDDEEFF" },
+      });
+
+      expect(redisService.setValue).toHaveBeenCalledWith(
+        "device:link:AABBCCDDEEFF",
+        expect.any(String),
+        3600,
+      );
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.mac).toBe("AABBCCDDEEFF");
+      expect(typeof cached.lastSeenAt).toBe("number");
+    });
+
+    it("should ignore loginMac without device field", async () => {
+      const loggerWarnSpy = jest
+        .spyOn((service as any).logger, "warn")
+        .mockImplementation();
+
+      service.handleMessage("loginMac", Buffer.from(JSON.stringify({})));
+      await flushPromises();
+
+      expect(prisma.device.upsert).not.toHaveBeenCalled();
+      expect(loggerWarnSpy).toHaveBeenCalled();
+    });
+
+    it("should ignore invalid JSON payload", async () => {
+      const loggerWarnSpy = jest
+        .spyOn((service as any).logger, "warn")
+        .mockImplementation();
+
+      service.handleMessage("loginMac", Buffer.from("not-json"));
+      await flushPromises();
+
+      expect(prisma.device.upsert).not.toHaveBeenCalled();
+      expect(loggerWarnSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe("device/up 状态上报", () => {
+    it("should merge query report and update firmwareVersion", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 80, volume: 50, version: "1.2.3" },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      expect(redisService.setValue).toHaveBeenCalledWith(
+        "device:link:AABBCCDDEEFF",
+        expect.any(String),
+        3600,
+      );
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.battery).toBe(80);
+      expect(cached.volume).toBe(50);
+      expect(cached.version).toBe("1.2.3");
+
+      expect(prisma.device.updateMany).toHaveBeenCalledWith({
+        where: { deviceId: "AABBCCDDEEFF" },
+        data: { firmwareVersion: "1.2.3" },
+      });
+    });
+
+    it("should keep cached battery when volume reply only carries volume", async () => {
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 66,
+          volume: 40,
+          version: "1.2.3",
+          lastSeenAt: Date.now(),
+        }),
+      );
+
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "volume",
+          flag: "success",
+          data: { volume: 30 },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.volume).toBe(30);
+      expect(cached.battery).toBe(66);
+      expect(cached.version).toBe("1.2.3");
+      // volume 回执不含 version，不应触发固件版本落库
+      expect(prisma.device.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("should refresh lastSeenAt on unknown cmd without writing DB", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({ cmd: "some-future-cmd", flag: "success", data: null }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      expect(redisService.setValue).toHaveBeenCalled();
+      expect(prisma.device.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("should ignore messages on unrelated topics", async () => {
+      service.handleMessage("device/down/AABBCCDDEEFF", Buffer.from("{}"));
+      service.handleMessage("zhianxin/event/report", Buffer.from("{}"));
+      await flushPromises();
+
+      expect(redisService.setValue).not.toHaveBeenCalled();
+      expect(prisma.device.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should ignore up message without cmd", async () => {
+      const loggerWarnSpy = jest
+        .spyOn((service as any).logger, "warn")
+        .mockImplementation();
+
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        Buffer.from(JSON.stringify({ flag: "success" })),
+      );
+      await flushPromises();
+
+      expect(redisService.setValue).not.toHaveBeenCalled();
+      expect(loggerWarnSpy).toHaveBeenCalled();
+    });
+
+    it("should accept lowercase mac in topic and normalize it", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 90 },
+        }),
+      );
+
+      service.handleMessage("device/up/aabbccddeeff", payload);
+      await flushPromises();
+
+      expect(redisService.setValue).toHaveBeenCalledWith(
+        "device:link:AABBCCDDEEFF",
+        expect.any(String),
+        3600,
+      );
+    });
+  });
+
+  describe("getStatus 在线判定", () => {
+    it("should be online when lastSeenAt within 15s window", async () => {
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          lastSeenAt: Date.now() - 10_000,
+        }),
+      );
+
+      const status = await service.getStatus("AABBCCDDEEFF");
+
+      expect(status.online).toBe(true);
+      expect(status.battery).toBe(80);
+    });
+
+    it("should be offline when lastSeenAt exceeds 15s window", async () => {
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          lastSeenAt: Date.now() - 16_000,
+        }),
+      );
+
+      const status = await service.getStatus("AABBCCDDEEFF");
+
+      expect(status.online).toBe(false);
+    });
+
+    it("should return empty offline status on cache miss", async () => {
+      const status = await service.getStatus("aa-bb-cc-dd-ee-ff");
+
+      expect(status).toEqual({
+        mac: "AABBCCDDEEFF",
+        battery: null,
+        volume: null,
+        version: null,
+        lastSeenAt: null,
+        online: false,
+      });
+    });
+  });
+
+  describe("下行指令", () => {
+    it("setVolume should publish volume command to device/down/{mac}", () => {
+      service.setVolume("AABBCCDDEEFF", 30);
+
+      expect(mqttService.publish).toHaveBeenCalledWith(
+        "device/down/AABBCCDDEEFF",
+        JSON.stringify({
+          cmd: "volume",
+          flag: "success",
+          data: { volume: 30 },
+        }),
+      );
+    });
+
+    it("setVolume should reject out-of-range values", () => {
+      expect(() => service.setVolume("AABBCCDDEEFF", 101)).toThrow(
+        BadRequestException,
+      );
+      expect(() => service.setVolume("AABBCCDDEEFF", -1)).toThrow(
+        BadRequestException,
+      );
+      expect(() => service.setVolume("AABBCCDDEEFF", 50.5)).toThrow(
+        BadRequestException,
+      );
+      expect(mqttService.publish).not.toHaveBeenCalled();
+    });
+
+    it("requestStatus should publish query with null data", () => {
+      service.requestStatus("AABBCCDDEEFF");
+
+      expect(mqttService.publish).toHaveBeenCalledWith(
+        "device/down/AABBCCDDEEFF",
+        JSON.stringify({ cmd: "query", flag: "success", data: null }),
+      );
+    });
+
+    it("restartDevice / triggerUpgrade / factoryReset should publish matching commands", () => {
+      service.restartDevice("AABBCCDDEEFF");
+      service.triggerUpgrade("AABBCCDDEEFF");
+      service.factoryReset("AABBCCDDEEFF");
+
+      const payloads = mqttService.publish.mock.calls.map(
+        (call: any[]) => JSON.parse(call[1]).cmd,
+      );
+      expect(payloads).toEqual(["restart", "upgrade", "recover"]);
+      expect(
+        mqttService.publish.mock.calls.every(
+          (call: any[]) => call[0] === "device/down/AABBCCDDEEFF",
+        ),
+      ).toBe(true);
+    });
+  });
+});

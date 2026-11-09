@@ -23,6 +23,7 @@ import { RedisModule } from "./common/redis/redis.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
 import { MqttModule } from "./common/mqtt/mqtt.module";
 import { DeviceStatusModule } from "./modules/device-status/device-status.module";
+import { DeviceLinkModule } from "./modules/device-link/device-link.module";
 import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
 import { AdventureModule } from "./modules/adventure/adventure.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
@@ -70,6 +71,7 @@ const staticImports = existsSync(dashboardDistPath)
     RedisModule,
     MqttModule,
     DeviceStatusModule,
+    DeviceLinkModule,
     ConversationModesModule,
     UsersModule,
     DevicesModule,
