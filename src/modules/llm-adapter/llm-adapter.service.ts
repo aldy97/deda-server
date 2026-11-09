@@ -264,6 +264,13 @@ export class LlmAdapterService {
         ? "english_chat"
         : "free_chat";
 
+    // 故事类回合判定（含被门禁拦截后走自由创作的 adventure/free_story）：
+    // 主模型 maxTokens 分档与 filler 情境共用
+    const isStoryTurn =
+      STORY_INTENTS.includes(intent) ||
+      intent === "adventure_story" ||
+      intent === "free_story";
+
     // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）
     if (device && intent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, asrText);
@@ -394,7 +401,9 @@ export class LlmAdapterService {
           scene: "chat_main",
           deviceId: device?.id,
           messages,
-          maxTokens: 200,
+          // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
+          // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
+          maxTokens: isStoryTurn ? 800 : 200,
           thinking: { type: "disabled" },
         });
         for await (const chunk of stream) {

@@ -907,6 +907,29 @@ describe("LlmAdapterModule", () => {
       );
     });
 
+    it("raises main-stream maxTokens to 800 for story turns", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("idiom_story");
+      llm.completeStream.mockReturnValue(makeStream(["从前有只小青蛙"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "讲一个成语故事" }],
+      };
+      await collect(service.streamReply(req));
+      expect(llm.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "chat_main", maxTokens: 800 }),
+      );
+    });
+
+    it("keeps main-stream maxTokens at 200 for free chat turns", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(llm.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "chat_main", maxTokens: 200 }),
+      );
+    });
+
     it("uses DB history instead of client-supplied history when bound", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       prisma.message.findMany.mockResolvedValue([
