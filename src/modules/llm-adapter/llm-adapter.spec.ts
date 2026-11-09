@@ -42,6 +42,7 @@ describe("LlmAdapterModule", () => {
   };
   let memories: {
     buildPromptBlock: jest.Mock;
+    buildPreferenceBlock: jest.Mock;
     extractAndStore: jest.Mock;
     markInjected: jest.Mock;
   };
@@ -111,6 +112,11 @@ describe("LlmAdapterModule", () => {
       buildPromptBlock: jest
         .fn()
         .mockResolvedValue({ text: "", memoryIds: [] }),
+      buildPreferenceBlock: jest.fn().mockResolvedValue({
+        text: "",
+        memoryIds: [],
+        favoriteStoryType: null,
+      }),
       extractAndStore: jest.fn().mockResolvedValue(0),
       markInjected: jest.fn().mockResolvedValue(undefined),
     };
@@ -194,7 +200,8 @@ describe("LlmAdapterModule", () => {
           where: expect.objectContaining({ mode: "english_story" }),
         }),
       );
-      // 故事模式注入故事 prompt（经 promptTemplate 传给 prompt 组装），不注入长期记忆
+      // 故事模式注入故事 prompt（经 promptTemplate 传给 prompt 组装）；
+      // 记忆走轻量偏好块（非相关性召回），保证跨模式「Elly 懂我」
       expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         "讲一个英语故事",
         expect.any(Array),
@@ -204,6 +211,36 @@ describe("LlmAdapterModule", () => {
         }),
       );
       expect(memories.buildPromptBlock).not.toHaveBeenCalled();
+      expect(memories.buildPreferenceBlock).toHaveBeenCalledWith(
+        "dev-internal-1",
+      );
+    });
+
+    it("故事话术按 favorite_story_type 主动选题", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("idiom_story");
+      memories.buildPreferenceBlock.mockResolvedValue({
+        text: "PREFS",
+        memoryIds: ["m9"],
+        favoriteStoryType: "冒险故事",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "讲一个成语故事" }],
+      };
+      await collect(service.streamReply(req));
+
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "讲一个成语故事",
+        expect.any(Array),
+        expect.objectContaining({
+          mode: "idiom_story",
+          promptTemplate: expect.stringContaining("冒险故事"),
+        }),
+      );
+      expect(memories.markInjected).toHaveBeenCalledWith(["m9"]);
     });
 
     it("short-circuits sleep_config to a deterministic reply without the main LLM", async () => {
@@ -939,6 +976,49 @@ describe("LlmAdapterModule", () => {
       );
     });
 
+    it("孩子档案（含性别）传主模型，精简摘要传 filler", async () => {
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.childProfile.findUnique.mockResolvedValue({
+        id: "cp-1",
+        userId: "u-1",
+        deviceId: "dev-internal-1",
+        name: "莉莉",
+        englishName: "Lily",
+        birthday: "2020-06-01",
+        gender: "female",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      llm.completeStream
+        .mockImplementationOnce(() => makeStream(["Hi Lily"])())
+        .mockImplementationOnce(() => makeStream(["你好呀 Lily"])());
+
+      await collect(service.streamReply(boundRequest));
+
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          childProfile: {
+            name: "莉莉",
+            birthday: "2020-06-01",
+            englishName: "Lily",
+            gender: "female",
+          },
+        }),
+      );
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          childBrief: expect.stringContaining("名叫 Lily"),
+        }),
+      );
+    });
+
     it("raises main-stream maxTokens to 800 for story turns", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolve.mockResolvedValue("idiom_story");
@@ -1076,6 +1156,7 @@ describe("LlmAdapterModule", () => {
       expect(prisma.device.findFirst).not.toHaveBeenCalled();
       expect(prisma.message.create).not.toHaveBeenCalled();
       expect(memories.buildPromptBlock).not.toHaveBeenCalled();
+      expect(memories.buildPreferenceBlock).not.toHaveBeenCalled();
       expect(memories.extractAndStore).not.toHaveBeenCalled();
     });
   });
