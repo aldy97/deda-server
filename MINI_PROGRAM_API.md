@@ -280,15 +280,17 @@ Content-Type: application/json
 - **鉴权**：JWT
 - **成功状态**：200
 
-响应数据：
+响应数据（2026-11 起接入机芯厂 MQTT 真实状态，字段允许空值）：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
-| `status` | string | 当前实现固定为 `online` |
-| `battery` | number | 电量百分比，当前实现固定为 `78` |
-| `isCharging` | boolean | 是否充电中，当前实现固定为 `true` |
-| `lastActiveAt` | string | 最近活跃时间，ISO 8601 |
+| `status` | string | `online`／`offline`；超过 15 秒未收到设备心跳即判定 `offline` |
+| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null` |
+| `isCharging` | boolean \| null | 是否充电中；机芯厂协议暂无充电字段，当前固定为 `null`（待协议补充） |
+| `lastActiveAt` | string \| null | 最近活跃时间，ISO 8601；设备从未上报时为 `null` |
+
+设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值。
 
 ### 3.5 查询设备绑定成员
 
@@ -320,10 +322,12 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `action` | string | 是 | `volume / power / interrupt / sleep / auto_shutdown` |
-| `volume` | number | 条件必填 | 音量 0–100；`action=volume` 时使用 |
+| `volume` | number | 条件必填 | 音量 0–100；`action=volume` 时必填，缺失返回 400 |
 | `powerOn` | boolean | 条件必填 | `action=power` 时使用；`true` 开机／唤醒，`false` 关机／休眠 |
 | `interruptEnabled` | boolean | 条件必填 | `action=interrupt` 时使用 |
 | `delayMinutes` | number | 条件必填 | `action=sleep / auto_shutdown` 时使用的延迟分钟数 |
+
+> 2026-11 起：`action=volume` 经机芯厂 MQTT 协议真实下发到设备；`power / interrupt / sleep / auto_shutdown` 四个动作协议尚未支持，服务端暂返回成功但不产生实际效果，待机芯厂补协议后接入。`action=volume` 时设备不存在返回 404。
 
 响应数据：
 

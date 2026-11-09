@@ -28,11 +28,14 @@ import { MessagesAnalyticsController } from "./messages-analytics.controller";
 import { MessagesAnalyticsService } from "./messages-analytics.service";
 import { LlmAnalyticsController } from "./llm-analytics.controller";
 import { LlmAnalyticsService } from "./llm-analytics.service";
+import { DevicesAdminController } from "./devices-admin.controller";
+import { DeviceLinkModule } from "../device-link/device-link.module";
 
 @Module({
-  imports: [PassportModule],
+  imports: [PassportModule, DeviceLinkModule],
   controllers: [
     AnalyticsAuthController,
+    DevicesAdminController,
     OverviewController,
     RetentionController,
     EngagementController,
