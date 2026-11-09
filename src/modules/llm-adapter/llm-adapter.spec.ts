@@ -525,6 +525,32 @@ describe("LlmAdapterModule", () => {
       if (result.ok) expect(result.value.user).toBe("AA:BB:CC:DD:EE:FF");
     });
 
+    it("captures deviceid injected via llm_eb as device hint", () => {
+      const result = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+        deviceid: "9c230cb5d3d4",
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.deviceid).toBe("9c230cb5d3d4");
+    });
+
+    it("leaves deviceid undefined when absent, not a string, or blank", () => {
+      const absent = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+      });
+      expect(absent.ok && absent.value.deviceid).toBeUndefined();
+      const nonString = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+        deviceid: 42,
+      });
+      expect(nonString.ok && nonString.value.deviceid).toBeUndefined();
+      const blank = parseChatCompletionRequest({
+        messages: [{ role: "user", content: "hello" }],
+        deviceid: "   ",
+      });
+      expect(blank.ok && blank.value.deviceid).toBeUndefined();
+    });
+
     it("leaves user undefined when absent or not a string", () => {
       const absent = parseChatCompletionRequest({
         messages: [{ role: "user", content: "hello" }],
@@ -803,6 +829,42 @@ describe("LlmAdapterModule", () => {
       const where = prisma.device.findFirst.mock.calls[0][0];
       expect(JSON.stringify(where)).toContain("dev-header-9");
       expect(JSON.stringify(where)).not.toContain("dev-1001");
+    });
+
+    it("resolves device by the deviceid field and persists messages", async () => {
+      prisma.device.findFirst.mockResolvedValue({
+        id: "dev-internal-2",
+        deviceId: "9c230cb5d3d4",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const req: ChatCompletionRequest = {
+        model: "deda-english-tutor",
+        stream: true,
+        deviceid: "9c230cb5d3d4",
+        messages: [{ role: "user", content: "hello deda" }],
+      };
+      await collect(service.streamReply(req));
+      const where = prisma.device.findFirst.mock.calls[0][0];
+      expect(JSON.stringify(where)).toContain("9c230cb5d3d4");
+      // 非匿名链路：消息正常落库
+      expect(prisma.message.create).toHaveBeenCalled();
+      expect(prisma.message.create.mock.calls[0][0].data.deviceId).toBe(
+        "dev-internal-2",
+      );
+    });
+
+    it("prefers deviceid over the legacy user field", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        deviceid: "9c230cb5d3d4",
+        user: "legacy-mac-user",
+      };
+      await collect(service.streamReply(req));
+      const where = prisma.device.findFirst.mock.calls[0][0];
+      expect(JSON.stringify(where)).toContain("9c230cb5d3d4");
+      expect(JSON.stringify(where)).not.toContain("legacy-mac-user");
     });
 
     it("uses DB history instead of client-supplied history when bound", async () => {

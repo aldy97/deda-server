@@ -94,9 +94,9 @@
 设备 ⇄(MQTT) 设备管理：电量、音量、版本、睡眠、重启、OTA（协议见机芯厂 MQTT 文档）
 ```
 
-- 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"user":"deda-toy","thinking":{"type":"disabled"}}`。
+- 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"deviceid":"<设备唯一标识>","thinking":{"type":"disabled"}}`。
 - 适配层约定：容忍 `llm_eb` 注入的未知 body 字段；`llm_sys` 注入的 system 消息保留在最前，动态 prompt 追加其后；`model` 不校验、原样回显；SSE 帧为 role 帧 → content 增量帧 → `finish_reason:"stop"` → `data: [DONE]`。
-- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份：请求体 `user` 字段（机芯厂约定 = 设备 MAC，重启/烧录/OTA 不变），或显式 header `X-Deda-Device-Id`（优先）；两者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
+- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份三级识别链：显式 header `X-Deda-Device-Id`（最高优先）→ 请求体 `deviceid`（机芯厂正式约定，与小程序家长绑定编号一致，重启/烧录/OTA 不变）→ 请求体 `user` 字段（旧约定兼容 fallback）；三者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
 - **能力对齐矩阵**（老链路 vendor WS → 新链路 llm-adapter）：
 
 | 能力 | 老链路 | 新链路 | 说明 |
