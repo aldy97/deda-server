@@ -397,14 +397,35 @@ export class LlmService {
   }
 
   /**
+   * 设备角色人设表（与 adventure.service.ts 的 CHARACTER_PERSONAS 同步修改）。
+   * 注入主对话 system prompt，让模型始终以该角色自居（含自报名字）。
+   */
+  static readonly CHARACTER_PERSONAS: Record<string, string> = {
+    elly: "小象 Elly：听风原野的居民，性格温暖好奇，说话轻声细语，喜欢用「呀」「呢」结尾，爱鼓励孩子。",
+    polly:
+      "小马 Polly：听风原野的居民，性格开朗勇敢，说话活泼简洁，喜欢邀请孩子一起尝试，也爱鼓励孩子。",
+  };
+
+  /**
    * 构建首响「打哈哈」prompt（小模型用）
    * 业内 filler 写法要点：明确角色定位（只为正式回答争取时间）、
    * 语言跟随用户、极短、禁止实质回答、措辞多样化，并给 few-shot 示例。
    * 不带教材上下文与历史，避免小模型展开真正回答。
    * @param recentFillers 最近若干轮本方用过的 filler 原文，
    * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
+   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设），让 filler
+   * 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
+   * "filler 自称小星但主模型是 Elly"这类矛盾播报
    */
-  buildFillerPrompt(asrText: string, recentFillers?: string[]): LlmMessage[] {
+  buildFillerPrompt(
+    asrText: string,
+    recentFillers?: string[],
+    turnContext?: {
+      intent?: string;
+      adventureDeclined?: boolean;
+      persona?: string;
+    },
+  ): LlmMessage[] {
     const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
 
 Rules:
@@ -415,12 +436,15 @@ Rules:
 5. No lists, no emojis, no questions.
 6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
 7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.
+8. Never announce, preview, promise, or start any actual content — no story openings (e.g. "once upon a time"), no "let's hear / let's begin / 我们开始吧", no claims that a mode or story is starting. You only acknowledge and echo; the main reply does everything else.
 
 Examples:
 Child: 我喜欢上海的天气 → 原来你喜欢上海的天气呀
 Child: Why is the sky blue? → That is such a fun question!
 Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
 Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
+
+    const contextSection = this.buildFillerContextSection(turnContext);
 
     const bannedSection =
       recentFillers && recentFillers.length > 0
@@ -430,9 +454,46 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
         : "";
 
     return [
-      { role: "system", content: systemPrompt + bannedSection },
+      {
+        role: "system",
+        content: systemPrompt + contextSection + bannedSection,
+      },
       { role: "user", content: asrText },
     ];
+  }
+
+  /** filler 本轮情境段：仅声明自身身份与主回答走向，filler 不得复述细节 */
+  private buildFillerContextSection(turnContext?: {
+    intent?: string;
+    adventureDeclined?: boolean;
+    persona?: string;
+  }): string {
+    const parts: string[] = [];
+    if (turnContext?.persona) {
+      // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
+      parts.push(
+        `Your identity: ${turnContext.persona} Never invent a different name or identity for yourself.`,
+      );
+    }
+    if (turnContext?.adventureDeclined) {
+      parts.push(
+        `Context for this turn (never mention it explicitly): the child asked for the daily adventure, but today's adventure is ALREADY FINISHED — the main reply will gently say so and suggest another topic. Do NOT announce, promise, or preview the adventure; give only a neutral warm acknowledgment.`,
+      );
+    } else if (
+      turnContext?.intent &&
+      [
+        "english_story",
+        "idiom_story",
+        "sleep_story",
+        "adventure_story",
+        "free_story",
+      ].includes(turnContext.intent)
+    ) {
+      parts.push(
+        `Context for this turn (never mention it explicitly): the main reply WILL tell a story. A short warm lead-in like "好呀，故事时间到啦" is fine, but never start or preview the story content yourself.`,
+      );
+    }
+    return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
   }
 
   /**
@@ -486,7 +547,8 @@ ${params.segmentText}
    * 构建儿童对话 prompt
    * @param asrText 当前用户输入
    * @param history 同设备同模式的最近对话历史
-   * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板
+   * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板、
+   * 设备角色（characterKey → 人设段落，让模型始终以该角色自居）
    */
   buildEnglishTutorPrompt(
     asrText: string,
@@ -500,12 +562,20 @@ ${params.segmentText}
       promptTemplate?: string;
       mode?: string;
       conversationModeKey?: string;
+      characterKey?: string;
     },
   ): LlmMessage[] {
     const childProfile = options?.childProfile;
     const promptTemplate = options?.promptTemplate;
 
     const childProfileSection = this.buildChildProfileSection(childProfile);
+    const persona = options?.characterKey
+      ? (LlmService.CHARACTER_PERSONAS[options.characterKey] ??
+        LlmService.CHARACTER_PERSONAS.elly)
+      : undefined;
+    const personaSection = persona
+      ? `Character persona — this is WHO YOU ARE; always speak as this character, including when the child asks your name:\n${persona}`
+      : "";
 
     const englishTutorRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
 Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
@@ -562,7 +632,7 @@ Rules:
       ? `${promptTemplate}\n\n${rulesSection}`
       : rulesSection;
 
-    const systemPrompt = [childProfileSection, templateSection]
+    const systemPrompt = [personaSection, childProfileSection, templateSection]
       .filter((section) => section.length > 0)
       .join("\n\n");
 

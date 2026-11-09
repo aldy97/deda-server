@@ -197,6 +197,31 @@ describe("LlmService", () => {
       expect(messages[1].content).toBe("How are you?");
     });
 
+    it("should inject the character persona when characterKey is provided", () => {
+      const messages = service.buildEnglishTutorPrompt(
+        "你叫什么名字？",
+        undefined,
+        {
+          mode: "free_chat",
+          characterKey: "elly",
+        },
+      );
+
+      // 人设注入：模型始终以该角色自居（含自报名字）
+      expect(messages[0].content).toContain("Character persona");
+      expect(messages[0].content).toContain("小象 Elly");
+    });
+
+    it("should fall back to elly persona for unknown characterKey and omit persona when absent", () => {
+      const unknown = service.buildEnglishTutorPrompt("Hello", undefined, {
+        characterKey: "nonexistent",
+      });
+      expect(unknown[0].content).toContain("小象 Elly");
+
+      const without = service.buildEnglishTutorPrompt("Hello");
+      expect(without[0].content).not.toContain("Character persona");
+    });
+
     it("should include conversation history", () => {
       const messages = service.buildEnglishTutorPrompt("I'm fine.", [
         { role: "user", content: "How are you?" },
@@ -699,6 +724,55 @@ describe("LlmService", () => {
         const messages = service.buildFillerPrompt("Hello", recent);
         expect(messages[0].content).not.toContain("do NOT reuse");
       }
+    });
+
+    it("should forbid announcing or starting actual content", () => {
+      const messages = service.buildFillerPrompt("继续冒险故事");
+
+      // 衔接防矛盾：filler 绝不预告/抢跑实质内容（故事开头、模式启动等）
+      expect(messages[0].content).toContain(
+        "Never announce, preview, promise, or start any actual content",
+      );
+      expect(messages[0].content).toContain("once upon a time");
+    });
+
+    it("should include a decline context when today's adventure is already done", () => {
+      const messages = service.buildFillerPrompt("继续冒险故事", [], {
+        intent: "adventure_story",
+        adventureDeclined: true,
+      });
+
+      // 门禁拒绝情境：filler 只能中性拖延，不得预告冒险
+      expect(messages[0].content).toContain("ALREADY FINISHED");
+      expect(messages[0].content).toContain("Do NOT announce");
+    });
+
+    it("should include a story context for story intents without decline", () => {
+      const messages = service.buildFillerPrompt("讲一个英语故事", [], {
+        intent: "english_story",
+      });
+
+      expect(messages[0].content).toContain("the main reply WILL tell a story");
+      expect(messages[0].content).toContain("never start or preview the story");
+    });
+
+    it("should add no context section for plain free chat", () => {
+      const messages = service.buildFillerPrompt("你好", [], {
+        intent: "free_chat",
+      });
+
+      expect(messages[0].content).not.toContain("Context for this turn");
+    });
+
+    it("should include identity guardrail when persona is provided", () => {
+      const messages = service.buildFillerPrompt("你叫什么名字", [], {
+        persona: "小象 Elly：听风原野的居民，性格温暖好奇。",
+      });
+
+      // 身份兜底：filler 不得编造名字（防与主回答人设矛盾）
+      expect(messages[0].content).toContain("Your identity");
+      expect(messages[0].content).toContain("小象 Elly");
+      expect(messages[0].content).toContain("Never invent a different name");
     });
   });
 
