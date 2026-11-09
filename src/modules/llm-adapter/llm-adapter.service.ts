@@ -326,17 +326,31 @@ export class LlmAdapterService {
         });
     }
 
-    // 只在非故事主回答中注入相关记忆（同老链路口径）
+    // 记忆注入：free_chat 走相关性召回；其余意图（故事/英语角等）注入
+    // 轻量偏好块，保证「Elly 懂我」跨模式连续；favorite_story_type 透出
+    // 给故事话术主动选题（均对齐「不增加 LLM 调用」的确定性口径）
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
     };
-    if (device && intent === "free_chat") {
+    let favoriteStoryType: string | null = null;
+    if (device) {
       try {
-        memoryPrompt = await this.childMemories.buildPromptBlock(
-          device.id,
-          asrText,
-        );
+        if (intent === "free_chat") {
+          memoryPrompt = await this.childMemories.buildPromptBlock(
+            device.id,
+            asrText,
+          );
+        } else {
+          const preference = await this.childMemories.buildPreferenceBlock(
+            device.id,
+          );
+          memoryPrompt = {
+            text: preference.text,
+            memoryIds: preference.memoryIds,
+          };
+          favoriteStoryType = preference.favoriteStoryType;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn(
@@ -349,9 +363,9 @@ export class LlmAdapterService {
     // 孩子档案注入称呼/年龄上下文（均对齐老链路）
     const childProfile = device ? await this.getChildProfile(device.id) : null;
     const promptTemplate = STORY_INTENTS.includes(intent)
-      ? this.storyPrompt(intent)
+      ? this.storyPrompt(intent, favoriteStoryType)
       : intent === "adventure_story" || intent === "free_story"
-        ? this.storyPrompt(intent)
+        ? this.storyPrompt(intent, favoriteStoryType)
         : await this.resolvePromptTemplate(
             mode,
             activeConfig?.conversationModeKey,
@@ -363,6 +377,7 @@ export class LlmAdapterService {
             name: childProfile.name,
             birthday: childProfile.birthday,
             englishName: childProfile.englishName,
+            gender: childProfile.gender,
           }
         : undefined,
       promptTemplate,
@@ -430,6 +445,9 @@ export class LlmAdapterService {
             persona: device
               ? (LlmService.CHARACTER_PERSONAS[device.characterKey] ??
                 LlmService.CHARACTER_PERSONAS.elly)
+              : undefined,
+            childBrief: childProfile
+              ? LlmService.buildChildBrief(childProfile)
               : undefined,
           }),
           model: this.llmService.smallModelName,
@@ -673,20 +691,37 @@ export class LlmAdapterService {
    * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或
    * 无集可播），统一走「自由创作、不承诺冒险」的降级话术。
    */
-  private storyPrompt(intent: ConversationIntent): string | undefined {
+  private storyPrompt(
+    intent: ConversationIntent,
+    favoriteStoryType?: string | null,
+  ): string | undefined {
+    let base: string | undefined;
     switch (intent) {
       case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
+        base =
+          "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
+        break;
       case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
+        base =
+          "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
+        break;
       case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
+        base =
+          "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
+        break;
       case "adventure_story":
       case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
+        base =
+          "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
+        break;
       default:
         return undefined;
     }
+    // 主动选题：孩子没指定题材时，优先讲 TA 最喜欢的故事类型（长期记忆）
+    if (favoriteStoryType) {
+      base += `\n孩子最喜欢的故事类型是「${favoriteStoryType}」：如果孩子这轮没有指定别的题材，优先讲这个类型。`;
+    }
+    return base;
   }
 
   /**

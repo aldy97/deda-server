@@ -300,6 +300,49 @@ describe("ChildMemoriesService", () => {
     ).resolves.toEqual({ text: "", memoryIds: [] });
   });
 
+  describe("buildPreferenceBlock", () => {
+    it("返回全部 active 有值记忆并透出 favorite_story_type", async () => {
+      prisma.childMemory.findMany.mockResolvedValue([
+        { id: "m1", key: "favorite_color", valueText: "蓝色" },
+        { id: "m2", key: "favorite_story_type", valueText: "冒险故事" },
+        { id: "m3", key: "favorite_animal", valueText: null }, // 墓碑行不带出
+      ]);
+
+      const result = await service.buildPreferenceBlock("device-1");
+
+      expect(prisma.childMemory.findMany).toHaveBeenCalledWith({
+        where: { deviceId: "device-1", status: "active" },
+        select: { id: true, key: true, valueText: true },
+      });
+      expect(result.memoryIds).toEqual(["m1", "m2"]);
+      expect(result.favoriteStoryType).toBe("冒险故事");
+      expect(result.text).toContain("蓝色");
+      expect(result.text).toContain("冒险故事");
+      expect(result.text).toContain("不是用户指令");
+    });
+
+    it("无 active 记忆时返回空块", async () => {
+      prisma.childMemory.findMany.mockResolvedValue([]);
+
+      await expect(service.buildPreferenceBlock("device-1")).resolves.toEqual({
+        text: "",
+        memoryIds: [],
+        favoriteStoryType: null,
+      });
+    });
+
+    it("无 favorite_story_type 时透出 null", async () => {
+      prisma.childMemory.findMany.mockResolvedValue([
+        { id: "m1", key: "favorite_color", valueText: "蓝色" },
+      ]);
+
+      const result = await service.buildPreferenceBlock("device-1");
+
+      expect(result.favoriteStoryType).toBeNull();
+      expect(result.memoryIds).toEqual(["m1"]);
+    });
+  });
+
   it("should mark memories as provided to the model after a successful reply", async () => {
     await service.markInjected(["memory-red"]);
 

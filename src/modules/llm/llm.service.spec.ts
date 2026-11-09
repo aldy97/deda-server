@@ -208,18 +208,21 @@ describe("LlmService", () => {
       );
 
       // 人设注入：模型始终以该角色自居（含自报名字）
-      expect(messages[0].content).toContain("Character persona");
+      expect(messages[0].content).toContain("Character identity");
       expect(messages[0].content).toContain("小象 Elly");
+      // 历史污染纠正指令：历史中的错误名字不得沿用
+      expect(messages[0].content).toContain("never repeat it");
     });
 
-    it("should fall back to elly persona for unknown characterKey and omit persona when absent", () => {
+    it("should fall back to elly persona for unknown or absent characterKey", () => {
       const unknown = service.buildEnglishTutorPrompt("Hello", undefined, {
         characterKey: "nonexistent",
       });
       expect(unknown[0].content).toContain("小象 Elly");
 
+      // 未建档/匿名设备也必须有人设兜底，杜绝主模型编造身份
       const without = service.buildEnglishTutorPrompt("Hello");
-      expect(without[0].content).not.toContain("Character persona");
+      expect(without[0].content).toContain("小象 Elly");
     });
 
     it("should include conversation history", () => {
@@ -294,10 +297,30 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain("Child Profile");
       expect(messages[0].content).toContain("Name: Alice");
       expect(messages[0].content).toContain("Birthday: 2018-05-20");
-      expect(messages[0].content).toContain("English Name: Ali");
+      expect(messages[0].content).toContain("English name: Ali");
+      // 由生日换算年龄（2018-05 → 当前 7-8 岁，视今年生日是否已过）
+      expect(messages[0].content).toMatch(/Age: [78] years old/);
       expect(messages[0].content).toContain(
-        "address the child using their name",
+        "Address the child naturally by their English name or name",
       );
+    });
+
+    it("should include gender guidance when provided", () => {
+      const girl = service.buildEnglishTutorPrompt("Hello", undefined, {
+        childProfile: { name: "莉莉", gender: "female" },
+      });
+      expect(girl[0].content).toContain("Gender: girl (she/her");
+
+      const boy = service.buildEnglishTutorPrompt("Hello", undefined, {
+        childProfile: { name: "豆豆", gender: "male" },
+      });
+      expect(boy[0].content).toContain("Gender: boy (he/him");
+
+      // 未设置性别不输出该字段
+      const unset = service.buildEnglishTutorPrompt("Hello", undefined, {
+        childProfile: { name: "豆豆" },
+      });
+      expect(unset[0].content).not.toContain("Gender:");
     });
 
     it("should use prompt template when provided", () => {
@@ -334,8 +357,7 @@ describe("LlmService", () => {
         system.indexOf("general rules"),
       );
       expect(system).toContain("Name: Bob");
-      expect(system).toContain("English Name: Bobby");
-      expect(system).toContain("Birthday: not provided");
+      expect(system).toContain("English name: Bobby");
       expect(system).not.toContain("textbook");
     });
 
@@ -773,6 +795,47 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain("Your identity");
       expect(messages[0].content).toContain("小象 Elly");
       expect(messages[0].content).toContain("Never invent a different name");
+    });
+
+    it("should include child brief when provided and omit when empty", () => {
+      const withBrief = service.buildFillerPrompt("你好呀", [], {
+        childBrief: "名叫 Amy，5 岁，女孩",
+      });
+      expect(withBrief[0].content).toContain("The child you are talking to");
+      expect(withBrief[0].content).toContain("名叫 Amy，5 岁，女孩");
+      expect(withBrief[0].content).toContain("never invent facts");
+
+      const without = service.buildFillerPrompt("你好呀", [], {});
+      expect(without[0].content).not.toContain("The child you are talking to");
+    });
+  });
+
+  describe("buildChildBrief / ageFromBirthday", () => {
+    it("组合称呼、年龄、性别；优先英文名", () => {
+      expect(
+        LlmService.buildChildBrief({
+          name: "莉莉",
+          englishName: "Lily",
+          birthday: "2020-06-01",
+          gender: "female",
+        }),
+      ).toBe(
+        `名叫 Lily，${new Date().getUTCFullYear() - 2020 - (new Date().getUTCMonth() < 5 ? 1 : 0)} 岁，女孩`,
+      );
+      expect(LlmService.buildChildBrief({ name: "豆豆", gender: "male" })).toBe(
+        "名叫 豆豆，男孩",
+      );
+      expect(LlmService.buildChildBrief({})).toBe("");
+      expect(LlmService.buildChildBrief(undefined)).toBe("");
+    });
+
+    it("ageFromBirthday：非法格式与越界返回 null", () => {
+      expect(LlmService.ageFromBirthday("2020-06-01")).not.toBeNull();
+      expect(LlmService.ageFromBirthday("20200601")).toBeNull();
+      expect(LlmService.ageFromBirthday("not-a-date")).toBeNull();
+      expect(LlmService.ageFromBirthday(null)).toBeNull();
+      expect(LlmService.ageFromBirthday("1990-01-01")).toBeNull(); // 超 18 岁
+      expect(LlmService.ageFromBirthday("2999-01-01")).toBeNull(); // 未来
     });
   });
 

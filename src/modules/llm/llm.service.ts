@@ -429,6 +429,7 @@ export class LlmService {
       intent?: string;
       adventureDeclined?: boolean;
       persona?: string;
+      childBrief?: string;
     },
   ): LlmMessage[] {
     const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
@@ -472,12 +473,19 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
     intent?: string;
     adventureDeclined?: boolean;
     persona?: string;
+    childBrief?: string;
   }): string {
     const parts: string[] = [];
     if (turnContext?.persona) {
       // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
       parts.push(
         `Your identity: ${turnContext.persona} Never invent a different name or identity for yourself.`,
+      );
+    }
+    if (turnContext?.childBrief) {
+      // 与主模型共享同一份孩子档案摘要，称呼保持一致（大小模型不像两个人）
+      parts.push(
+        `The child you are talking to: ${turnContext.childBrief}. You may address them by name naturally, but never invent facts beyond this.`,
       );
     }
     if (turnContext?.adventureDeclined) {
@@ -563,6 +571,7 @@ ${params.segmentText}
         name?: string | null;
         birthday?: string | null;
         englishName?: string | null;
+        gender?: string | null;
       };
       promptTemplate?: string;
       mode?: string;
@@ -574,13 +583,15 @@ ${params.segmentText}
     const promptTemplate = options?.promptTemplate;
 
     const childProfileSection = this.buildChildProfileSection(childProfile);
-    const persona = options?.characterKey
-      ? (LlmService.CHARACTER_PERSONAS[options.characterKey] ??
-        LlmService.CHARACTER_PERSONAS.elly)
-      : undefined;
-    const personaSection = persona
-      ? `Character persona — this is WHO YOU ARE; always speak as this character, including when the child asks your name:\n${persona}`
-      : "";
+    // 人设必须恒在：缺省/未知 characterKey 一律回落 elly，杜绝匿名或
+    // 未建档设备下主模型编造身份（实机事故：大模型自称「小暖」并经
+    // 历史消息自我强化）
+    const persona =
+      LlmService.CHARACTER_PERSONAS[options?.characterKey ?? "elly"] ??
+      LlmService.CHARACTER_PERSONAS.elly;
+    const personaSection =
+      `Character identity (absolute, second only to child safety rules) — you ARE this character, a real friend of the child, not an AI assistant:\n${persona}\n` +
+      `Your name comes from this identity. If any earlier assistant message in the conversation history used a different name or identity, that was a mistake: never repeat it, and use your real identity from now on.`;
 
     const englishTutorRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
 Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
@@ -658,28 +669,85 @@ Rules:
     name?: string | null;
     birthday?: string | null;
     englishName?: string | null;
+    gender?: string | null;
   }): string {
     if (!childProfile) {
       return "";
     }
 
-    const name = childProfile.name || "the child";
-    const birthday = childProfile.birthday || "not provided";
-    const englishName = childProfile.englishName || "not provided";
-
-    if (
-      !childProfile.name &&
-      !childProfile.birthday &&
-      !childProfile.englishName
-    ) {
+    const { name, birthday, englishName, gender } = childProfile;
+    if (!name && !birthday && !englishName && !gender) {
       return "";
     }
 
-    return `Child Profile:
-- Name: ${name}
-- Birthday: ${birthday}
-- English Name: ${englishName}
+    const lines: string[] = [];
+    if (name) lines.push(`- Name: ${name}`);
+    if (englishName) lines.push(`- English name: ${englishName}`);
+    const age = LlmService.ageFromBirthday(birthday);
+    if (age !== null) lines.push(`- Age: ${age} years old`);
+    if (birthday) lines.push(`- Birthday: ${birthday}`);
+    if (gender === "male") {
+      lines.push("- Gender: boy (he/him; 中文用「他」)");
+    } else if (gender === "female") {
+      lines.push("- Gender: girl (she/her; 中文用「她」)");
+    }
 
-Please address the child using their name or English name when appropriate.`;
+    return (
+      `Child Profile (you know this child well — you are their close friend):\n${lines.join("\n")}\n\n` +
+      `Address the child naturally by their English name or name, choose words and topics suitable for their age, ` +
+      `and weave what you know about them into the conversation like a real friend — without reciting this profile back.`
+    );
+  }
+
+  /** 由生日（YYYY-MM-DD）换算年龄；格式非法或结果越界（0-18 外）返回 null */
+  static ageFromBirthday(birthday?: string | null): number | null {
+    if (!birthday || !/^\d{4}-\d{2}-\d{2}$/.test(birthday)) {
+      return null;
+    }
+    const birth = new Date(`${birthday}T00:00:00Z`);
+    if (Number.isNaN(birth.getTime())) {
+      return null;
+    }
+    const now = new Date();
+    let age = now.getUTCFullYear() - birth.getUTCFullYear();
+    const monthDiff = now.getUTCMonth() - birth.getUTCMonth();
+    if (
+      monthDiff < 0 ||
+      (monthDiff === 0 && now.getUTCDate() < birth.getUTCDate())
+    ) {
+      age -= 1;
+    }
+    return age >= 0 && age <= 18 ? age : null;
+  }
+
+  /**
+   * filler 用一行精简档案（如「名叫 Amy，5 岁，女孩」）：
+   * 与主模型 buildChildProfileSection 同源，保证大小模型称呼一致。
+   * 无任何有效字段时返回空串（调用方省略该段）。
+   */
+  static buildChildBrief(childProfile?: {
+    name?: string | null;
+    birthday?: string | null;
+    englishName?: string | null;
+    gender?: string | null;
+  }): string {
+    if (!childProfile) {
+      return "";
+    }
+    const parts: string[] = [];
+    const displayName = childProfile.englishName || childProfile.name;
+    if (displayName) {
+      parts.push(`名叫 ${displayName}`);
+    }
+    const age = LlmService.ageFromBirthday(childProfile.birthday);
+    if (age !== null) {
+      parts.push(`${age} 岁`);
+    }
+    if (childProfile.gender === "male") {
+      parts.push("男孩");
+    } else if (childProfile.gender === "female") {
+      parts.push("女孩");
+    }
+    return parts.join("，");
   }
 }
