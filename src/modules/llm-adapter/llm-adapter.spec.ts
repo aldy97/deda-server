@@ -449,7 +449,10 @@ describe("LlmAdapterModule", () => {
         model: "small-model",
         maxTokens: 60,
       });
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith("我想玩每日冒险", []);
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith("我想玩每日冒险", [], {
+        intent: "free_chat",
+        adventureDeclined: false,
+      });
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toEqual({
         filler: "嗯——",
@@ -865,6 +868,43 @@ describe("LlmAdapterModule", () => {
       const where = prisma.device.findFirst.mock.calls[0][0];
       expect(JSON.stringify(where)).toContain("9c230cb5d3d4");
       expect(JSON.stringify(where)).not.toContain("legacy-mac-user");
+    });
+
+    it("passes the device characterKey into the main prompt builder", async () => {
+      prisma.device.findFirst.mockResolvedValue({
+        ...deviceRow,
+        characterKey: "polly",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(service.streamReply(boundRequest));
+      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+        "hello deda",
+        expect.any(Array),
+        expect.objectContaining({ characterKey: "polly" }),
+      );
+    });
+
+    it("passes adventureDeclined context to the filler when the gate blocks entry", async () => {
+      // 显式开启 filler（生产默认开，测试默认关）
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolve.mockResolvedValue("adventure_story");
+      adventure.isCompletedToday.mockResolvedValue(true);
+      llm.completeStream
+        .mockImplementationOnce(() => makeStream(["今天冒险完成啦"])())
+        .mockImplementationOnce(() => makeStream(["嗯——"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "继续冒险故事" }],
+      };
+      await collect(service.streamReply(req));
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
+        "继续冒险故事",
+        expect.any(Array),
+        { intent: "adventure_story", adventureDeclined: true },
+      );
     });
 
     it("uses DB history instead of client-supplied history when bound", async () => {

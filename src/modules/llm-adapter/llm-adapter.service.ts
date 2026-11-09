@@ -225,6 +225,8 @@ export class LlmAdapterService {
 
     // 冒险每日门禁（对齐老链路）：故事类意图（除哄睡）在今日已完成时记
     // entry_blocked；未完成时 adventure_story/free_story 优先进入冒险。
+    // adventureDeclined 供 filler 情境段使用，避免拖延话术与婉拒播报矛盾。
+    let adventureDeclined = false;
     if (device && intent !== "free_chat" && intent !== "sleep_story") {
       const completedToday = await this.adventure.isCompletedToday(device.id);
       if (
@@ -242,6 +244,7 @@ export class LlmAdapterService {
         }
       }
       if (completedToday) {
+        adventureDeclined = true;
         await this.adventure.recordEntryBlocked(
           device.id,
           intent === "adventure_story" ? "free_story" : intent,
@@ -358,6 +361,7 @@ export class LlmAdapterService {
       promptTemplate,
       mode,
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
+      characterKey: device?.characterKey,
     });
     const messages: LlmMessage[] = [
       ...baiduSystem,
@@ -411,7 +415,10 @@ export class LlmAdapterService {
         const fillerStream = this.llmService.completeStream({
           scene: "filler",
           deviceId: device?.id,
-          messages: this.llmService.buildFillerPrompt(asrText, recentFillers),
+          messages: this.llmService.buildFillerPrompt(asrText, recentFillers, {
+            intent,
+            adventureDeclined,
+          }),
           model: this.llmService.smallModelName,
           maxTokens: 60,
         });
@@ -567,7 +574,7 @@ export class LlmAdapterService {
   private async resolveDevice(
     req: ChatCompletionRequest,
     deviceHint?: string,
-  ): Promise<{ id: string; deviceId: string } | null> {
+  ): Promise<{ id: string; deviceId: string; characterKey: string } | null> {
     const raw = (deviceHint ?? req.deviceid ?? req.user)?.trim();
     if (!raw) return null;
 
@@ -581,7 +588,11 @@ export class LlmAdapterService {
       },
     });
     if (existing) {
-      return { id: existing.id, deviceId: existing.deviceId };
+      return {
+        id: existing.id,
+        deviceId: existing.deviceId,
+        characterKey: existing.characterKey,
+      };
     }
     const created = await this.prisma.device.create({
       data: {
@@ -589,7 +600,11 @@ export class LlmAdapterService {
         macAddress: MAC_PATTERN.test(raw) ? this.normalizeMac(raw) : null,
       },
     });
-    return { id: created.id, deviceId: created.deviceId };
+    return {
+      id: created.id,
+      deviceId: created.deviceId,
+      characterKey: created.characterKey,
+    };
   }
 
   /** MAC 归一化：AA:BB:CC:DD:EE:FF / AA-BB-.. / aabb.. → aabbccddeeff */
@@ -648,14 +663,14 @@ export class LlmAdapterService {
   private storyPrompt(intent: ConversationIntent): string | undefined {
     switch (intent) {
       case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
+        return "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
       case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
+        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
       case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。";
+        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
       case "adventure_story":
       case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。";
+        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
       default:
         return undefined;
     }
