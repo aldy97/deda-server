@@ -148,9 +148,22 @@ GET /analytics/llm/trend?startDate=&endDate=&granularity=day&scene=
 
 GET /analytics/llm/recent-failures?page=1&pageSize=20&scene=
 → { total, page, pageSize,
-    items: [{ id, scene, tier, model, failureReason, latencyMs, deviceId, createdAt }] }
-   // createdAt 倒序；pageSize ≤ 100；deviceId 为业务设备 ID，匿名/后台调用为 null
+    items: [{ id, scene, tier, model, failureReason, latencyMs, turnId, deviceId, createdAt }] }
+   // createdAt 倒序；pageSize ≤ 100；deviceId 为业务设备 ID，匿名/后台调用为 null；
+   // turnId 为对话轮次 ID（可跳消息明细 ?turnId=），后台任务/存量数据为 null
+
+GET /analytics/llm/by-turn?turnId=
+→ { turnId,
+    calls: [{ id, scene, model, tier, success, failureReason,
+              latencyMs, firstTokenMs,
+              promptTokens, completionTokens, totalTokens, createdAt }] }
+   // 单轮调用链路：createdAt 升序；turnId 为 messages.turn_id（一轮问答一个 ID，
+   // 安全/意图/filler/主回答/记忆提取共用）；无记录返回空 calls，不报错；
+   // 后台任务（parent_report / sleep_*）无轮次上下文，turn_id 恒 null，本接口查不到
 ```
+
+`llm_usage_logs.turn_id`（可空，带索引）：对话链路的 turnId 由 `VendorService.handleTextIn`
+在入口生成并贯穿同轮全部 LLM 调用与消息落库；冒险状态机超时推送等非对话场景不落 turnId。
 
 （原 `GET /analytics/quality/llm-usage` 501 占位接口已随本批下线。）
 

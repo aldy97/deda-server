@@ -94,6 +94,18 @@ describe("ConversationSessionService", () => {
     },
   );
 
+  it("threads turnId into intent classification when provided", async () => {
+    llmService.complete.mockResolvedValue({
+      text: "free_chat",
+    } as Awaited<ReturnType<LlmService["complete"]>>);
+
+    await service.resolve("device-1", "我想听故事", "turn-1");
+
+    expect(llmService.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ scene: "intent_classify", turnId: "turn-1" }),
+    );
+  });
+
   it("routes ordinary chat without model classification or a database write", async () => {
     await expect(service.resolve("device-1", "今天天气怎么样")).resolves.toBe(
       "free_chat",

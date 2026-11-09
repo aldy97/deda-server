@@ -1,7 +1,16 @@
 import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { Transform, Type } from "class-transformer";
-import { IsIn, IsInt, IsOptional, Max, Min } from "class-validator";
+import {
+  IsIn,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from "class-validator";
 import { LLM_SCENES } from "../llm/llm.service";
 import { AnalyticsDateRangeQueryDto } from "./dto/analytics-query.dto";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
@@ -46,6 +55,14 @@ export class LlmRecentFailuresQueryDto {
   scene?: string;
 }
 
+export class LlmByTurnQueryDto {
+  /** 对话轮次 ID（messages.turn_id） */
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  turnId!: string;
+}
+
 @ApiTags("analytics-llm")
 @ApiBearerAuth()
 @UseGuards(AnalyticsAuthGuard)
@@ -77,5 +94,14 @@ export class LlmAnalyticsController {
   })
   getRecentFailures(@Query() query: LlmRecentFailuresQueryDto) {
     return this.llmAnalytics.getRecentFailures(query);
+  }
+
+  @Get("by-turn")
+  @ApiOperation({
+    summary:
+      "单轮 LLM 调用链路（按 turnId 查同轮全部调用，createdAt 升序；无记录返回空数组）",
+  })
+  getByTurn(@Query() query: LlmByTurnQueryDto) {
+    return this.llmAnalytics.getByTurn(query.turnId);
   }
 }

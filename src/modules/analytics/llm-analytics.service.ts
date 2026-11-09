@@ -253,6 +253,32 @@ export class LlmAnalyticsService {
     return { granularity, series };
   }
 
+  /** 单轮 LLM 调用链路：createdAt 升序，把同轮多次调用串成时间线 */
+  async getByTurn(turnId: string) {
+    const rows = await this.prisma.llmUsageLog.findMany({
+      where: { turnId },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return {
+      turnId,
+      calls: rows.map((row) => ({
+        id: row.id,
+        scene: row.scene,
+        model: row.model,
+        tier: row.tier,
+        success: row.success,
+        failureReason: row.failureReason,
+        latencyMs: row.latencyMs,
+        firstTokenMs: row.firstTokenMs,
+        promptTokens: row.promptTokens,
+        completionTokens: row.completionTokens,
+        totalTokens: row.totalTokens,
+        createdAt: row.createdAt,
+      })),
+    };
+  }
+
   /** 最近失败明细：createdAt 倒序，deviceId 对外返回业务 ID */
   async getRecentFailures(query: LlmRecentFailuresQuery) {
     const page = query.page ?? 1;
@@ -283,6 +309,7 @@ export class LlmAnalyticsService {
         model: row.model,
         failureReason: row.failureReason,
         latencyMs: row.latencyMs,
+        turnId: row.turnId ?? null,
         deviceId: row.device?.deviceId ?? null,
         createdAt: row.createdAt,
       })),

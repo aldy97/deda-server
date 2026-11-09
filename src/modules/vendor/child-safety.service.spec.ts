@@ -89,6 +89,16 @@ describe("ChildSafetyService", () => {
       );
     });
 
+    it("threads turnId into the usage-logged LLM call when provided", async () => {
+      llmService.complete.mockResolvedValue({ text: "safe" });
+
+      await service.classifyL2("今天天气真好", "device-1", "turn-1");
+
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "safety_l2", turnId: "turn-1" }),
+      );
+    });
+
     it("blocks paraphrased sexual content that dodged L1", async () => {
       llmService.complete.mockResolvedValue({ text: "sexual" });
 

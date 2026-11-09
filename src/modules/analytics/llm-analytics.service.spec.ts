@@ -216,6 +216,7 @@ describe("LlmAnalyticsService", () => {
           model: "qwen-flash",
           failureReason: "timeout",
           latencyMs: 5000,
+          turnId: "turn-f1",
           createdAt: at("2026-11-07"),
           device: { deviceId: "DEDA-0001" },
         },
@@ -226,6 +227,7 @@ describe("LlmAnalyticsService", () => {
           model: "deepseek-flash",
           failureReason: "empty_response",
           latencyMs: 800,
+          turnId: null,
           createdAt: at("2026-11-06"),
           device: null,
         },
@@ -239,8 +241,10 @@ describe("LlmAnalyticsService", () => {
         id: "log-1",
         failureReason: "timeout",
         deviceId: "DEDA-0001",
+        turnId: "turn-f1",
       });
       expect(result.items[1].deviceId).toBeNull();
+      expect(result.items[1].turnId).toBeNull();
 
       const findArgs = prisma.llmUsageLog.findMany.mock.calls[0][0];
       expect(findArgs.where).toEqual({ success: false });
@@ -265,6 +269,73 @@ describe("LlmAnalyticsService", () => {
       expect(prisma.llmUsageLog.count).toHaveBeenCalledWith({
         where: { success: false, scene: "intent_classify" },
       });
+    });
+  });
+
+  describe("getByTurn", () => {
+    it("returns the full call chain for a turn, ordered by createdAt asc", async () => {
+      prisma.llmUsageLog.findMany.mockResolvedValue([
+        {
+          id: "log-1",
+          scene: "safety_l2",
+          model: "qwen-flash",
+          tier: "small",
+          success: true,
+          failureReason: null,
+          latencyMs: 320,
+          firstTokenMs: null,
+          promptTokens: 210,
+          completionTokens: 2,
+          totalTokens: 212,
+          createdAt: new Date("2026-11-09T10:00:00.100Z"),
+        },
+        {
+          id: "log-2",
+          scene: "chat_main",
+          model: "deepseek-flash",
+          tier: "main",
+          success: false,
+          failureReason: "timeout",
+          latencyMs: 30000,
+          firstTokenMs: null,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          createdAt: new Date("2026-11-09T10:00:00.500Z"),
+        },
+      ]);
+
+      const result = await service.getByTurn("turn-1");
+
+      expect(result.turnId).toBe("turn-1");
+      expect(result.calls).toHaveLength(2);
+      expect(result.calls[0]).toEqual({
+        id: "log-1",
+        scene: "safety_l2",
+        model: "qwen-flash",
+        tier: "small",
+        success: true,
+        failureReason: null,
+        latencyMs: 320,
+        firstTokenMs: null,
+        promptTokens: 210,
+        completionTokens: 2,
+        totalTokens: 212,
+        createdAt: new Date("2026-11-09T10:00:00.100Z"),
+      });
+      expect(result.calls[1].failureReason).toBe("timeout");
+
+      const findArgs = prisma.llmUsageLog.findMany.mock.calls[0][0];
+      expect(findArgs.where).toEqual({ turnId: "turn-1" });
+      expect(findArgs.orderBy).toEqual({ createdAt: "asc" });
+    });
+
+    it("returns an empty calls array for an unknown turnId", async () => {
+      prisma.llmUsageLog.findMany.mockResolvedValue([]);
+
+      const result = await service.getByTurn("turn-missing");
+
+      expect(result).toEqual({ turnId: "turn-missing", calls: [] });
     });
   });
 });

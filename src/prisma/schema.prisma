@@ -501,11 +501,13 @@ model LlmUsageLog {
   completionTokens Int?
   totalTokens      Int?
   deviceId         String?  // FK → devices.id，可空（后台任务无设备上下文）
+  turnId           String?  @map("turn_id") // 对话轮次 ID；后台任务无轮次上下文时为空
   createdAt        DateTime @default(now())
 
   device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
   @@index([createdAt, scene])
   @@index([scene, success, createdAt])
+  @@index([turnId])
   @@map("llm_usage_logs")
 }

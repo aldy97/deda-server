@@ -217,6 +217,10 @@ export class VendorService {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
 
+    // 一轮问答一个 turnId：安全/意图/filler/主回答/消息落库共用，
+    // llm_usage_logs 据此把同轮多次 LLM 调用串成链路（模型监控对照视角）
+    const turnId = randomUUID();
+
     // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const l1Verdict = this.childSafetyService.checkL1(dto.asrText);
     if (l1Verdict.blocked) {
@@ -224,6 +228,7 @@ export class VendorService {
         device,
         l1Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
         dto.asrText,
+        turnId,
       );
     }
 
@@ -233,24 +238,30 @@ export class VendorService {
       dto.asrText,
     );
     if (adventureReply) {
-      return this.sendAdventureReply(device, adventureReply, dto.asrText);
+      return this.sendAdventureReply(
+        device,
+        adventureReply,
+        dto.asrText,
+        turnId,
+      );
     }
 
     // L2 安全分类与意图路由并行：小模型一次调用，补 L1 语义盲区
     const [storyIntent, l2Verdict] = await Promise.all([
-      this.conversationSessionService.resolve(device.id, dto.asrText),
-      this.childSafetyService.classifyL2(dto.asrText, device.id),
+      this.conversationSessionService.resolve(device.id, dto.asrText, turnId),
+      this.childSafetyService.classifyL2(dto.asrText, device.id, turnId),
     ]);
     if (l2Verdict.blocked) {
       return this.sendSafetyReply(
         device,
         l2Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
         dto.asrText,
+        turnId,
       );
     }
     // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
     if (storyIntent === "sleep_config") {
-      return this.sendSleepConfigReply(device, dto.asrText);
+      return this.sendSleepConfigReply(device, dto.asrText, turnId);
     }
     const storyMode = storyIntent !== "free_chat";
     if (storyMode && storyIntent !== "sleep_story") {
@@ -268,7 +279,12 @@ export class VendorService {
         );
         if (startedAdventure) {
           await this.conversationSessionService.reset(device.id);
-          return this.sendAdventureReply(device, startedAdventure, dto.asrText);
+          return this.sendAdventureReply(
+            device,
+            startedAdventure,
+            dto.asrText,
+            turnId,
+          );
         }
       }
       if (completedToday) {
@@ -302,8 +318,8 @@ export class VendorService {
       mode,
     );
 
-    // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
-    const turnId = randomUUID();
+    // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）。
+    // turnId 复用函数顶部生成的轮次 ID（安全/意图日志已带上同一 ID）。
     const sourceOccurredAt = new Date();
     await this.prisma.message.create({
       data: {
@@ -420,6 +436,7 @@ export class VendorService {
         const llmResult = await this.llmService.complete({
           scene: "chat_main",
           deviceId: device.id,
+          turnId,
           messages,
         });
         responseText = llmResult.text;
@@ -498,8 +515,9 @@ export class VendorService {
     device: { id: string; deviceId: string },
     verdict: SafetyVerdict & { category: BlockedSafetyCategory },
     asrText: string,
+    // 由 handleTextIn 传入轮次 ID，与 L2 安全日志同轮；缺省自动生成（超时监听器等无轮次场景）
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const text = this.childSafetyService.cannedReply(verdict.category);
     this.logger.warn(
       `Child safety ${verdict.layer} blocked deviceId=${device.deviceId} ` +
@@ -591,8 +609,8 @@ export class VendorService {
   private async sendSleepConfigReply(
     device: { id: string; deviceId: string },
     asrText: string,
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const result = await this.sleepVoiceConfigService.handle(
       device.id,
       asrText,
@@ -681,8 +699,8 @@ export class VendorService {
     device: { id: string; deviceId: string },
     adventureReply: AdventureReply,
     asrText?: string,
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const responseText = adventureReply.texts.join("\n");
     const reply: VendorTextOutDto = {
       deviceId: device.deviceId,
@@ -838,6 +856,7 @@ export class VendorService {
         const answerStream = this.llmService.completeStream({
           scene: "chat_main",
           deviceId: deviceInternalId,
+          turnId,
           messages,
         });
         for await (const delta of answerStream) {
@@ -859,6 +878,7 @@ export class VendorService {
       const fillerStream = this.llmService.completeStream({
         scene: "filler",
         deviceId: deviceInternalId,
+        turnId,
         messages: this.llmService.buildFillerPrompt(dto.asrText, recentFillers),
         model: this.llmService.smallModelName,
         maxTokens: 60,

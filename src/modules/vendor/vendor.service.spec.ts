@@ -282,6 +282,63 @@ describe("VendorService", () => {
       ).toBeGreaterThan(lastChunkOrder);
     });
 
+    it("should thread one turnId through safety, intent, streams and messages", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "我想听故事",
+      };
+
+      prisma.device.findUnique.mockResolvedValue(null);
+      prisma.device.create.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+        conversationModeKey: "free_chat_casual",
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.conversationMode.findFirst.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "我想听故事" },
+      ] as any);
+      // safety_l2 与 intent_classify 共用被 mock 的 complete，按 scene 分流返回
+      llmService.complete.mockImplementation((options: any) =>
+        Promise.resolve({
+          text: options.scene === "safety_l2" ? "safe" : "free_chat",
+        }),
+      );
+      mockAnswerStream("好呀，给你讲个故事！");
+
+      await service.handleTextIn(dto);
+
+      const turnId = prisma.message.create.mock.calls[0][0].data.turnId;
+      expect(typeof turnId).toBe("string");
+
+      // 同一轮：安全分类、意图分类、filler、主回答全部共享该 turnId
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "safety_l2", turnId }),
+      );
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "intent_classify", turnId }),
+      );
+      expect(llmService.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "filler", turnId }),
+      );
+      expect(llmService.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "chat_main", turnId }),
+      );
+      // 记忆提取沿用既有 turnId 契约
+      expect(childMemoriesService.extractAndStore).toHaveBeenCalledWith(
+        expect.objectContaining({ turnId }),
+      );
+      // assistant 消息与 user 消息同轮
+      expect(prisma.message.create.mock.calls[1][0].data.turnId).toBe(turnId);
+    });
+
     it("should route ordinary input to english_chat for an English chat device", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-002",
