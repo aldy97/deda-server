@@ -56,7 +56,7 @@ const STORY_INTENTS: ConversationIntent[] = [
  * LLM 适配服务：承接百度 RTC 的 OpenAI 兼容回调。
  *
  * 编排（对齐 vendor 老链路 handleTextIn，老 WS 链路保持冻结作备份）：
- * Bearer 鉴权 → 设备解析（header 优先，fallback user 字段=设备 MAC）
+ * Bearer 鉴权 → 设备解析（header 优先，其次 deviceid，fallback user 字段）
  * → L1 安全闸 → 冒险等待态接管 → L2 分类 + 意图路由并行
  * → sleep_config 确定性短链路 → 冒险每日门禁/开集
  * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
@@ -558,8 +558,9 @@ export class LlmAdapterService {
   }
 
   /**
-   * 解析设备身份：显式 header 优先，fallback 请求体 user 字段。
-   * 机芯厂约定 user = 设备 MAC；MAC 归一化（去分隔符、小写）后
+   * 解析设备身份：显式 header 优先，其次请求体 deviceid（机芯厂正式约定，
+   * 与小程序家长绑定编号一致），最后 fallback user 字段（旧约定兼容）。
+   * MAC 归一化（去分隔符、小写）后
    * 同时按 deviceId / macAddress 两列匹配，查不到则以原值建档
    * （同老链路 ensureDeviceExists 的 4G 未绑定场景语义）。
    */
@@ -567,7 +568,7 @@ export class LlmAdapterService {
     req: ChatCompletionRequest,
     deviceHint?: string,
   ): Promise<{ id: string; deviceId: string } | null> {
-    const raw = (deviceHint ?? req.user)?.trim();
+    const raw = (deviceHint ?? req.deviceid ?? req.user)?.trim();
     if (!raw) return null;
 
     const candidates = Array.from(new Set([raw, this.normalizeMac(raw)]));
