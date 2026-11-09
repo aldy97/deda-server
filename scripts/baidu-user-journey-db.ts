@@ -9,15 +9,16 @@
  * - 移除家长端相关动作（登录/报告/学习统计与链路无关，老链路已覆盖）；
  * - 已知降级：新链路无推送通道，10s 沉默超时推进不适用（脚本标 N/A）。
  *
- * 通过 TEST_DEVICE_MAC 指定主测试设备（默认 AA:BB:CC:DD:EE:01）。
+ * 数据安全约定：不删除、不修改任何已存在的数据（reset 动作已移除）；
+ * 只为本 run 的设备写入新行。同一设备状态延续，全量验收请在全新设备上跑。
+ *
+ * 通过 TEST_DEVICE_MAC 指定主测试设备（业务 deviceId 或 MAC，默认由 .sh 随机生成）。
  */
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
 const TEST_DEVICE_MAC = process.env.TEST_DEVICE_MAC || "AA:BB:CC:DD:EE:01";
-const HEADER_TEST_MAC = "AA:BB:CC:DD:EE:99";
-const HEADER_SHADOW_MAC = "AA:BB:CC:DD:EE:98";
 
 const EPISODE_KEY = {
   characterKey: "elly",
@@ -332,7 +333,8 @@ async function prepare() {
   });
   if (existingProgress) {
     throw new Error(
-      `Test episode 2 already has progress (${existingProgress.status}); run with RESET_BAIDU_JOURNEY=1 to reset`,
+      `Test episode 2 already has progress (${existingProgress.status}); ` +
+        `this device was already used for a full journey run — use a fresh TEST_DEVICE_MAC`,
     );
   }
   console.log(
@@ -653,27 +655,6 @@ async function waitForMemory(value: string) {
   throw new Error(`Timed out waiting for favorite_color=${value}`);
 }
 
-/** 清掉本脚本拥有的全部测试数据（三个测试 MAC 设备整行删除，级联清理） */
-async function resetBaiduJourney() {
-  for (const raw of [TEST_DEVICE_MAC, HEADER_TEST_MAC, HEADER_SHADOW_MAC]) {
-    const device = await findDevice(raw);
-    if (!device) continue;
-    await prisma.$transaction([
-      prisma.message.deleteMany({ where: { deviceId: device.id } }),
-      prisma.childMemory.deleteMany({ where: { deviceId: device.id } }),
-      prisma.adventureEvent.deleteMany({ where: { deviceId: device.id } }),
-      prisma.adventureProgress.deleteMany({ where: { deviceId: device.id } }),
-      prisma.adventureDailyRecord.deleteMany({
-        where: { deviceId: device.id },
-      }),
-      prisma.conversationSession.deleteMany({ where: { deviceId: device.id } }),
-      prisma.sleepConfig.deleteMany({ where: { deviceId: device.id } }),
-      prisma.deviceConfig.deleteMany({ where: { deviceId: device.id } }),
-      prisma.device.delete({ where: { id: device.id } }),
-    ]);
-  }
-}
-
 async function summary() {
   const device = await getDevice();
   const [
@@ -833,9 +814,6 @@ async function main() {
       }
       break;
     }
-    case "reset-baidu-journey":
-      await resetBaiduJourney();
-      break;
     case "summary":
       await summary();
       break;
