@@ -512,6 +512,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       const characterPersona =
         CHARACTER_PERSONAS[characterKey] || CHARACTER_PERSONAS.elly;
       const result = await this.llmService.complete({
+        scene: "adventure_interaction",
+        deviceId: deviceInternalId,
         messages: this.llmService.buildAdventureInteractionPrompt({
           characterPersona,
           segmentText: interaction.text,

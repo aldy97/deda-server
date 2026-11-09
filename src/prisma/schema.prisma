@@ -74,6 +74,7 @@ model Device {
   habitPlans      HabitPlan[]
   conversationSession ConversationSession?
   sleepConfig     SleepConfig?
+  llmUsageLogs    LlmUsageLog[]
 
   @@map("devices")
 }
@@ -482,4 +483,29 @@ model SleepConfig {
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@map("sleep_configs")
+}
+
+// LLM 调用日志（主模型 + 小模型全量），模型监控页数据源
+model LlmUsageLog {
+  id               String   @id @default(uuid())
+  scene            String   // safety_l2 / intent_classify / filler / adventure_interaction
+                            // / memory_extract / sleep_config_extract / sleep_story_generate
+                            // / chat_main / parent_report
+  model            String   // 实际模型名，如 qwen-flash / deepseek-flash
+  tier             String   // small / main（冗余字段，查询方便）
+  success          Boolean
+  failureReason    String?  // timeout / rate_limit / parse_error / upstream_error / empty_response
+  latencyMs        Int?     // 请求发出 → 完整响应（流式为末 chunk）的总耗时
+  firstTokenMs     Int?     // 首包时间：请求发出 → 首个 chunk；仅流式调用有值，非流式恒 null
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  deviceId         String?  // FK → devices.id，可空（后台任务无设备上下文）
+  createdAt        DateTime @default(now())
+
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt, scene])
+  @@index([scene, success, createdAt])
+  @@map("llm_usage_logs")
 }

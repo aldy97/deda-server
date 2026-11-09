@@ -600,7 +600,7 @@ async function generateReport(reportDate: string) {
   try {
     const generator = new ParentReportGeneratorService(
       prismaService,
-      new LlmService(config),
+      new LlmService(config, prismaService),
       config,
     );
     await generator.generateDeviceReport(

@@ -123,10 +123,36 @@ GET /analytics/content/parent-report?startDate=&endDate=
 GET /analytics/quality/conversation?startDate=&endDate=&granularity=day
 → { granularity, series: [{ date, totalTurns, failedTurns, failureRate, safetyBlockedTurns, safetyRate }] }
    // totalTurns=role=user 消息数；failedTurns=assistant status=failed；安全拦截=rawPayload 含 safetyCategory
-
-GET /analytics/quality/llm-usage
-→ 501 一期未落库；二期（llm_usage_logs）上线
 ```
+
+## 模型监控（LLM）
+
+数据源 `llm_usage_logs`：`LlmService.complete()/completeStream()` 单点埋点（fire-and-forget，
+写库失败只记日志不影响主链路）。scene 枚举：safety_l2 / intent_classify / filler /
+adventure_interaction / memory_extract / sleep_config_extract / sleep_story_generate /
+chat_main / parent_report。failureReason 枚举：timeout / rate_limit / parse_error /
+upstream_error / empty_response（空响应视为失败）。
+
+```
+GET /analytics/llm/summary?startDate=&endDate=
+→ { scenes: [{ scene, tier, calls, successRate,
+               p50LatencyMs, p90LatencyMs,
+               p50FirstTokenMs, p90FirstTokenMs,   // 仅流式场景有值，否则 null
+               totalTokens,
+               failureBreakdown: [{ reason, count }] }] }
+   // 只返回区间内有调用的场景；分母 0 时 successRate=null；分位数用 percentile_cont 口径
+
+GET /analytics/llm/trend?startDate=&endDate=&granularity=day&scene=
+→ { granularity, series: [{ date, calls, successRate, p50LatencyMs, avgFirstTokenMs, totalTokens }] }
+   // granularity: day/week/month；scene 缺省=全部聚合，非法值 400；无数据日期补零（比率与分位数 null）
+
+GET /analytics/llm/recent-failures?page=1&pageSize=20&scene=
+→ { total, page, pageSize,
+    items: [{ id, scene, tier, model, failureReason, latencyMs, deviceId, createdAt }] }
+   // createdAt 倒序；pageSize ≤ 100；deviceId 为业务设备 ID，匿名/后台调用为 null
+```
+
+（原 `GET /analytics/quality/llm-usage` 501 占位接口已随本批下线。）
 
 ## 消息明细（P1.5）
 
@@ -149,5 +175,5 @@ GET /analytics/messages/:id
 ## 二期预告（需 schema 审批）
 
 - `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
-- `llm_usage_logs`：token 落库。已验证 DashScope(qwen-flash) 流式支持 `stream_options.include_usage`（末 chunk 返回真实 token 数）；DeepSeek 主网关验证时返回 internal_error（网关侧故障，与参数无关），待恢复后复验。
+- ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。注：DeepSeek 主网关流式是否返回 usage 待复验，拿不到则 token 字段为 null，不影响其他字段。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。

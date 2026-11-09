@@ -1,6 +1,29 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosError } from "axios";
+import { PrismaService } from "@/common/prisma/prisma.service";
+
+/** LLM 场景枚举：模型监控的分场景口径，新增调用点必须从这里取值 */
+export const LLM_SCENES = [
+  "safety_l2",
+  "intent_classify",
+  "filler",
+  "adventure_interaction",
+  "memory_extract",
+  "sleep_config_extract",
+  "sleep_story_generate",
+  "chat_main",
+  "parent_report",
+] as const;
+
+export type LlmScene = (typeof LLM_SCENES)[number];
+
+export type LlmFailureReason =
+  | "timeout"
+  | "rate_limit"
+  | "parse_error"
+  | "upstream_error"
+  | "empty_response";
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
@@ -8,6 +31,10 @@ export interface LlmMessage {
 }
 
 export interface LlmCompleteOptions {
+  /** 调用场景（监控埋点必填），取 LLM_SCENES 之一 */
+  scene: LlmScene;
+  /** 设备内部 UUID（devices.id）；后台任务无设备上下文时省略 */
+  deviceId?: string;
   messages: LlmMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -45,7 +72,10 @@ export class LlmService {
   private readonly smallApiKey: string;
   private readonly defaultTimeoutMs: number;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {
     this.baseUrl =
       this.configService.get<string>("OPENAI_BASE_URL") ||
       "https://api.deepseek.com/v1";
@@ -80,12 +110,20 @@ export class LlmService {
     const isSmallModel = model === this.smallModel;
     const baseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
     const apiKey = isSmallModel ? this.smallApiKey : this.apiKey;
+    const startedAt = Date.now();
     if (!apiKey) {
       this.logger.error(
         isSmallModel
           ? "SMALL_LLM_API_KEY is not configured"
           : "OPENAI_API_KEY is not configured",
       );
+      this.logUsage({
+        options,
+        model,
+        success: false,
+        failureReason: "upstream_error",
+        latencyMs: Date.now() - startedAt,
+      });
       throw new Error("LLM API key is not configured");
     }
 
@@ -118,6 +156,16 @@ export class LlmService {
       const text = choice?.message?.content?.trim() || "";
       const usage = response.data?.usage;
 
+      // 空响应视为失败（empty_response）：调用方多靠兜底降级，不报错但质量已损
+      this.logUsage({
+        options,
+        model,
+        success: text.length > 0,
+        failureReason: text.length > 0 ? null : "empty_response",
+        latencyMs: Date.now() - startedAt,
+        usage,
+      });
+
       return {
         text,
         usage: usage
@@ -134,6 +182,13 @@ export class LlmService {
         ? JSON.stringify(axiosError.response.data)
         : axiosError.message;
       this.logger.error(`LLM request failed: ${message}`);
+      this.logUsage({
+        options,
+        model,
+        success: false,
+        failureReason: this.classifyFailure(axiosError),
+        latencyMs: Date.now() - startedAt,
+      });
       throw new Error(`LLM request failed: ${message}`);
     }
   }
@@ -150,81 +205,195 @@ export class LlmService {
     const effectiveBaseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
     const effectiveApiKey = isSmallModel ? this.smallApiKey : this.apiKey;
 
-    if (!effectiveApiKey) {
-      this.logger.error(
-        isSmallModel
-          ? "SMALL_LLM_API_KEY is not configured"
-          : "OPENAI_API_KEY is not configured",
-      );
-      throw new Error("LLM API key is not configured");
-    }
+    const startedAt = Date.now();
+    let firstTokenMs: number | null = null;
+    let usage:
+      | {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        }
+      | undefined;
+    let contentChars = 0;
+    let failureReason: LlmFailureReason | null = null;
 
-    const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
-    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
-
-    let response;
     try {
-      this.logger.debug(
-        `LLM stream request: model=${model}, messages=${JSON.stringify(options.messages)}`,
-      );
-      response = await axios.post(
-        url,
-        {
-          model,
-          messages: options.messages,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 512,
-          thinking: options.thinking ?? { type: "disabled" },
-          stream: true,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${effectiveApiKey}`,
-            "Content-Type": "application/json",
+      if (!effectiveApiKey) {
+        this.logger.error(
+          isSmallModel
+            ? "SMALL_LLM_API_KEY is not configured"
+            : "OPENAI_API_KEY is not configured",
+        );
+        failureReason = "upstream_error";
+        throw new Error("LLM API key is not configured");
+      }
+
+      const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
+      const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
+
+      let response;
+      try {
+        this.logger.debug(
+          `LLM stream request: model=${model}, messages=${JSON.stringify(options.messages)}`,
+        );
+        response = await axios.post(
+          url,
+          {
+            model,
+            messages: options.messages,
+            temperature: options.temperature ?? 0.7,
+            max_tokens: options.maxTokens ?? 512,
+            thinking: options.thinking ?? { type: "disabled" },
+            stream: true,
           },
-          timeout: timeoutMs,
-          responseType: "stream",
-        },
-      );
-    } catch (error) {
-      const axiosError = error as AxiosError;
-      const message = axiosError.response?.data
-        ? JSON.stringify(axiosError.response.data)
-        : axiosError.message;
-      this.logger.error(`LLM stream request failed: ${message}`);
-      throw new Error(`LLM request failed: ${message}`);
-    }
+          {
+            headers: {
+              Authorization: `Bearer ${effectiveApiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: timeoutMs,
+            responseType: "stream",
+          },
+        );
+      } catch (error) {
+        const axiosError = error as AxiosError;
+        failureReason = this.classifyFailure(axiosError);
+        const message = axiosError.response?.data
+          ? JSON.stringify(axiosError.response.data)
+          : axiosError.message;
+        this.logger.error(`LLM stream request failed: ${message}`);
+        throw new Error(`LLM request failed: ${message}`);
+      }
 
-    // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
-    const stream = response.data as AsyncIterable<Buffer | string>;
-    let pending = "";
-    for await (const chunk of stream) {
-      pending += chunk.toString();
-      let newlineIndex: number;
-      while ((newlineIndex = pending.indexOf("\n")) >= 0) {
-        const line = pending.slice(0, newlineIndex).trim();
-        pending = pending.slice(newlineIndex + 1);
+      // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
+      const stream = response.data as AsyncIterable<Buffer | string>;
+      let pending = "";
+      let streamDone = false;
+      for await (const chunk of stream) {
+        pending += chunk.toString();
+        let newlineIndex: number;
+        while ((newlineIndex = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, newlineIndex).trim();
+          pending = pending.slice(newlineIndex + 1);
 
-        if (!line.startsWith("data:")) {
-          continue;
-        }
-        const data = line.slice("data:".length).trim();
-        if (data === "[DONE]") {
-          return;
-        }
+          if (!line.startsWith("data:")) {
+            continue;
+          }
+          const data = line.slice("data:".length).trim();
+          if (data === "[DONE]") {
+            streamDone = true;
+            break;
+          }
 
-        let delta: unknown;
-        try {
-          delta = JSON.parse(data)?.choices?.[0]?.delta?.content;
-        } catch {
-          // 半行 / 心跳等无法解析的数据直接跳过
-          continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            // 半行 / 心跳等无法解析的数据直接跳过
+            continue;
+          }
+          // 部分网关（如 DashScope include_usage）在末 chunk 携带 usage，顺手采集
+          const chunkUsage = (parsed as { usage?: typeof usage } | null)?.usage;
+          if (chunkUsage) {
+            usage = chunkUsage;
+          }
+          const delta = (
+            parsed as {
+              choices?: Array<{ delta?: { content?: unknown } }>;
+            } | null
+          )?.choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            if (firstTokenMs === null) {
+              firstTokenMs = Date.now() - startedAt;
+            }
+            contentChars += delta.length;
+            yield delta;
+          }
         }
-        if (typeof delta === "string" && delta.length > 0) {
-          yield delta;
+        if (streamDone) {
+          break;
         }
       }
+      // 流正常结束但零内容：调用方会走兜底话术，按 empty_response 记失败
+      if (contentChars === 0) {
+        failureReason = "empty_response";
+      }
+    } catch (error) {
+      if (!failureReason) {
+        failureReason = this.classifyFailure(error as AxiosError);
+      }
+      throw error;
+    } finally {
+      // 消费方提前 break 也会走到这里：记录已观测到的部分，不影响主链路
+      this.logUsage({
+        options,
+        model,
+        success: failureReason === null,
+        failureReason,
+        latencyMs: Date.now() - startedAt,
+        firstTokenMs,
+        usage,
+      });
     }
+  }
+
+  /** 失败原因归一化：timeout / rate_limit / upstream_error（parse_error 预留给调用方解析类失败） */
+  private classifyFailure(error: AxiosError): LlmFailureReason {
+    if (
+      error?.code === "ECONNABORTED" ||
+      /timeout/i.test(error?.message ?? "")
+    ) {
+      return "timeout";
+    }
+    if (error?.response?.status === 429) {
+      return "rate_limit";
+    }
+    return "upstream_error";
+  }
+
+  /**
+   * 监控埋点写库：fire-and-forget，失败只记日志，绝不影响主链路。
+   */
+  private logUsage(entry: {
+    options: LlmCompleteOptions;
+    model: string;
+    success: boolean;
+    failureReason: LlmFailureReason | null;
+    latencyMs: number;
+    firstTokenMs?: number | null;
+    usage?:
+      | {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        }
+      | undefined;
+  }): void {
+    const isSmallModel = entry.model === this.smallModel;
+    this.prisma.llmUsageLog
+      .create({
+        data: {
+          scene: entry.options.scene,
+          model: entry.model,
+          tier: isSmallModel ? "small" : "main",
+          success: entry.success,
+          failureReason: entry.failureReason,
+          latencyMs: entry.latencyMs,
+          firstTokenMs: entry.firstTokenMs ?? null,
+          promptTokens: entry.usage?.prompt_tokens ?? null,
+          completionTokens: entry.usage?.completion_tokens ?? null,
+          totalTokens: entry.usage?.total_tokens ?? null,
+          deviceId: entry.options.deviceId ?? null,
+        },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(`LLM usage log write failed: ${message}`);
+        },
+      );
   }
 
   /**

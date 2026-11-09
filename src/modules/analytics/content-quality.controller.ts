@@ -1,11 +1,4 @@
-import {
-  Controller,
-  Get,
-  HttpException,
-  HttpStatus,
-  Query,
-  UseGuards,
-} from "@nestjs/common";
+import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { IsIn, IsOptional, Matches } from "class-validator";
 import { AnalyticsDateRangeQueryDto } from "./dto/analytics-query.dto";
@@ -66,16 +59,5 @@ export class QualityController {
   @ApiOperation({ summary: "对话失败率与安全拦截率趋势" })
   getConversation(@Query() query: QualityConversationQueryDto) {
     return this.qualityService.getConversationQuality(query);
-  }
-
-  @Get("llm-usage")
-  @ApiOperation({
-    summary: "LLM 用量与成本（一期未落库，恒 501；二期上线）",
-  })
-  getLlmUsage() {
-    throw new HttpException(
-      "llm_usage_logs 未落库，该接口二期上线",
-      HttpStatus.NOT_IMPLEMENTED,
-    );
   }
 }

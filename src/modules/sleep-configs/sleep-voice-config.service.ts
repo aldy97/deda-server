@@ -114,6 +114,8 @@ export class SleepVoiceConfigService {
     let text: string;
     try {
       const result = await this.llm.complete({
+        scene: "sleep_config_extract",
+        deviceId: deviceInternalId,
         model: this.llm.smallModelName,
         temperature: 0,
         maxTokens: 64,
