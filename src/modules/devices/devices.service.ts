@@ -9,6 +9,7 @@ import {
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
+import { DeviceLinkService } from "../device-link/device-link.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
@@ -24,6 +25,7 @@ export class DevicesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly deviceStatusService: DeviceStatusService,
+    private readonly deviceLink: DeviceLinkService,
     private readonly manufacturer: ManufacturerService,
   ) {}
 
@@ -200,19 +202,48 @@ export class DevicesService {
   }
 
   async status(id: string) {
-    // TODO: 等待 MQTT 与机芯厂商对接后替换为真实状态
-    // 当前为硬编码状态，仅用于 wechat-app 联调验证设备状态展示。
+    const device = await this.prisma.device.findUnique({
+      where: { deviceId: id },
+    });
+    if (!device) {
+      throw new NotFoundException(`Device ${id} not found`);
+    }
+
+    // 新 MQTT 协议（docs/vendor-mqtt-protocol.md）：状态来自 device-link 的
+    // Redis 缓存，在线判定按协议 8.2 节 15 秒心跳窗口计算。
+    // isCharging 暂无协议字段来源，固定返回 null（已请机芯厂补充）。
+    const link = await this.deviceLink.getStatus(
+      device.macAddress ?? device.deviceId,
+    );
     return {
       deviceId: id,
-      status: "online" as const,
-      battery: 78,
-      isCharging: true,
-      lastActiveAt: new Date().toISOString(),
+      status: link.online ? ("online" as const) : ("offline" as const),
+      battery: link.battery,
+      isCharging: null,
+      lastActiveAt: link.lastSeenAt
+        ? new Date(link.lastSeenAt).toISOString()
+        : null,
     };
   }
 
   async control(id: string, dto: DeviceControlDto) {
-    // TODO: 转发控制指令到厂商服务器
+    // 新 MQTT 协议目前仅支持 volume 下发；power/interrupt/sleep/auto_shutdown
+    // 待机芯厂补充协议后接入，本次维持既有假成功行为。
+    if (dto.action === "volume") {
+      if (dto.volume === undefined) {
+        throw new BadRequestException("volume is required when action=volume");
+      }
+      const device = await this.prisma.device.findUnique({
+        where: { deviceId: id },
+      });
+      if (!device) {
+        throw new NotFoundException(`Device ${id} not found`);
+      }
+      this.deviceLink.setVolume(
+        device.macAddress ?? device.deviceId,
+        dto.volume,
+      );
+    }
     return { success: true, deviceId: id, action: dto.action };
   }
 

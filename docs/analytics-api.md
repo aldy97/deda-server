@@ -172,6 +172,22 @@ GET /analytics/messages/:id
 → 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
 ```
 
+## 设备运维（admin 手动操作）
+
+> 例外：本节为写操作（POST），不适用上文「所有接口均为 GET」的约定。
+
+```
+POST /analytics/devices/:deviceId/wipe
+→ { success, deviceId, deviceOnline }
+```
+
+- 用途：退货／设备流转。admin 拿到机芯后手动触发。
+- 行为：先经机芯厂 MQTT 协议向设备下发 `recover`（恢复出厂），再删除 Device 记录；
+  设备关联的绑定、对话消息、孩子档案、长期记忆、配置等随删除级联清除
+  （schema 全部 `onDelete: Cascade`）。设备重新配网上报 `loginMac` 后作为全新设备入库。
+- `deviceOnline=false` 表示下发时设备离线，`recover` 可能未送达，admin 需到手后手动复位设备。
+- 设备不存在 → 404。家长小程序解绑（DELETE /devices/:id）不触发本流程，仅删绑定关系。
+
 ## 二期预告（需 schema 审批）
 
 - `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
