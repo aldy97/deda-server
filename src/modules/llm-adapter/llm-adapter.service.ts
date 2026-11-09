@@ -427,6 +427,10 @@ export class LlmAdapterService {
           messages: this.llmService.buildFillerPrompt(asrText, recentFillers, {
             intent,
             adventureDeclined,
+            persona: device
+              ? (LlmService.CHARACTER_PERSONAS[device.characterKey] ??
+                LlmService.CHARACTER_PERSONAS.elly)
+              : undefined,
           }),
           model: this.llmService.smallModelName,
           maxTokens: 60,

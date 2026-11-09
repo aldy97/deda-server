@@ -413,13 +413,18 @@ export class LlmService {
    * 不带教材上下文与历史，避免小模型展开真正回答。
    * @param recentFillers 最近若干轮本方用过的 filler 原文，
    * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
-   * @param turnContext 本轮只读情境（意图/门禁结论），让 filler 的拖延话术
-   * 与主回答同向，杜绝"预告冒险启动但主模型婉拒"这类矛盾播报
+   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设），让 filler
+   * 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
+   * "filler 自称小星但主模型是 Elly"这类矛盾播报
    */
   buildFillerPrompt(
     asrText: string,
     recentFillers?: string[],
-    turnContext?: { intent?: string; adventureDeclined?: boolean },
+    turnContext?: {
+      intent?: string;
+      adventureDeclined?: boolean;
+      persona?: string;
+    },
   ): LlmMessage[] {
     const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
 
@@ -457,15 +462,24 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
     ];
   }
 
-  /** filler 本轮情境段：仅声明主回答的走向，filler 不得复述细节 */
+  /** filler 本轮情境段：仅声明自身身份与主回答走向，filler 不得复述细节 */
   private buildFillerContextSection(turnContext?: {
     intent?: string;
     adventureDeclined?: boolean;
+    persona?: string;
   }): string {
-    if (turnContext?.adventureDeclined) {
-      return `\n\nContext for this turn (never mention it explicitly): the child asked for the daily adventure, but today's adventure is ALREADY FINISHED — the main reply will gently say so and suggest another topic. Do NOT announce, promise, or preview the adventure; give only a neutral warm acknowledgment.`;
+    const parts: string[] = [];
+    if (turnContext?.persona) {
+      // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
+      parts.push(
+        `Your identity: ${turnContext.persona} Never invent a different name or identity for yourself.`,
+      );
     }
-    if (
+    if (turnContext?.adventureDeclined) {
+      parts.push(
+        `Context for this turn (never mention it explicitly): the child asked for the daily adventure, but today's adventure is ALREADY FINISHED — the main reply will gently say so and suggest another topic. Do NOT announce, promise, or preview the adventure; give only a neutral warm acknowledgment.`,
+      );
+    } else if (
       turnContext?.intent &&
       [
         "english_story",
@@ -475,9 +489,11 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
         "free_story",
       ].includes(turnContext.intent)
     ) {
-      return `\n\nContext for this turn (never mention it explicitly): the main reply WILL tell a story. A short warm lead-in like "好呀，故事时间到啦" is fine, but never start or preview the story content yourself.`;
+      parts.push(
+        `Context for this turn (never mention it explicitly): the main reply WILL tell a story. A short warm lead-in like "好呀，故事时间到啦" is fine, but never start or preview the story content yourself.`,
+      );
     }
-    return "";
+    return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
   }
 
   /**

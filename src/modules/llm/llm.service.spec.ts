@@ -763,6 +763,17 @@ describe("LlmService", () => {
 
       expect(messages[0].content).not.toContain("Context for this turn");
     });
+
+    it("should include identity guardrail when persona is provided", () => {
+      const messages = service.buildFillerPrompt("你叫什么名字", [], {
+        persona: "小象 Elly：听风原野的居民，性格温暖好奇。",
+      });
+
+      // 身份兜底：filler 不得编造名字（防与主回答人设矛盾）
+      expect(messages[0].content).toContain("Your identity");
+      expect(messages[0].content).toContain("小象 Elly");
+      expect(messages[0].content).toContain("Never invent a different name");
+    });
   });
 
   describe("extractAnswer", () => {

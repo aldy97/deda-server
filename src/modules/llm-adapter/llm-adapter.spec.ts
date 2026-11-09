@@ -449,10 +449,14 @@ describe("LlmAdapterModule", () => {
         model: "small-model",
         maxTokens: 60,
       });
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith("我想玩每日冒险", [], {
-        intent: "free_chat",
-        adventureDeclined: false,
-      });
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
+        "我想玩每日冒险",
+        [],
+        expect.objectContaining({
+          intent: "free_chat",
+          adventureDeclined: false,
+        }),
+      );
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toEqual({
         filler: "嗯——",
@@ -903,7 +907,35 @@ describe("LlmAdapterModule", () => {
       expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
         "继续冒险故事",
         expect.any(Array),
-        { intent: "adventure_story", adventureDeclined: true },
+        expect.objectContaining({
+          intent: "adventure_story",
+          adventureDeclined: true,
+        }),
+      );
+    });
+
+    it("passes the character persona to the filler for identity consistency", async () => {
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue({
+        ...deviceRow,
+        characterKey: "polly",
+      });
+      llm.completeStream
+        .mockImplementationOnce(() => makeStream(["我叫小马 Polly"])())
+        .mockImplementationOnce(() => makeStream(["你问我的名字呀"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "你叫什么名字" }],
+      };
+      await collect(service.streamReply(req));
+      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
+        "你叫什么名字",
+        expect.any(Array),
+        expect.objectContaining({
+          persona: expect.stringContaining("小马 Polly"),
+        }),
       );
     });
 
