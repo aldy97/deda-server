@@ -26,6 +26,8 @@ import { FeedbackAnalyticsController } from "./feedback-analytics.controller";
 import { FeedbackAnalyticsService } from "./feedback-analytics.service";
 import { MessagesAnalyticsController } from "./messages-analytics.controller";
 import { MessagesAnalyticsService } from "./messages-analytics.service";
+import { MemoriesAnalyticsController } from "./memories-analytics.controller";
+import { MemoriesAnalyticsService } from "./memories-analytics.service";
 import { LlmAnalyticsController } from "./llm-analytics.controller";
 import { LlmAnalyticsService } from "./llm-analytics.service";
 
@@ -41,6 +43,7 @@ import { LlmAnalyticsService } from "./llm-analytics.service";
     QualityController,
     FeedbackAnalyticsController,
     MessagesAnalyticsController,
+    MemoriesAnalyticsController,
     LlmAnalyticsController,
   ],
   providers: [
@@ -68,6 +71,7 @@ import { LlmAnalyticsService } from "./llm-analytics.service";
     QualityService,
     FeedbackAnalyticsService,
     MessagesAnalyticsService,
+    MemoriesAnalyticsService,
     LlmAnalyticsService,
   ],
 })
