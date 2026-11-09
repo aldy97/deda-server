@@ -16,13 +16,17 @@
 #
 # 用法：
 #   LLM_ADAPTER_API_KEY=xxx npm run start:dev        # 先启动本地后端
-#   ./scripts/test-baidu-user-journey.sh             # 跑全量
-#   RESET_BAIDU_JOURNEY=1 ./scripts/test-baidu-user-journey.sh   # 先清测试数据再跑
+#   ./scripts/test-baidu-user-journey.sh             # 跑全量（默认随机新建主测试设备）
+#   TEST_DEVICE_MAC=dev-local-002 ./scripts/test-baidu-user-journey.sh  # 指定目标设备
+#
+# 数据安全约定：本脚本不删除、不修改任何已存在的数据；
+# 只为自己新建的设备写入新行（run 内自建行的 backdate 除外）。
+# 同一台设备状态会延续，全量断言只在全新设备上成立——重跑请换设备标识。
 #
 # 环境变量：
 #   API_BASE_URL      默认 http://127.0.0.1:${APP_PORT:-3000}
 #   ADAPTER_KEY       默认读环境 LLM_ADAPTER_API_KEY（需与服务端一致）
-#   TEST_DEVICE_MAC   主测试设备标识，默认 AA:BB:CC:DD:EE:01
+#   TEST_DEVICE_MAC   主测试设备标识（业务 deviceId 或 MAC），默认每次随机生成
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,9 +44,15 @@ fi
 
 API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:${APP_PORT:-3000}}"
 ADAPTER_KEY="${ADAPTER_KEY:-${LLM_ADAPTER_API_KEY:-}}"
-export TEST_DEVICE_MAC="${TEST_DEVICE_MAC:-AA:BB:CC:DD:EE:01}"
-HEADER_TEST_MAC="AA:BB:CC:DD:EE:99"
-HEADER_SHADOW_MAC="AA:BB:CC:DD:EE:98"
+# 设备标识：默认按时间戳生成随机 MAC，每轮全新设备、互不污染；
+# 传 TEST_DEVICE_MAC 可指定既有设备（业务 deviceId 或 MAC 均可，适配层两者都认）。
+_EPOCH=$(date +%s)
+_rand_mac() { printf 'AA:BB:CC:%02X:%02X:%02X' $((RANDOM % 256)) $((_EPOCH / 256 % 256)) $((_EPOCH % 256)); }
+export TEST_DEVICE_MAC="${TEST_DEVICE_MAC:-$(_rand_mac)}"
+# header 优先级用例的两个临时设备：同样每次随机（末位 99/98 保证互不相同），
+# 用完留在库里不删除（每次最多多 2 台垃圾设备）
+HEADER_TEST_MAC="$(_rand_mac | sed 's/.$/9/')"
+HEADER_SHADOW_MAC="$(_rand_mac | sed 's/.$/8/')"
 PASS_COUNT=0
 WARN_COUNT=0
 ADAPTER_REPLY=""
@@ -104,8 +114,9 @@ if [[ -z "$ADAPTER_KEY" ]]; then
 fi
 
 if [[ "${RESET_BAIDU_JOURNEY:-0}" == "1" ]]; then
-  db reset-baidu-journey
-  echo "Reset baidu journey test data"
+  echo "ERROR: RESET_BAIDU_JOURNEY 已下线——本脚本不再删除/修改任何已有数据。"
+  echo "       需要干净起点：换一个新设备标识（TEST_DEVICE_MAC=xxx）再跑。"
+  exit 1
 fi
 
 TODAY=$(db today)

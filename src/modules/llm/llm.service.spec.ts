@@ -1024,5 +1024,66 @@ describe("LlmService", () => {
         }),
       });
     });
+
+    it("小模型流式带 stream_options.include_usage，末 chunk usage 落库", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"好呀"}}]}\n\n',
+          'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const gen = service.completeStream({
+        scene: "filler",
+        model: "qwen-flash",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      for await (const _ of gen) {
+        // drain
+      }
+      await flush();
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          model: "qwen-flash",
+          stream_options: { include_usage: true },
+        }),
+        expect.any(Object),
+      );
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          scene: "filler",
+          tier: "small",
+          promptTokens: 7,
+          completionTokens: 2,
+          totalTokens: 9,
+        }),
+      });
+    });
+
+    it("主模型流式不下发 stream_options（DeepSeek 网关原生返回 usage）", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      for await (const _ of gen) {
+        // drain
+      }
+
+      const payload = mockedAxios.post.mock.calls[0][1] as Record<
+        string,
+        unknown
+      >;
+      expect(payload).not.toHaveProperty("stream_options");
+    });
   });
 });

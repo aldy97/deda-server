@@ -245,6 +245,11 @@ export class LlmService {
             max_tokens: options.maxTokens ?? 512,
             thinking: options.thinking ?? { type: "disabled" },
             stream: true,
+            // 仅小模型（DashScope）流式需要显式开启 usage 回传；
+            // DeepSeek 主网关流式原生返回 usage，加此参数反而会 400，故不下发
+            ...(isSmallModel
+              ? { stream_options: { include_usage: true } }
+              : {}),
           },
           {
             headers: {
