@@ -64,6 +64,8 @@ services:
       VENDOR_TRAFFIC_RECORD_RETENTION_DAYS: ${VENDOR_TRAFFIC_RECORD_RETENTION_DAYS:-7}
       # 哄睡调度
       SLEEP_SCHEDULER_ENABLED: ${SLEEP_SCHEDULER_ENABLED:-false}
+      # 家长报告生成（默认关，各环境 env 文件显式开启）
+      PARENT_REPORT_GENERATION_ENABLED: ${PARENT_REPORT_GENERATION_ENABLED:-false}
     depends_on:
       - postgres
       - redis
