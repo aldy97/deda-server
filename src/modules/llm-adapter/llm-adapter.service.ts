@@ -9,7 +9,11 @@ import { randomUUID, timingSafeEqual } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
-import { LlmService, LlmMessage } from "@/modules/llm/llm.service";
+import {
+  LlmService,
+  LlmMessage,
+  LlmUpstreamError,
+} from "@/modules/llm/llm.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
   ConversationIntent,
@@ -27,9 +31,20 @@ import {
 } from "@/modules/vendor/child-safety.service";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 
-/** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默 */
-const UPSTREAM_FALLBACK_TEXT =
-  "Sorry, I didn't catch that. Can you say it again?";
+/** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默。
+ *  按设备角色 keyed，为 Polly 等后续批次预留判断余地；
+ *  角色文案未上线前一律回落 elly 文案 */
+const UPSTREAM_FALLBACK_TEXTS: Record<string, string> = {
+  elly: "小象 Elly 刚刚走神啦，再说一次好不好呀？",
+};
+const DEFAULT_UPSTREAM_FALLBACK_TEXT = UPSTREAM_FALLBACK_TEXTS.elly;
+
+function resolveUpstreamFallbackText(characterKey?: string | null): string {
+  return (
+    (characterKey != null && UPSTREAM_FALLBACK_TEXTS[characterKey]) ||
+    DEFAULT_UPSTREAM_FALLBACK_TEXT
+  );
+}
 
 /** 历史轮数上限：防爆上下文（最近 10 轮一问一答） */
 const MAX_HISTORY_TURNS = 10;
@@ -450,36 +465,58 @@ export class LlmAdapterService {
     ];
 
     // 主模型流式：filler（如有）先作为 SSE 前导 chunk 外发，随后主模型
-    // 按流直出（串行后不再需要双泵缓冲交错）。大模型失败且 filler/答案
-    // 均无产出时回落兜底话术。
+    // 按流直出（串行后不再需要双泵缓冲交错）。大模型失败时：
+    // 零输出且错误可重试 → 重试一次（filler 播报时长天然掩盖重试延迟）；
+    // answer 最终为空 → 无论 filler 是否已播都播兜底话术，不让孩子面对沉默。
     if (fillerText) {
       yield fillerText;
     }
     let answerText = "";
     let llmFailed = false;
-    try {
-      const stream = this.llmService.completeStream({
-        scene: "chat_main",
-        deviceId: device?.id,
-        turnId,
-        messages,
-        // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
-        // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
-        maxTokens: isStoryTurn ? 800 : 200,
-        thinking: { type: "disabled" },
-      });
-      for await (const chunk of stream) {
-        answerText += chunk;
-        yield chunk;
+    const maxAttempts = 2; // 初次 + 一次重试，有上限不死循环
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const stream = this.llmService.completeStream({
+          scene: "chat_main",
+          deviceId: device?.id,
+          turnId,
+          messages,
+          // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
+          // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
+          maxTokens: isStoryTurn ? 800 : 200,
+          thinking: { type: "disabled" },
+        });
+        for await (const chunk of stream) {
+          answerText += chunk;
+          yield chunk;
+        }
+        llmFailed = false;
+        break;
+      } catch (error) {
+        llmFailed = true;
+        const retriable = error instanceof LlmUpstreamError && error.retriable;
+        const detail =
+          error instanceof LlmUpstreamError
+            ? error.detail
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        this.logger.error(
+          `LLM upstream failed (attempt ${attempt}/${maxAttempts}): ${detail}`,
+        );
+        // mid-stream 断流（残句已播）或不可重试错误（4xx 等）：不重试，
+        // 避免孩子听到「前半句 + 重新生成的一整段」的冲突内容
+        if (answerText || !retriable || attempt === maxAttempts) {
+          break;
+        }
+        this.logger.warn("LLM chat_main retrying once after retriable failure");
       }
-    } catch (error) {
+    }
+    // answer 为空即兜底（断流失败 / empty_response 都算），无论 filler 是否已播
+    if (!answerText) {
       llmFailed = true;
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`LLM upstream failed: ${message}`);
-      if (!answerText && !fillerText) {
-        answerText = UPSTREAM_FALLBACK_TEXT;
-        yield UPSTREAM_FALLBACK_TEXT;
-      }
+      answerText = resolveUpstreamFallbackText(device?.characterKey);
+      yield answerText;
     }
 
     // 用户实际播报全文：filler（如有）+ 大模型答案，作为最终回答落库

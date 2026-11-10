@@ -239,6 +239,7 @@ describe("LlmAnalyticsService", () => {
           tier: "small",
           model: "qwen-flash",
           failureReason: "timeout",
+          failureDetail: "ECONNABORTED: timeout of 5000ms exceeded",
           latencyMs: 5000,
           turnId: "turn-f1",
           createdAt: at("2026-11-07"),
@@ -250,6 +251,7 @@ describe("LlmAnalyticsService", () => {
           tier: "main",
           model: "deepseek-flash",
           failureReason: "empty_response",
+          failureDetail: "stream completed with 0 content chars",
           latencyMs: 800,
           turnId: null,
           createdAt: at("2026-11-06"),
@@ -264,6 +266,7 @@ describe("LlmAnalyticsService", () => {
       expect(result.items[0]).toMatchObject({
         id: "log-1",
         failureReason: "timeout",
+        failureDetail: "ECONNABORTED: timeout of 5000ms exceeded",
         deviceId: "DEDA-0001",
         turnId: "turn-f1",
       });
@@ -306,6 +309,7 @@ describe("LlmAnalyticsService", () => {
           tier: "small",
           success: true,
           failureReason: null,
+          failureDetail: null,
           latencyMs: 320,
           firstTokenMs: null,
           promptTokens: 210,
@@ -320,6 +324,7 @@ describe("LlmAnalyticsService", () => {
           tier: "main",
           success: false,
           failureReason: "timeout",
+          failureDetail: "ECONNABORTED: timeout of 30000ms exceeded",
           latencyMs: 30000,
           firstTokenMs: null,
           promptTokens: null,
@@ -340,6 +345,7 @@ describe("LlmAnalyticsService", () => {
         tier: "small",
         success: true,
         failureReason: null,
+        failureDetail: null,
         latencyMs: 320,
         firstTokenMs: null,
         promptTokens: 210,
@@ -348,6 +354,9 @@ describe("LlmAnalyticsService", () => {
         createdAt: new Date("2026-11-09T10:00:00.100Z"),
       });
       expect(result.calls[1].failureReason).toBe("timeout");
+      expect(result.calls[1].failureDetail).toBe(
+        "ECONNABORTED: timeout of 30000ms exceeded",
+      );
 
       const findArgs = prisma.llmUsageLog.findMany.mock.calls[0][0];
       expect(findArgs.where).toEqual({ turnId: "turn-1" });

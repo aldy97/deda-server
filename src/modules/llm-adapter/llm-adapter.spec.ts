@@ -6,7 +6,7 @@ import {
   parseChatCompletionRequest,
   ChatCompletionRequest,
 } from "./dto/chat-completion.dto";
-import { LlmService } from "@/modules/llm/llm.service";
+import { LlmService, LlmUpstreamError } from "@/modules/llm/llm.service";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
@@ -653,6 +653,170 @@ describe("LlmAdapterModule", () => {
       expect(adventure.handleChildReply).not.toHaveBeenCalled();
       expect(adventure.startToday).not.toHaveBeenCalled();
       expect(adventure.isCompletedToday).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("upstream failure fallback & retry (P0)", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "讲一个成语故事" }],
+    };
+    const FALLBACK = "小象 Elly 刚刚走神啦，再说一次好不好呀？";
+    const failingStream = (error: unknown) =>
+      (async function* () {
+        throw error;
+      })();
+    const enableFiller = () =>
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    it("filler 已播但主模型零输出失败时仍播兜底话术，不让孩子面对沉默", async () => {
+      // 实机事故（2026-11-10 成语故事模式「甲醇盆」）：filler 433ms 已播出，
+      // 主模型 10.7s 后 socket 断流零输出。旧条件 !answerText && !fillerText
+      // 不兜底，孩子听完半句 filler 后死寂
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.complete.mockResolvedValue({ text: "嗯——" });
+      llm.completeStream.mockReturnValue(
+        failingStream(
+          new LlmUpstreamError(
+            "upstream_error",
+            "ECONNRESET: socket hang up",
+            false,
+          ),
+        ),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["嗯——", FALLBACK]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("failed");
+      expect(assistantCall.data.rawPayload).toEqual({
+        filler: "嗯——",
+        answer: FALLBACK,
+      });
+    });
+
+    it("filler 未播且主模型零输出失败时播兜底话术", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(
+        failingStream(
+          new LlmUpstreamError(
+            "upstream_error",
+            "HTTP 400: bad request",
+            false,
+          ),
+        ),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual([FALLBACK]);
+    });
+
+    it("主模型说出残句后断流时不播兜底、不重试，仅标 failed", async () => {
+      // mid-stream 断流：残句已播给孩子，再播兜底或重试都会让孩子
+      // 听到「前半句 + 另一段」的冲突内容，故只落库标 failed
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(
+        (async function* () {
+          yield "守株待兔讲的是";
+          throw new LlmUpstreamError(
+            "upstream_error",
+            "ECONNRESET: socket hang up",
+            true,
+          );
+        })(),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["守株待兔讲的是"]);
+      expect(llm.completeStream).toHaveBeenCalledTimes(1); // 不重试
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("failed");
+      expect(assistantCall.data.rawPayload.answer).toBe("守株待兔讲的是");
+    });
+
+    it("可重试的上游失败自动重试一次，第二次成功则整轮正常", async () => {
+      // filler 播报 1.5-2s 正好掩盖一次重试延迟，孩子侧无感
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.complete.mockResolvedValue({ text: "嗯——" });
+      llm.completeStream
+        .mockReturnValueOnce(
+          failingStream(
+            new LlmUpstreamError(
+              "upstream_error",
+              "ECONNRESET: socket hang up",
+              true,
+            ),
+          ),
+        )
+        .mockReturnValueOnce(makeStream(["正式", "答案"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(llm.completeStream).toHaveBeenCalledTimes(2);
+      expect(chunks).toEqual(["嗯——", "正式", "答案"]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("completed");
+    });
+
+    it("重试仍失败才播兜底，且最多重试一次", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const err = new LlmUpstreamError("timeout", "timeout of 30000ms", true);
+      llm.completeStream
+        .mockReturnValueOnce(failingStream(err))
+        .mockReturnValueOnce(failingStream(err));
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(llm.completeStream).toHaveBeenCalledTimes(2); // 初次 + 一次重试，有上限
+      expect(chunks).toEqual([FALLBACK]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("failed");
+    });
+
+    it("不可重试的上游失败（4xx）不重试，直接兜底", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(
+        failingStream(
+          new LlmUpstreamError(
+            "upstream_error",
+            "HTTP 400: bad request",
+            false,
+          ),
+        ),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(llm.completeStream).toHaveBeenCalledTimes(1);
+      expect(chunks).toEqual([FALLBACK]);
+    });
+
+    it("主模型流正常结束但零内容（empty_response）时也播兜底", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream([])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual([FALLBACK]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("failed");
+    });
+
+    it("兜底话术按设备 characterKey 解析，角色文案未上线前回落 Elly 默认", async () => {
+      // 为 Polly 等后续批次预留：映射表只有 elly，polly 命中默认值
+      prisma.device.findFirst.mockResolvedValue({
+        ...deviceRow,
+        characterKey: "polly",
+      });
+      llm.completeStream.mockReturnValue(
+        failingStream(
+          new LlmUpstreamError("upstream_error", "ECONNRESET: reset", false),
+        ),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual([FALLBACK]);
     });
   });
 
