@@ -25,6 +25,21 @@ export type LlmFailureReason =
   | "upstream_error"
   | "empty_response";
 
+/**
+ * 上游调用失败的结构化错误：携带归一化原因、紧凑细节与是否可重试。
+ * 可重试判定在服务侧完成（此处能看到 HTTP status），调用方只需读 retriable。
+ */
+export class LlmUpstreamError extends Error {
+  constructor(
+    readonly reason: LlmFailureReason,
+    readonly detail: string,
+    readonly retriable: boolean,
+  ) {
+    super(`LLM upstream ${reason}: ${detail}`);
+    this.name = "LlmUpstreamError";
+  }
+}
+
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -124,6 +139,7 @@ export class LlmService {
         model,
         success: false,
         failureReason: "upstream_error",
+        failureDetail: "LLM API key is not configured",
         latencyMs: Date.now() - startedAt,
       });
       throw new Error("LLM API key is not configured");
@@ -164,6 +180,8 @@ export class LlmService {
         model,
         success: text.length > 0,
         failureReason: text.length > 0 ? null : "empty_response",
+        failureDetail:
+          text.length > 0 ? null : "response completed with empty text",
         latencyMs: Date.now() - startedAt,
         usage,
       });
@@ -180,18 +198,17 @@ export class LlmService {
       };
     } catch (error) {
       const axiosError = error as AxiosError;
-      const message = axiosError.response?.data
-        ? JSON.stringify(axiosError.response.data)
-        : axiosError.message;
-      this.logger.error(`LLM request failed: ${message}`);
+      const detail = this.buildFailureDetail(axiosError);
+      this.logger.error(`LLM request failed: ${detail}`);
       this.logUsage({
         options,
         model,
         success: false,
         failureReason: this.classifyFailure(axiosError),
+        failureDetail: detail,
         latencyMs: Date.now() - startedAt,
       });
-      throw new Error(`LLM request failed: ${message}`);
+      throw new Error(`LLM request failed: ${detail}`);
     }
   }
 
@@ -218,6 +235,7 @@ export class LlmService {
       | undefined;
     let contentChars = 0;
     let failureReason: LlmFailureReason | null = null;
+    let failureDetail: string | null = null;
 
     try {
       if (!effectiveApiKey) {
@@ -227,7 +245,8 @@ export class LlmService {
             : "OPENAI_API_KEY is not configured",
         );
         failureReason = "upstream_error";
-        throw new Error("LLM API key is not configured");
+        failureDetail = "LLM API key is not configured";
+        throw new LlmUpstreamError(failureReason, failureDetail, false);
       }
 
       const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
@@ -265,11 +284,13 @@ export class LlmService {
       } catch (error) {
         const axiosError = error as AxiosError;
         failureReason = this.classifyFailure(axiosError);
-        const message = axiosError.response?.data
-          ? JSON.stringify(axiosError.response.data)
-          : axiosError.message;
-        this.logger.error(`LLM stream request failed: ${message}`);
-        throw new Error(`LLM request failed: ${message}`);
+        failureDetail = this.buildFailureDetail(axiosError);
+        this.logger.error(`LLM stream request failed: ${failureDetail}`);
+        throw new LlmUpstreamError(
+          failureReason,
+          failureDetail,
+          this.isRetriable(axiosError, failureReason),
+        );
       }
 
       // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
@@ -324,10 +345,21 @@ export class LlmService {
       // 流正常结束但零内容：调用方会走兜底话术，按 empty_response 记失败
       if (contentChars === 0) {
         failureReason = "empty_response";
+        failureDetail = "stream completed with 0 content chars";
       }
     } catch (error) {
       if (!failureReason) {
-        failureReason = this.classifyFailure(error as AxiosError);
+        const axiosError = error as AxiosError;
+        failureReason = this.classifyFailure(axiosError);
+        failureDetail = this.buildFailureDetail(axiosError);
+        if (!(error instanceof LlmUpstreamError)) {
+          // mid-stream 断流（如 socket hang up）：连接级失败，按可重试上报
+          throw new LlmUpstreamError(
+            failureReason,
+            failureDetail,
+            this.isRetriable(axiosError, failureReason),
+          );
+        }
       }
       throw error;
     } finally {
@@ -337,11 +369,38 @@ export class LlmService {
         model,
         success: failureReason === null,
         failureReason,
+        failureDetail,
         latencyMs: Date.now() - startedAt,
         firstTokenMs,
         usage,
       });
     }
+  }
+
+  /** 失败细节紧凑串：HTTP 400: {...} / ECONNRESET: socket hang up，截断 200 字符入库 */
+  private buildFailureDetail(error: AxiosError): string {
+    const status = error?.response?.status;
+    const code = error?.code;
+    const raw = error?.response?.data
+      ? JSON.stringify(error.response.data)
+      : (error?.message ?? "unknown error");
+    const prefix = status ? `HTTP ${status}` : (code ?? "UNKNOWN");
+    return `${prefix}: ${raw}`.slice(0, 200);
+  }
+
+  /**
+   * 可重试判定：超时 / 限流 / 连接级失败（无响应）/ 5xx 可重试；
+   * 其余 4xx 是请求本身有问题，重试无意义
+   */
+  private isRetriable(error: AxiosError, reason: LlmFailureReason): boolean {
+    if (reason === "timeout" || reason === "rate_limit") {
+      return true;
+    }
+    const status = error?.response?.status;
+    if (status == null) {
+      return true;
+    }
+    return status >= 500;
   }
 
   /** 失败原因归一化：timeout / rate_limit / upstream_error（parse_error 预留给调用方解析类失败） */
@@ -366,6 +425,7 @@ export class LlmService {
     model: string;
     success: boolean;
     failureReason: LlmFailureReason | null;
+    failureDetail?: string | null;
     latencyMs: number;
     firstTokenMs?: number | null;
     usage?:
@@ -385,6 +445,7 @@ export class LlmService {
           tier: isSmallModel ? "small" : "main",
           success: entry.success,
           failureReason: entry.failureReason,
+          failureDetail: entry.failureDetail ?? null,
           latencyMs: entry.latencyMs,
           firstTokenMs: entry.firstTokenMs ?? null,
           promptTokens: entry.usage?.prompt_tokens ?? null,
@@ -441,7 +502,7 @@ Rules:
 1. Reply in the same language the child just used.
 2. Keep it under 20 words, in a natural spoken style.
 3. Never answer the question or provide real content — the main reply comes later.
-4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row.
+4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row, and never start with your own name or a script-style label (e.g. "小象 Elly：…") — speak as yourself, not as a narrator.
 5. No lists, no emojis, no questions.
 6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
 7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.

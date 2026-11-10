@@ -1,6 +1,6 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
-import { LlmService } from "./llm.service";
+import { LlmService, LlmUpstreamError } from "./llm.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import axios from "axios";
 import { Readable } from "stream";
@@ -771,7 +771,7 @@ describe("LlmService", () => {
     it("should throw when the streaming request fails", async () => {
       mockedAxios.post.mockRejectedValueOnce({
         message: "Network error",
-        response: { data: { error: "rate limited" } },
+        response: { status: 500, data: { error: "rate limited" } },
       } as any);
 
       const gen = service.completeStream({
@@ -779,7 +779,156 @@ describe("LlmService", () => {
         messages: [{ role: "user", content: "Hi" }],
       });
 
-      await expect(gen.next()).rejects.toThrow("LLM request failed");
+      await expect(gen.next()).rejects.toBeInstanceOf(LlmUpstreamError);
+    });
+
+    it("超时失败抛 LlmUpstreamError：reason=timeout、可重试、detail 含 code", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        message: "timeout of 30000ms exceeded",
+        code: "ECONNABORTED",
+      } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const err: unknown = await gen.next().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(LlmUpstreamError);
+      const upstreamErr = err as LlmUpstreamError;
+      expect(upstreamErr.reason).toBe("timeout");
+      expect(upstreamErr.retriable).toBe(true);
+      expect(upstreamErr.detail).toContain("ECONNABORTED");
+    });
+
+    it("HTTP 429 → reason=rate_limit、可重试", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        message: "rate limited",
+        response: { status: 429, data: { error: "rate limited" } },
+      } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const err = (await gen
+        .next()
+        .catch((e: unknown) => e)) as LlmUpstreamError;
+      expect(err).toBeInstanceOf(LlmUpstreamError);
+      expect(err.reason).toBe("rate_limit");
+      expect(err.retriable).toBe(true);
+      expect(err.detail).toContain("HTTP 429");
+    });
+
+    it("HTTP 400 → 不可重试（请求本身有问题，重试无意义）", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        message: "bad request",
+        response: { status: 400, data: { error: "bad request" } },
+      } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const err = (await gen
+        .next()
+        .catch((e: unknown) => e)) as LlmUpstreamError;
+      expect(err).toBeInstanceOf(LlmUpstreamError);
+      expect(err.reason).toBe("upstream_error");
+      expect(err.retriable).toBe(false);
+      expect(err.detail).toContain("HTTP 400");
+    });
+
+    it("缺 API key → LlmUpstreamError 且不可重试", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LlmService,
+          PRISMA_MOCK,
+          {
+            provide: ConfigService,
+            useValue: { get: jest.fn().mockReturnValue("") },
+          },
+        ],
+      }).compile();
+      const noKeyService = module.get<LlmService>(LlmService);
+      const gen = noKeyService.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const err = (await gen
+        .next()
+        .catch((e: unknown) => e)) as LlmUpstreamError;
+      expect(err).toBeInstanceOf(LlmUpstreamError);
+      expect(err.retriable).toBe(false);
+    });
+
+    it("mid-stream 断流（socket hang up）抛可重试的 LlmUpstreamError", async () => {
+      // 实机事故（2026-11-10）：请求已发出、首 chunk 未到时连接被重置，
+      // 容器日志只看到一坨 stream 对象 dump，无法定位原因
+      const socketStream = new Readable({ read() {} });
+      mockedAxios.post.mockResolvedValueOnce({ data: socketStream } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const consumed = (async () => {
+        const out: string[] = [];
+        for await (const c of gen) out.push(c);
+        return out;
+      })();
+      // 等生成器完成 axios 请求并挂上流监听后再注入连接重置
+      setImmediate(() =>
+        socketStream.emit(
+          "error",
+          Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
+        ),
+      );
+      const err = (await consumed.catch((e: unknown) => e)) as LlmUpstreamError;
+      expect(err).toBeInstanceOf(LlmUpstreamError);
+      expect(err.reason).toBe("upstream_error");
+      expect(err.retriable).toBe(true);
+      expect(err.detail).toContain("ECONNRESET");
+    });
+
+    it("失败时把紧凑细节写入 usage log 的 failureDetail", async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        message: "socket hang up",
+        code: "ECONNRESET",
+      } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await expect(gen.next()).rejects.toBeInstanceOf(LlmUpstreamError);
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            success: false,
+            failureReason: "upstream_error",
+            failureDetail: expect.stringContaining("ECONNRESET"),
+          }),
+        }),
+      );
+    });
+
+    it("流正常结束但零内容 → empty_response 并带 failureDetail", async () => {
+      const socketStream = Readable.from([
+        'data: {"choices":[{"delta":{"content":""}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+      mockedAxios.post.mockResolvedValueOnce({ data: socketStream } as any);
+      const gen = service.completeStream({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      expect(out).toEqual([]);
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            success: false,
+            failureReason: "empty_response",
+            failureDetail: expect.stringContaining("0 content"),
+          }),
+        }),
+      );
     });
   });
 
@@ -829,6 +978,13 @@ describe("LlmService", () => {
       // 过短的 filler（如「嗯嗯」）音频不足 1 秒，缓冲失效——故约束下限
       expect(messages[0].content).toContain("at least 10 characters");
       expect(messages[0].content).toContain("at least 6 words");
+    });
+
+    it("should ban script-style name-label openers (小象 Elly：…)", () => {
+      const messages = service.buildFillerPrompt("我最喜欢蓝色");
+
+      // 实机事故：filler 连续 8 轮以「小象 Elly：」开头，像剧本角色标签
+      expect(messages[0].content).toContain("never start with your own name");
     });
 
     it("身份类 few-shot 已移除（身份问句改走确定性模板），事实确认禁令保留", () => {
@@ -1161,13 +1317,16 @@ describe("LlmService", () => {
         scene: "chat_main",
         messages: [{ role: "user", content: "Hi" }],
       });
-      await expect(gen.next()).rejects.toThrow("LLM request failed");
+      await expect(gen.next()).rejects.toThrow(
+        "LLM upstream timeout: ECONNABORTED",
+      );
       await flush();
 
       expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           success: false,
           failureReason: "timeout",
+          failureDetail: expect.stringContaining("ECONNABORTED"),
         }),
       });
     });
