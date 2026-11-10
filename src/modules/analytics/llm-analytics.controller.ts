@@ -63,6 +63,32 @@ export class LlmByTurnQueryDto {
   turnId!: string;
 }
 
+export class LlmTurnHandoffQueryDto extends AnalyticsDateRangeQueryDto {
+  /** 空窗判定阈值 ms：chat_main 首包晚于 filler 完成超过该值记空窗；缺省 0 */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(60_000)
+  gapThresholdMs?: number;
+}
+
+export class LlmSlowCallsQueryDto extends AnalyticsDateRangeQueryDto {
+  /** 缺省 = 全部场景；非法值 400 */
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @IsIn(LLM_SCENES)
+  scene?: string;
+
+  /** 缺省 20，上限 50 */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  limit?: number;
+}
+
 @ApiTags("analytics-llm")
 @ApiBearerAuth()
 @UseGuards(AnalyticsAuthGuard)
@@ -103,5 +129,23 @@ export class LlmAnalyticsController {
   })
   getByTurn(@Query() query: LlmByTurnQueryDto) {
     return this.llmAnalytics.getByTurn(query.turnId);
+  }
+
+  @Get("turn-handoff")
+  @ApiOperation({
+    summary:
+      "轮次衔接健康度（防死空气，生成侧口径）：按 turnId join filler 与 chat_main，输出 gap 分位数/空窗率/Top 空窗轮次",
+  })
+  getTurnHandoff(@Query() query: LlmTurnHandoffQueryDto) {
+    return this.llmAnalytics.getTurnHandoff(query);
+  }
+
+  @Get("slow-calls")
+  @ApiOperation({
+    summary:
+      "慢调用长尾明细（仅成功调用，latencyMs 倒序；limit ≤ 50，缺省 20）",
+  })
+  getSlowCalls(@Query() query: LlmSlowCallsQueryDto) {
+    return this.llmAnalytics.getSlowCalls(query);
   }
 }

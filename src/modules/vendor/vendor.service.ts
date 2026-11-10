@@ -21,6 +21,7 @@ import {
   ConversationIntent,
   ConversationSessionService,
 } from "./conversation-session.service";
+import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
@@ -216,6 +217,17 @@ export class VendorService {
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
+
+    // 打断推断（方案 A）：新一轮开始即判定上一轮 assistant 回复是否仍在
+    // 估算播放窗口内；fire-and-forget，失败只记日志，不阻塞本轮首音
+    void markPreviousReplyInterrupted(this.prisma, device.id).catch(
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Interruption marking failed for deviceId=${dto.deviceId}: ${message}`,
+        );
+      },
+    );
 
     // 一轮问答一个 turnId：安全/意图/filler/主回答/消息落库共用，
     // llm_usage_logs 据此把同轮多次 LLM 调用串成链路（模型监控对照视角）

@@ -9,6 +9,9 @@ function buildPrisma(data: {
   devices?: Row[];
   messages?: Row[];
   message?: Row | null;
+  categories?: Row[];
+  groups?: Row[];
+  countImpl?: (where: any) => number;
 }) {
   return {
     device: {
@@ -17,9 +20,19 @@ function buildPrisma(data: {
       ),
     },
     message: {
-      count: jest.fn((_args?: any) => (data.messages ?? []).length),
+      count: jest.fn(({ where }: any) =>
+        Promise.resolve(
+          data.countImpl ? data.countImpl(where) : (data.messages ?? []).length,
+        ),
+      ),
       findMany: jest.fn((_args?: any) => data.messages ?? []),
       findUnique: jest.fn((_args?: any) => data.message ?? null),
+      groupBy: jest.fn((_args?: any) => Promise.resolve(data.groups ?? [])),
+    },
+    conversationModeCategory: {
+      findMany: jest.fn((_args?: any) =>
+        Promise.resolve(data.categories ?? []),
+      ),
     },
   };
 }
@@ -185,5 +198,161 @@ describe("MessagesAnalyticsService", () => {
     await expect(service.getMessage("ghost")).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  describe("getModes", () => {
+    const categories = [
+      {
+        key: "free_chat",
+        name: "自由对话",
+        sortOrder: 1,
+        modes: [
+          { key: "free_chat_casual", name: "日常闲聊", sortOrder: 1 },
+          { key: "free_chat_curious", name: "好奇探索", sortOrder: 2 },
+        ],
+      },
+      {
+        key: "english_chat",
+        name: "英语角",
+        sortOrder: 2,
+        modes: [
+          { key: "english_chat_beginner", name: "启蒙对话", sortOrder: 1 },
+        ],
+      },
+    ];
+
+    it("返回配置表全量分类与子模式，并标注区间内消息数", async () => {
+      const prisma = buildPrisma({
+        categories,
+        groups: [
+          {
+            mode: "free_chat",
+            conversationModeKey: "free_chat_casual",
+            _count: { _all: 10 },
+          },
+          {
+            mode: "free_chat",
+            conversationModeKey: "free_chat_curious",
+            _count: { _all: 3 },
+          },
+          {
+            mode: "english_chat",
+            conversationModeKey: null,
+            _count: { _all: 5 },
+          },
+        ],
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.getModes({});
+
+      const freeChat = result.categories.find((c) => c.key === "free_chat");
+      // 分类计数 = 该顶层模式下全部消息（含无子模式的）
+      expect(freeChat?.messageCount).toBe(13);
+      expect(freeChat?.modes).toEqual([
+        { key: "free_chat_casual", name: "日常闲聊", messageCount: 10 },
+        { key: "free_chat_curious", name: "好奇探索", messageCount: 3 },
+      ]);
+      const english = result.categories.find((c) => c.key === "english_chat");
+      expect(english?.messageCount).toBe(5);
+      expect(english?.modes[0].messageCount).toBe(0);
+
+      // 只取启用项，按 sortOrder 排
+      const findArgs = prisma.conversationModeCategory.findMany.mock
+        .calls[0][0] as any;
+      expect(findArgs.where).toEqual({ isActive: true });
+      expect(findArgs.orderBy).toEqual({ sortOrder: "asc" });
+      expect(findArgs.include.modes).toEqual({
+        where: { isActive: true },
+        orderBy: { sortOrder: "asc" },
+      });
+    });
+
+    it("区间过滤按 spokeAt 传给 groupBy（Asia/Shanghai 边界）", async () => {
+      const prisma = buildPrisma({ categories: [], groups: [] });
+      const service = await buildService(prisma);
+
+      await service.getModes({
+        startDate: "2026-11-01",
+        endDate: "2026-11-07",
+      });
+
+      const where = (prisma.message.groupBy.mock.calls[0]?.[0] as any).where;
+      expect(where.spokeAt.gte).toEqual(new Date("2026-11-01T00:00:00+08:00"));
+      expect(where.spokeAt.lt).toEqual(new Date("2026-11-08T00:00:00+08:00"));
+    });
+
+    it("startDate 晚于 endDate 返回 400", async () => {
+      const service = await buildService(buildPrisma({}));
+      await expect(
+        service.getModes({ startDate: "2026-11-08", endDate: "2026-11-01" }),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe("getInterruptionRate", () => {
+    it("分母为 assistant 消息总数，分子为 interrupted，附 byMode 分组", async () => {
+      const prisma = buildPrisma({
+        countImpl: (where) => (where.status === "interrupted" ? 3 : 40),
+        groups: [
+          { mode: "free_chat", status: "completed", _count: { _all: 28 } },
+          { mode: "free_chat", status: "interrupted", _count: { _all: 2 } },
+          { mode: "english_chat", status: "completed", _count: { _all: 9 } },
+          { mode: "english_chat", status: "interrupted", _count: { _all: 1 } },
+        ],
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.getInterruptionRate({});
+
+      expect(result.assistantTotal).toBe(40);
+      expect(result.interrupted).toBe(3);
+      expect(result.interruptionRate).toBe(0.075);
+      // 统计只看 assistant 消息
+      const countWhere = (prisma.message.count.mock.calls[0]?.[0] as any).where;
+      expect(countWhere.role).toBe("assistant");
+      expect(result.byMode).toEqual([
+        {
+          mode: "free_chat",
+          assistantTotal: 30,
+          interrupted: 2,
+          interruptionRate: 0.0667,
+        },
+        {
+          mode: "english_chat",
+          assistantTotal: 10,
+          interrupted: 1,
+          interruptionRate: 0.1,
+        },
+      ]);
+    });
+
+    it("区间内无 assistant 消息时比率为 null", async () => {
+      const prisma = buildPrisma({ countImpl: () => 0, groups: [] });
+      const service = await buildService(prisma);
+
+      const result = await service.getInterruptionRate({});
+
+      expect(result).toEqual({
+        assistantTotal: 0,
+        interrupted: 0,
+        interruptionRate: null,
+        byMode: [],
+      });
+    });
+
+    it("区间过滤按 spokeAt 透传（Asia/Shanghai 边界）", async () => {
+      const prisma = buildPrisma({ countImpl: () => 0, groups: [] });
+      const service = await buildService(prisma);
+
+      await service.getInterruptionRate({
+        startDate: "2026-11-01",
+        endDate: "2026-11-07",
+      });
+
+      const where = (prisma.message.count.mock.calls[0]?.[0] as any).where;
+      expect(where.spokeAt.gte).toEqual(new Date("2026-11-01T00:00:00+08:00"));
+      expect(where.spokeAt.lt).toEqual(new Date("2026-11-08T00:00:00+08:00"));
+    });
   });
 });

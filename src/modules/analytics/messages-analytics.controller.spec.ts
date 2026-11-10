@@ -3,6 +3,7 @@ import { validate } from "class-validator";
 import {
   MessagesAnalyticsController,
   MessagesQueryDto,
+  MessagesStatsQueryDto,
 } from "./messages-analytics.controller";
 import { MessagesAnalyticsService } from "./messages-analytics.service";
 
@@ -20,6 +21,41 @@ describe("MessagesAnalyticsController", () => {
 
     await controller.getMessage("m1");
     expect(service.getMessage).toHaveBeenCalledWith("m1");
+  });
+
+  it("modes 与 interruption-rate 透传给 service", async () => {
+    const service = {
+      listMessages: jest.fn(),
+      getMessage: jest.fn(),
+      getModes: jest.fn().mockResolvedValue({ categories: [] }),
+      getInterruptionRate: jest
+        .fn()
+        .mockResolvedValue({ interruptionRate: null }),
+    } as unknown as MessagesAnalyticsService;
+    const controller = new MessagesAnalyticsController(service);
+
+    const query = new MessagesStatsQueryDto();
+    query.startDate = "2026-11-01";
+    await controller.getModes(query);
+    expect(service.getModes).toHaveBeenCalledWith(query);
+
+    await controller.getInterruptionRate(query);
+    expect(service.getInterruptionRate).toHaveBeenCalledWith(query);
+  });
+
+  describe("MessagesStatsQueryDto 校验", () => {
+    it("非法日期格式被拒绝，空串容忍", async () => {
+      const bad = plainToInstance(MessagesStatsQueryDto, {
+        startDate: "2026/11/01",
+      });
+      expect(
+        (await validate(bad)).some((e) => e.property === "startDate"),
+      ).toBe(true);
+
+      const ok = plainToInstance(MessagesStatsQueryDto, { startDate: "" });
+      expect(await validate(ok)).toHaveLength(0);
+      expect(ok.startDate).toBeUndefined();
+    });
   });
 
   describe("MessagesQueryDto 校验", () => {
@@ -51,7 +87,7 @@ describe("MessagesAnalyticsController", () => {
       }
     });
 
-    it("合法枚举值通过", async () => {
+    it("合法枚举值通过（含新增 interrupted）", async () => {
       const { dto, errors } = await validateQuery({
         role: "assistant",
         status: "failed",
@@ -60,6 +96,10 @@ describe("MessagesAnalyticsController", () => {
       expect(errors).toHaveLength(0);
       expect(dto.role).toBe("assistant");
       expect(dto.sort).toBe("spokeAt_asc");
+
+      const interrupted = await validateQuery({ status: "interrupted" });
+      expect(interrupted.errors).toHaveLength(0);
+      expect(interrupted.dto.status).toBe("interrupted");
     });
 
     it("keyword 超 50 字被拒绝", async () => {

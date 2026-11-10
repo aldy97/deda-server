@@ -26,6 +26,21 @@ export interface LlmRecentFailuresQuery {
   scene?: string;
 }
 
+export interface LlmTurnHandoffQuery {
+  startDate: string;
+  endDate: string;
+  /** 空窗判定阈值（ms）：chat_main 首包晚于 filler 完成超过该值记空窗；缺省 0 */
+  gapThresholdMs?: number;
+}
+
+export interface LlmSlowCallsQuery {
+  startDate: string;
+  endDate: string;
+  scene?: string;
+  /** 缺省 20，上限 50 */
+  limit?: number;
+}
+
 interface LlmLogRow {
   scene: string;
   tier: string;
@@ -230,6 +245,8 @@ export class LlmAnalyticsService {
           successRate: null,
           p50LatencyMs: null,
           avgFirstTokenMs: null,
+          p50FirstTokenMs: null,
+          p90FirstTokenMs: null,
           totalTokens: 0,
         };
       }
@@ -246,11 +263,145 @@ export class LlmAnalyticsService {
                   bucket.firstTokens.length,
               )
             : null,
+        p50FirstTokenMs: percentileCont(bucket.firstTokens, 0.5),
+        p90FirstTokenMs: percentileCont(bucket.firstTokens, 0.9),
         totalTokens: bucket.totalTokens,
       };
     });
 
     return { granularity, series };
+  }
+
+  /**
+   * 轮次衔接健康度（防死空气，生成侧口径）：按 turnId join 同轮的
+   * filler 与 chat_main，逐轮计算
+   *   gapMs = chat_main 首包时刻 − filler 生成完成时刻
+   * 注意口径：这是「生成侧」时刻，不等于设备播放侧的真实死空气
+   * （filler 音频播放时长不在本表）；gap ≤ 0 视为覆盖良好。
+   */
+  async getTurnHandoff(query: LlmTurnHandoffQuery) {
+    this.validateRange(query.startDate, query.endDate);
+    const threshold = query.gapThresholdMs ?? 0;
+    const { start } = reportDayRange(query.startDate, DEFAULT_REPORT_TIMEZONE);
+    const { end } = reportDayRange(query.endDate, DEFAULT_REPORT_TIMEZONE);
+
+    const rows = await this.prisma.llmUsageLog.findMany({
+      where: {
+        createdAt: { gte: start, lt: end },
+        turnId: { not: null },
+        scene: { in: ["filler", "chat_main"] },
+      },
+      select: {
+        turnId: true,
+        scene: true,
+        latencyMs: true,
+        firstTokenMs: true,
+        createdAt: true,
+      },
+    });
+
+    interface TurnPair {
+      filler?: { endAt: number };
+      chat?: { firstTokenAt: number | null; createdAt: Date };
+    }
+    const byTurn = new Map<string, TurnPair>();
+    for (const row of rows) {
+      if (!row.turnId) continue;
+      const pair = byTurn.get(row.turnId) ?? {};
+      if (row.scene === "filler" && row.latencyMs !== null) {
+        // 同轮多次 filler（重试）取最后一次完成的，它是实际播报的那次
+        const endAt = row.createdAt.getTime() + row.latencyMs;
+        if (!pair.filler || endAt > pair.filler.endAt) {
+          pair.filler = { endAt };
+        }
+      }
+      if (row.scene === "chat_main" && !pair.chat) {
+        pair.chat = {
+          firstTokenAt:
+            row.firstTokenMs !== null
+              ? row.createdAt.getTime() + row.firstTokenMs
+              : null,
+          createdAt: row.createdAt,
+        };
+      }
+      byTurn.set(row.turnId, pair);
+    }
+
+    let turnsWithChat = 0;
+    let turnsMissingFiller = 0;
+    let turnsUnknown = 0;
+    const gaps: number[] = [];
+    const topGaps: Array<{ turnId: string; gapMs: number; createdAt: Date }> =
+      [];
+
+    for (const [turnId, pair] of byTurn) {
+      if (!pair.chat) continue;
+      turnsWithChat += 1;
+      if (!pair.filler) {
+        turnsMissingFiller += 1;
+        continue;
+      }
+      if (pair.chat.firstTokenAt === null) {
+        turnsUnknown += 1;
+        continue;
+      }
+      const gapMs = pair.chat.firstTokenAt - pair.filler.endAt;
+      gaps.push(gapMs);
+      topGaps.push({ turnId, gapMs, createdAt: pair.chat.createdAt });
+    }
+
+    const turnsWithBoth = gaps.length;
+    const overThreshold = gaps.filter((gap) => gap > threshold).length;
+    topGaps.sort((a, b) => b.gapMs - a.gapMs);
+
+    return {
+      turnsWithChat,
+      turnsWithBoth,
+      turnsMissingFiller,
+      turnsUnknown,
+      gapThresholdMs: threshold,
+      gapP50Ms: percentileCont(gaps, 0.5),
+      gapP90Ms: percentileCont(gaps, 0.9),
+      gapRate: turnsWithBoth > 0 ? round4(overThreshold / turnsWithBoth) : null,
+      topGaps: topGaps.slice(0, 10),
+    };
+  }
+
+  /**
+   * 慢调用明细（成功但耗时长的长尾）：latencyMs 倒序。
+   * 失败调用由 recent-failures 覆盖，这里只看成功样本。
+   */
+  async getSlowCalls(query: LlmSlowCallsQuery) {
+    this.validateRange(query.startDate, query.endDate);
+    const { start } = reportDayRange(query.startDate, DEFAULT_REPORT_TIMEZONE);
+    const { end } = reportDayRange(query.endDate, DEFAULT_REPORT_TIMEZONE);
+
+    const rows = await this.prisma.llmUsageLog.findMany({
+      where: {
+        createdAt: { gte: start, lt: end },
+        success: true,
+        latencyMs: { not: null },
+        ...(query.scene ? { scene: query.scene } : {}),
+      },
+      orderBy: { latencyMs: "desc" },
+      take: query.limit ?? 20,
+      include: { device: { select: { deviceId: true } } },
+    });
+
+    return {
+      items: rows.map((row) => ({
+        id: row.id,
+        scene: row.scene,
+        tier: row.tier,
+        model: row.model,
+        latencyMs: row.latencyMs,
+        firstTokenMs: row.firstTokenMs,
+        totalTokens: row.totalTokens,
+        turnId: row.turnId ?? null,
+        deviceId: row.device?.deviceId ?? null,
+        createdAt: row.createdAt,
+      })),
+    };
   }
 
   /** 单轮 LLM 调用链路：createdAt 升序，把同轮多次调用串成时间线 */
