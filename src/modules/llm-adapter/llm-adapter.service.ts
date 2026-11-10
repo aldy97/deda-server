@@ -129,6 +129,11 @@ export class LlmAdapterService {
 
     const device = await this.resolveDevice(req, deviceHint);
 
+    // turnId 在一切 LLM 调用之前生成：safety_l2 / intent_classify /
+    // chat_main / filler / memory_extract 全程贯穿，dashboard 按轮次串联
+    // 调用链路（实机事故：turnId 生成过晚且未传入主流，链路只剩 1 条）
+    const turnId = randomUUID();
+
     // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const verdict = this.childSafety.checkL1(asrText);
     if (
@@ -143,12 +148,19 @@ export class LlmAdapterService {
         verdict.category as BlockedSafetyCategory,
       );
       if (device) {
-        await this.persistTurn(device.id, asrText, canned, "completed", {
-          filler: null,
-          answer: canned,
-          safetyCategory: verdict.category,
-          safetyLayer: "L1",
-        });
+        await this.persistTurn(
+          device.id,
+          asrText,
+          canned,
+          "completed",
+          {
+            filler: null,
+            answer: canned,
+            safetyCategory: verdict.category,
+            safetyLayer: "L1",
+          },
+          turnId,
+        );
       }
       yield canned;
       return;
@@ -170,9 +182,9 @@ export class LlmAdapterService {
     // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
     // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
     const [l2, intent] = await Promise.all([
-      this.safeClassifyL2(asrText, device?.id),
+      this.safeClassifyL2(asrText, device?.id, turnId),
       device
-        ? this.safeResolveIntent(device.id, asrText)
+        ? this.safeResolveIntent(device.id, asrText, turnId)
         : Promise.resolve<ConversationIntent>("free_chat"),
     ]);
 
@@ -186,12 +198,19 @@ export class LlmAdapterService {
         l2.category as BlockedSafetyCategory,
       );
       if (device) {
-        await this.persistTurn(device.id, asrText, canned, "completed", {
-          filler: null,
-          answer: canned,
-          safetyCategory: l2.category,
-          safetyLayer: "L2",
-        });
+        await this.persistTurn(
+          device.id,
+          asrText,
+          canned,
+          "completed",
+          {
+            filler: null,
+            answer: canned,
+            safetyCategory: l2.category,
+            safetyLayer: "L2",
+          },
+          turnId,
+        );
       }
       yield canned;
       return;
@@ -288,7 +307,6 @@ export class LlmAdapterService {
     }
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
-    const turnId = randomUUID();
     const sourceOccurredAt = new Date();
     if (device) {
       await this.prisma.message.create({
@@ -415,6 +433,7 @@ export class LlmAdapterService {
         const stream = this.llmService.completeStream({
           scene: "chat_main",
           deviceId: device?.id,
+          turnId,
           messages,
           // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
           // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
@@ -439,6 +458,7 @@ export class LlmAdapterService {
         const fillerStream = this.llmService.completeStream({
           scene: "filler",
           deviceId: device?.id,
+          turnId,
           messages: this.llmService.buildFillerPrompt(asrText, recentFillers, {
             intent,
             adventureDeclined,
@@ -645,9 +665,13 @@ export class LlmAdapterService {
   }
 
   /** L2 语义分类包装：任何异常 fail-open 返回 null，由 L3 兜底 */
-  private async safeClassifyL2(asrText: string, deviceId?: string) {
+  private async safeClassifyL2(
+    asrText: string,
+    deviceId?: string,
+    turnId?: string,
+  ) {
     try {
-      return await this.childSafety.classifyL2(asrText, deviceId);
+      return await this.childSafety.classifyL2(asrText, deviceId, turnId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`L2 classification failed, fail-open: ${message}`);
@@ -659,9 +683,14 @@ export class LlmAdapterService {
   private async safeResolveIntent(
     deviceInternalId: string,
     asrText: string,
+    turnId?: string,
   ): Promise<ConversationIntent> {
     try {
-      return await this.conversationSession.resolve(deviceInternalId, asrText);
+      return await this.conversationSession.resolve(
+        deviceInternalId,
+        asrText,
+        turnId,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(
@@ -815,8 +844,8 @@ export class LlmAdapterService {
     replyText: string,
     status: "completed" | "failed",
     assistantPayload: Prisma.InputJsonValue,
+    turnId: string = randomUUID(),
   ): Promise<void> {
-    const turnId = randomUUID();
     await this.prisma.message.create({
       data: {
         deviceId: deviceInternalId,
