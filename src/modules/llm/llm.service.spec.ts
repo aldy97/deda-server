@@ -256,6 +256,35 @@ describe("LlmService", () => {
       expect(without[0].content).toContain("小象 Elly");
     });
 
+    it("主模型禁令：第一句必须是实质内容，禁止纯承接开头", () => {
+      for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
+        const messages = service.buildEnglishTutorPrompt(
+          "球不见了",
+          undefined,
+          { mode },
+        );
+        // 承接已由 filler 通道播完，主模型再承接 = 孩子听两遍（实机事故）
+        expect(messages[0].content).toContain(
+          "first sentence must carry real content",
+        );
+      }
+    });
+
+    it("故事模式额外禁止先评论孩子的话", () => {
+      const messages = service.buildEnglishTutorPrompt("球不见了", undefined, {
+        mode: "idiom_story",
+        promptTemplate: "讲一个成语故事。",
+      });
+      expect(messages[0].content).toContain("直接推进故事");
+    });
+
+    it("人设段固定中文自称写法，防止「艾莉/Elly」不一致", () => {
+      const messages = service.buildEnglishTutorPrompt("你好", undefined, {
+        characterKey: "elly",
+      });
+      expect(messages[0].content).toContain("自称固定为");
+    });
+
     it("should include conversation history", () => {
       const messages = service.buildEnglishTutorPrompt("I'm fine.", [
         { role: "user", content: "How are you?" },
@@ -412,7 +441,9 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain(
         "just heard a short warm acknowledgment",
       );
-      expect(messages[0].content).toContain("go straight into your reply");
+      expect(messages[0].content).toContain(
+        "first sentence must carry real content",
+      );
     });
   });
 
@@ -859,6 +890,20 @@ describe("LlmService", () => {
 
       const without = service.buildFillerPrompt("你好呀", [], {});
       expect(without[0].content).not.toContain("The child you are talking to");
+    });
+
+    it("filler 职责边界：不确认事实、不答实质问题（含问 Elly 自己）", () => {
+      const messages = service.buildFillerPrompt("听风原野里有艾莉", [], {});
+
+      // 禁止复述/确认孩子陈述的事实（实机事故：filler 确认错误前提，
+      // 主模型再纠正，听起来自相矛盾）
+      expect(messages[0].content).toContain(
+        "Never confirm or repeat factual claims",
+      );
+      // few-shot 反例：错误前提不确认
+      expect(messages[0].content).toContain("你在想听风原野里都有谁呀");
+      // few-shot 反例：问 Elly 自己也只承接
+      expect(messages[0].content).toContain("你想知道我喜欢什么呀");
     });
   });
 

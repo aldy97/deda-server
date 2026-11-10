@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -30,6 +30,8 @@ interface ExtractAndStoreInput {
 
 @Injectable()
 export class ChildMemoriesService {
+  private readonly logger = new Logger(ChildMemoriesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
@@ -58,6 +60,9 @@ export class ChildMemoriesService {
             "preferred_interaction/interest_topic；operation 只能是 " +
             "assert/confirm/supersede/retract。只提取孩子明确表达的长期偏好；" +
             "临时状态、犹豫、猜测、敏感信息、学校、地址、健康信息均输出 []。" +
+            "孩子在提问（尤其询问 Elly 或对方的偏好、名字）时不算陈述，输出 []。" +
+            "interest_topic 涵盖孩子感兴趣的事物与活动，例如恐龙、太空、打篮球、画画、游泳。" +
+            "evidence 必须是孩子原话 childText 的原文摘抄，不得改写、转述或补全。" +
             "“也喜欢”不能替代单值最爱；没有可保存信息输出 []。",
         },
         {
@@ -75,6 +80,13 @@ export class ChildMemoriesService {
     });
 
     const candidates = this.parseExtractions(result.text, input.asrText);
+    // 可观测性：模型有产出但解析/校验全拒时留痕，避免「跑了但没存」无从排查
+    if (candidates.length === 0 && result.text.trim() !== "[]") {
+      this.logger.debug(
+        `memory_extract produced no candidates (turn=${input.turnId}): ` +
+          `raw=${result.text.slice(0, 300)} asr=${input.asrText.slice(0, 100)}`,
+      );
+    }
     let stored = 0;
     for (const candidate of candidates) {
       const current = active.find((memory) => memory.key === candidate.key);
@@ -99,10 +111,22 @@ export class ChildMemoriesService {
     return stored;
   }
 
+  /**
+   * 纯疑问句不构成「孩子明确表达的偏好」——孩子问 Elly 的喜好 ≠ 孩子的喜好
+   * （实机事故：「Elly 你最喜欢的颜色是什么」被错存为孩子的 favorite_color）。
+   * 混合句（含第一人称偏好断言，如「我喜欢蓝色，你呢？」）放行给模型判断。
+   */
+  private static readonly QUESTION_PATTERN =
+    /[?？]|是什么|是谁|为什么|怎么样|怎么办|好不好|可以吗|行吗|呢$|吗$|吧$/;
+  private static readonly FIRST_PERSON_PREFERENCE =
+    /我(最|特别|非常|真)?(喜欢|爱|想要|想听|想看)/;
+
   private parseExtractions(text: string, asrText: string): MemoryExtraction[] {
     if (
       text.length > 5000 ||
-      /今天|可能|也许|大概|不确定|随便|听不清/.test(asrText)
+      /今天|可能|也许|大概|不确定|随便|听不清/.test(asrText) ||
+      (ChildMemoriesService.QUESTION_PATTERN.test(asrText) &&
+        !ChildMemoriesService.FIRST_PERSON_PREFERENCE.test(asrText))
     ) {
       return [];
     }
@@ -132,6 +156,8 @@ export class ChildMemoriesService {
         ) ||
         typeof candidate.evidence !== "string" ||
         candidate.evidence.trim().length === 0 ||
+        // 证据必须是孩子原话的子串：挡住「把 Elly 的话当证据」的幻觉抽取
+        !asrText.includes(candidate.evidence.trim()) ||
         typeof candidate.confidence !== "number" ||
         candidate.confidence < 0.75 ||
         candidate.confidence > 1

@@ -58,13 +58,14 @@ describe("ChildMemoriesService", () => {
     value: string,
     operation = "assert",
     key = "favorite_color",
+    evidence = "孩子明确表达",
   ) =>
     JSON.stringify([
       {
         key,
         value,
         operation,
-        evidence: "孩子明确表达",
+        evidence,
         confidence: 0.95,
       },
     ]);
@@ -127,7 +128,9 @@ describe("ChildMemoriesService", () => {
   });
 
   it("should create the first active memory from an explicit preference", async () => {
-    llm.complete.mockResolvedValue({ text: extraction("red") });
+    llm.complete.mockResolvedValue({
+      text: extraction("red", "assert", "favorite_color", "我最喜欢红色"),
+    });
 
     await expect(service.extractAndStore(input("我最喜欢红色"))).resolves.toBe(
       1,
@@ -158,7 +161,14 @@ describe("ChildMemoriesService", () => {
     prisma.childMemory.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(redMemory);
-    llm.complete.mockResolvedValue({ text: extraction("blue", "supersede") });
+    llm.complete.mockResolvedValue({
+      text: extraction(
+        "blue",
+        "supersede",
+        "favorite_color",
+        "我现在最喜欢蓝色",
+      ),
+    });
 
     await expect(
       service.extractAndStore(input("我现在最喜欢蓝色", "turn-blue")),
@@ -194,7 +204,9 @@ describe("ChildMemoriesService", () => {
     prisma.childMemory.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(redMemory);
-    llm.complete.mockResolvedValue({ text: extraction("red", "confirm") });
+    llm.complete.mockResolvedValue({
+      text: extraction("red", "confirm", "favorite_color", "我还是最喜欢红色"),
+    });
 
     await expect(
       service.extractAndStore(input("我还是最喜欢红色")),
@@ -212,7 +224,9 @@ describe("ChildMemoriesService", () => {
     prisma.childMemory.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(redMemory);
-    llm.complete.mockResolvedValue({ text: extraction("red", "retract") });
+    llm.complete.mockResolvedValue({
+      text: extraction("red", "retract", "favorite_color", "我不再喜欢红色了"),
+    });
 
     await expect(
       service.extractAndStore(input("我不再喜欢红色了")),
@@ -234,7 +248,9 @@ describe("ChildMemoriesService", () => {
 
   it("should reject an additive statement instead of replacing a single-value favorite", async () => {
     prisma.childMemory.findMany.mockResolvedValue([redMemory]);
-    llm.complete.mockResolvedValue({ text: extraction("blue", "supersede") });
+    llm.complete.mockResolvedValue({
+      text: extraction("blue", "supersede", "favorite_color", "我也喜欢蓝色"),
+    });
 
     await expect(service.extractAndStore(input("我也喜欢蓝色"))).resolves.toBe(
       0,
@@ -247,7 +263,9 @@ describe("ChildMemoriesService", () => {
     prisma.childMemory.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(redMemory);
-    llm.complete.mockResolvedValue({ text: extraction("blue", "supersede") });
+    llm.complete.mockResolvedValue({
+      text: extraction("blue", "supersede", "favorite_color", "我最喜欢蓝色"),
+    });
 
     await expect(
       service.extractAndStore({
@@ -260,7 +278,9 @@ describe("ChildMemoriesService", () => {
 
   it("should be idempotent for the same source turn and key", async () => {
     prisma.childMemory.findFirst.mockResolvedValue(redMemory);
-    llm.complete.mockResolvedValue({ text: extraction("red") });
+    llm.complete.mockResolvedValue({
+      text: extraction("red", "assert", "favorite_color", "我最喜欢红色"),
+    });
 
     await expect(service.extractAndStore(input("我最喜欢红色"))).resolves.toBe(
       0,
@@ -280,6 +300,64 @@ describe("ChildMemoriesService", () => {
 
     await expect(service.extractAndStore(input(asrText))).resolves.toBe(0);
     expect(prisma.childMemory.create).not.toHaveBeenCalled();
+  });
+
+  describe("方向与证据防线", () => {
+    it("纯疑问句不抽取（孩子问 Elly 的偏好不是孩子的偏好）", async () => {
+      // 实机事故：孩子问「Elly 最喜欢的颜色是什么呀」，extractor 把 Elly
+      // 上轮回答的「橙色」错存为孩子的 favorite_color
+      llm.complete.mockResolvedValue({
+        text: extraction("橙色", "assert", "favorite_color", "最喜欢的颜色"),
+      });
+
+      await expect(
+        service.extractAndStore(input("Elly 你最喜欢的颜色是什么呀？")),
+      ).resolves.toBe(0);
+      expect(prisma.childMemory.create).not.toHaveBeenCalled();
+    });
+
+    it("混合句（陈述偏好 + 反问）仍放行", async () => {
+      llm.complete.mockResolvedValue({
+        text: extraction("蓝色", "assert", "favorite_color", "我喜欢蓝色"),
+      });
+      prisma.childMemory.create.mockImplementation(({ data }) => data);
+
+      await expect(
+        service.extractAndStore(input("我喜欢蓝色，Elly 你呢？")),
+      ).resolves.toBe(1);
+      expect(prisma.childMemory.create).toHaveBeenCalled();
+    });
+
+    it("evidence 必须是孩子原话的子串（防幻觉证据）", async () => {
+      llm.complete.mockResolvedValue({
+        text: extraction(
+          "蓝色",
+          "assert",
+          "favorite_color",
+          "孩子说她喜欢蓝色",
+        ),
+      });
+
+      await expect(service.extractAndStore(input("我喜欢蓝色"))).resolves.toBe(
+        0,
+      );
+      expect(prisma.childMemory.create).not.toHaveBeenCalled();
+    });
+
+    it("抽取 prompt 含问句规则与 interest_topic 运动类正例", async () => {
+      llm.complete.mockResolvedValue({ text: "[]" });
+
+      await service.extractAndStore(input("今天很开心"));
+
+      const systemPrompt = llm.complete.mock.calls[0][0].messages[0]
+        .content as string;
+      // 问句规则：提问不算陈述
+      expect(systemPrompt).toContain("提问");
+      // interest_topic 正例：运动类偏好（实机漏抽「我喜欢打篮球」）
+      expect(systemPrompt).toContain("打篮球");
+      // evidence 必须原文摘抄
+      expect(systemPrompt).toContain("原文");
+    });
   });
 
   it("should recall only contextually relevant active memories", async () => {

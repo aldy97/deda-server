@@ -191,6 +191,7 @@ describe("LlmAdapterModule", () => {
       expect(session.resolve).toHaveBeenCalledWith(
         "dev-internal-1",
         "讲一个英语故事",
+        expect.any(String),
       );
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.mode).toBe("english_story");
@@ -735,6 +736,7 @@ describe("LlmAdapterModule", () => {
       expect(childSafety.classifyL2).toHaveBeenCalledWith(
         "I like apples",
         undefined,
+        expect.any(String),
       );
       expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
       expect(childSafety.cannedReply).toHaveBeenCalledWith("self_harm");
@@ -1091,6 +1093,37 @@ describe("LlmAdapterModule", () => {
         .map((m: { content: string }) => m.content);
       expect(systemContents).toContain("MEMBLOCK");
       expect(memories.markInjected).toHaveBeenCalledWith(["m1", "m2"]);
+    });
+
+    it("同一轮 turnId 贯穿 safety_l2 / intent / chat_main / filler 与消息落库", async () => {
+      // 实机事故：staging 仅 memory_extract 有 turnId，dashboard 按轮次
+      // 只能捞出一条调用记录。turnId 必须在 L2/意图分类前生成并全程贯穿。
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+
+      await collect(service.streamReply(boundRequest));
+
+      const turnId = prisma.message.create.mock.calls[0][0].data.turnId;
+      expect(turnId).toBeTruthy();
+      expect(childSafety.classifyL2).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev-internal-1",
+        turnId,
+      );
+      expect(session.resolve).toHaveBeenCalledWith(
+        "dev-internal-1",
+        expect.any(String),
+        turnId,
+      );
+      for (const call of llm.completeStream.mock.calls) {
+        expect(call[0].turnId).toBe(turnId);
+      }
+      expect(memories.extractAndStore).toHaveBeenCalledWith(
+        expect.objectContaining({ turnId }),
+      );
     });
 
     it("extracts memories asynchronously with the previous assistant turn", async () => {
