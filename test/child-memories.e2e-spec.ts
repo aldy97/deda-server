@@ -243,9 +243,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
     });
     expect(blue).toMatchObject({ valueText: "blue", status: "active" });
 
+    // 全量注入：无关键词也返回全部 active 记忆；superseded 的 red 不带出
     const recalled = await childMemoriesService.buildPromptBlock(
       "device-uuid",
-      "你还记得我喜欢什么颜色吗？",
+      [],
     );
     expect(recalled.text).toContain("blue");
     expect(recalled.text).not.toContain("red");

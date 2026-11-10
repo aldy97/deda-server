@@ -1421,13 +1421,18 @@ describe("LlmAdapterModule", () => {
       await collect(service.streamReply(boundRequest));
       expect(memories.buildPromptBlock).toHaveBeenCalledWith(
         "dev-internal-1",
-        "hello deda",
+        [],
       );
       const callArgs = llm.completeStream.mock.calls[0][0];
-      const systemContents = callArgs.messages
-        .filter((m: { role: string }) => m.role === "system")
-        .map((m: { content: string }) => m.content);
-      expect(systemContents).toContain("MEMBLOCK");
+      // 记忆块贴尾注入：位于本轮 user 之前，保住头部前缀缓存
+      expect(callArgs.messages[callArgs.messages.length - 2]).toEqual({
+        role: "system",
+        content: "MEMBLOCK",
+      });
+      expect(callArgs.messages[callArgs.messages.length - 1]).toEqual({
+        role: "user",
+        content: "hello deda",
+      });
       expect(memories.markInjected).toHaveBeenCalledWith(["m1", "m2"]);
     });
 
