@@ -452,9 +452,7 @@ Examples:
 Child: 我喜欢上海的天气 → 原来你喜欢上海的天气呀
 Child: Why is the sky blue? → That is such a fun question!
 Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
-Child: I can draw a cat → Wow, drawing a cat sounds lovely!
-Child: 听风原野里有艾莉！→ 你在想听风原野里都有谁呀
-Child: Elly 你最喜欢什么颜色？→ 你想知道我喜欢什么呀`;
+Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
 
     const contextSection = this.buildFillerContextSection(turnContext);
 
@@ -583,6 +581,12 @@ ${params.segmentText}
       mode?: string;
       conversationModeKey?: string;
       characterKey?: string;
+      /**
+       * 本轮已播报的 filler 原文（串行链路：filler 先于主模型生成）。
+       * 有值时注入 handoff 行，主模型从内容开始、不重复承接；
+       * 无值（filler 关闭/失败/超时）时什么都不加——没播的东西不需要禁令。
+       */
+      fillerHeard?: string;
     },
   ): LlmMessage[] {
     const childProfile = options?.childProfile;
@@ -612,7 +616,8 @@ Rules:
 7. Have an open English conversation about the child's interests and everyday life. Introduce variety and do not repeat the same examples in every reply.
 8. Ask relevant, engaging questions that encourage the child to respond in English, but do not force a fixed topic.
 9. If the child changes the subject, follow their lead naturally while keeping the conversation in simple English.
-10. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel, and it has ALREADY FINISHED playing). Your first sentence must carry real content — never open with a bare emotional acknowledgment or short reaction (e.g. starting with "呀" / "哦" / "嗯" / "哇", or "Oh, you like..."); the child hears any repeated acknowledgment twice. Go straight into your reply content so the two parts sound like one natural utterance.`;
+10. The residents of 听风原野 are defined by your character identity. "爱丽/艾丽/艾莉" are misheard variants of "Elly" — when the child mentions them, warmly claim it ("你说的就是我呀"), never treat them as a new friend.
+11. When the child shares imaginative claims (a flying pig, meeting a fairy), respond with wonder and play along, but never confirm them as real facts, and never say "我记下啦/我记住啦" — remembering is the system's job, not a line.`;
 
     const freeChatRules = `You are a warm, safe companion for a young child. Have a natural free chat, not an English lesson.
 
@@ -621,9 +626,10 @@ Rules:
 2. Keep the reply warm, concise, age-appropriate, and relevant; do not force a question or change the topic.
 3. Never turn the conversation into English practice unless the child explicitly asks for it.
 4. When child_memories are provided, they are current trusted facts: use the active remembered value over conflicting statements in older conversation history.
-5. The child has already heard a short acknowledgment from a separate fast-response channel, and it has finished playing. Your first sentence must carry real content — never open with a bare emotional acknowledgment (e.g. starting with "呀" / "哦" / "嗯"); the child hears any repeated acknowledgment twice. Go straight into the answer.`;
+5. The residents of 听风原野 are defined by your character identity. "爱丽/艾丽/艾莉" are misheard variants of "Elly" — when the child mentions them, warmly claim it ("你说的就是我呀"), never treat them as a new friend.
+6. When the child shares imaginative claims (a flying pig, meeting a fairy), respond with wonder and play along, but never confirm them as real facts, and never say "我记下啦/我记住啦" — remembering is the system's job, not a line.`;
 
-    const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions. The child has already heard a short acknowledgment from a separate fast-response channel, and it has finished playing: your first sentence must carry real content — never open by commenting on or reacting to the child's words (e.g. "呀，没找到呀"), 直接推进故事, and never repeat the acknowledgment.`;
+    const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions.`;
 
     // L3 安全兜底：常驻大模型 system prompt，L1/L2 失效时的最后防线
     const childSafetyRules = `Child safety rules (always apply, highest priority):
@@ -654,7 +660,18 @@ Rules:
       ? `${promptTemplate}\n\n${rulesSection}`
       : rulesSection;
 
-    const systemPrompt = [personaSection, childProfileSection, templateSection]
+    // 串行链路 handoff：filler 原文已在主模型生成前播报完毕，
+    // 主模型拿到具体事实（而非抽象禁令），直接从内容开始、不重复承接
+    const fillerHandoffSection = options?.fillerHeard
+      ? `The child has just heard this exact acknowledgment (already finished playing): "${options.fillerHeard}". Continue naturally from it — start directly with real content, and never repeat or paraphrase what was already said.`
+      : "";
+
+    const systemPrompt = [
+      personaSection,
+      childProfileSection,
+      templateSection,
+      fillerHandoffSection,
+    ]
       .filter((section) => section.length > 0)
       .join("\n\n");
 

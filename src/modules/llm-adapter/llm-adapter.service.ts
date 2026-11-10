@@ -377,9 +377,30 @@ export class LlmAdapterService {
       }
     }
 
+    // 孩子档案：主模型 prompt 与 filler 情境共用，提前于串行 filler 取
+    const childProfile = device ? await this.getChildProfile(device.id) : null;
+
+    // 串行 filler：小模型非流式先行生成一句承接（实测约 0.4s，被 filler
+    // 语音播报时长完全吸收），原文注入主模型 prompt，从结构上杜绝
+    // 「主模型重复 filler 已说的内容」。身份/偏好问句走确定性模板；
+    // 与近 5 轮重复时重试一次，仍重复回落模板池。失败/关闭静默无 filler。
+    const fillerEnabled =
+      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
+    let fillerText = "";
+    if (fillerEnabled) {
+      fillerText = await this.generateFiller({
+        asrText,
+        recentFillers,
+        intent,
+        adventureDeclined,
+        device,
+        childProfile,
+        turnId,
+      });
+    }
+
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
     // 孩子档案注入称呼/年龄上下文（均对齐老链路）
-    const childProfile = device ? await this.getChildProfile(device.id) : null;
     const promptTemplate = STORY_INTENTS.includes(intent)
       ? this.storyPrompt(intent, favoriteStoryType)
       : intent === "adventure_story" || intent === "free_story"
@@ -402,6 +423,7 @@ export class LlmAdapterService {
       mode,
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
       characterKey: device?.characterKey,
+      fillerHeard: fillerText || undefined,
     });
     const messages: LlmMessage[] = [
       ...baiduSystem,
@@ -412,99 +434,32 @@ export class LlmAdapterService {
       ...built,
     ];
 
-    // 双模型流式（对齐老链路 generateStreamReply）：大模型流后台泵入缓冲，
-    // filler（小模型打哈哈）先行外发，filler 结束后按序 drain 大模型缓冲。
-    // 新链路没有 seq 双通道，filler 直接作为 SSE 流前导 chunk，TTS 天然按序
-    // 播报。filler 失败静默跳过；大模型失败且无任何产出时回落兜底话术。
-    const fillerEnabled =
-      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
-
-    const buffered: string[] = [];
-    let pumpDone = false;
-    let pumpFailure: unknown = null;
-    let notify: (() => void) | null = null;
-    const wake = () => {
-      const fn = notify;
-      notify = null;
-      fn?.();
-    };
-    const pump = (async () => {
-      try {
-        const stream = this.llmService.completeStream({
-          scene: "chat_main",
-          deviceId: device?.id,
-          turnId,
-          messages,
-          // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
-          // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
-          maxTokens: isStoryTurn ? 800 : 200,
-          thinking: { type: "disabled" },
-        });
-        for await (const chunk of stream) {
-          buffered.push(chunk);
-          wake();
-        }
-      } catch (error) {
-        pumpFailure = error;
-      } finally {
-        pumpDone = true;
-        wake();
-      }
-    })();
-
-    let fillerText = "";
-    if (fillerEnabled) {
-      try {
-        const fillerStream = this.llmService.completeStream({
-          scene: "filler",
-          deviceId: device?.id,
-          turnId,
-          messages: this.llmService.buildFillerPrompt(asrText, recentFillers, {
-            intent,
-            adventureDeclined,
-            persona: device
-              ? (LlmService.CHARACTER_PERSONAS[device.characterKey] ??
-                LlmService.CHARACTER_PERSONAS.elly)
-              : undefined,
-            childBrief: childProfile
-              ? LlmService.buildChildBrief(childProfile)
-              : undefined,
-          }),
-          model: this.llmService.smallModelName,
-          maxTokens: 60,
-        });
-        for await (const delta of fillerStream) {
-          fillerText += delta;
-          yield delta;
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`Filler stream failed, skipped: ${message}`);
-      }
+    // 主模型流式：filler（如有）先作为 SSE 前导 chunk 外发，随后主模型
+    // 按流直出（串行后不再需要双泵缓冲交错）。大模型失败且 filler/答案
+    // 均无产出时回落兜底话术。
+    if (fillerText) {
+      yield fillerText;
     }
-
     let answerText = "";
-    for (;;) {
-      const delta = buffered.shift();
-      if (delta !== undefined) {
-        answerText += delta;
-        yield delta;
-        continue;
-      }
-      if (pumpDone) break;
-      await new Promise<void>((resolve) => {
-        notify = resolve;
-      });
-    }
-    await pump;
-
     let llmFailed = false;
-    if (pumpFailure) {
+    try {
+      const stream = this.llmService.completeStream({
+        scene: "chat_main",
+        deviceId: device?.id,
+        turnId,
+        messages,
+        // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
+        // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
+        maxTokens: isStoryTurn ? 800 : 200,
+        thinking: { type: "disabled" },
+      });
+      for await (const chunk of stream) {
+        answerText += chunk;
+        yield chunk;
+      }
+    } catch (error) {
       llmFailed = true;
-      const message =
-        pumpFailure instanceof Error
-          ? pumpFailure.message
-          : String(pumpFailure);
+      const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`LLM upstream failed: ${message}`);
       if (!answerText && !fillerText) {
         answerText = UPSTREAM_FALLBACK_TEXT;
@@ -835,6 +790,165 @@ export class LlmAdapterService {
       }
     }
     return { history, recentFillers: fillers.slice(-5) };
+  }
+
+  /** 问 Elly 身份（名字/是谁）的窄类问句：filler 走模板，不交给小模型 */
+  private static readonly SELF_IDENTITY_QUESTION =
+    /你(叫什么|是谁|是干什么的)|你的名字|who are you|your name/i;
+  /** 问 Elly 偏好的窄类问句：同上走模板（实机事故：filler 主客颠倒） */
+  private static readonly SELF_PREFERENCE_QUESTION =
+    /你(最?(喜欢|爱)|喜欢什么|爱吃什么|平时喜欢)/i;
+
+  private static readonly IDENTITY_FILLERS_ZH = [
+    "你在问我的名字呀…",
+    "你想知道我是谁呀…",
+  ];
+  private static readonly PREFERENCE_FILLERS_ZH = [
+    "你想知道我喜欢什么呀…",
+    "你在问我的喜好呀…",
+  ];
+  private static readonly IDENTITY_FILLERS_EN = ["You're asking my name?"];
+  private static readonly PREFERENCE_FILLERS_EN = [
+    "You want to know what I like?",
+  ];
+  private static readonly GENERIC_FILLERS_ZH = [
+    "嗯嗯，我在听呢～",
+    "哇，你说的真有意思呀～",
+    "哦？后来呢后来呢～",
+    "哈哈，我喜欢听你说话呢～",
+  ];
+  private static readonly GENERIC_FILLERS_EN = [
+    "Hmm, I'm listening...",
+    "Wow, tell me more!",
+    "Oh, that sounds fun!",
+  ];
+
+  /**
+   * 串行 filler：非流式生成一句承接（3s 超时），作为 SSE 前导播报并注入
+   * 主模型 prompt。三层防线：
+   * 1. 身份/偏好问句走确定性模板（实机事故：小模型抢答名字、主客颠倒）；
+   * 2. 模型生成后与近 5 轮 filler 归一化比对，重复则带强禁令重试一次
+   *    （实机事故：同一句 filler 三连复读，小模型无视 prompt 禁用清单）；
+   * 3. 仍重复则从兜底模板池取一条，保证绝不复读。
+   * 任何失败静默返回 ""，主链路照常。
+   */
+  private async generateFiller(params: {
+    asrText: string;
+    recentFillers: string[];
+    intent: ConversationIntent;
+    adventureDeclined: boolean;
+    device: { id: string; characterKey?: string | null } | null;
+    childProfile: {
+      name?: string | null;
+      birthday?: string | null;
+      englishName?: string | null;
+      gender?: string | null;
+    } | null;
+    turnId: string;
+  }): Promise<string> {
+    const { asrText, recentFillers } = params;
+
+    const templated = this.fillerTemplateFor(asrText, recentFillers);
+    if (templated) {
+      return templated;
+    }
+
+    const call = (extraInstruction?: string) => {
+      const messages = this.llmService.buildFillerPrompt(
+        asrText,
+        recentFillers,
+        {
+          intent: params.intent,
+          adventureDeclined: params.adventureDeclined,
+          persona: params.device
+            ? (LlmService.CHARACTER_PERSONAS[
+                params.device.characterKey ?? "elly"
+              ] ?? LlmService.CHARACTER_PERSONAS.elly)
+            : undefined,
+          childBrief: params.childProfile
+            ? LlmService.buildChildBrief(params.childProfile)
+            : undefined,
+        },
+      );
+      if (extraInstruction) {
+        messages.push({ role: "user", content: extraInstruction });
+      }
+      return this.llmService.complete({
+        scene: "filler",
+        deviceId: params.device?.id,
+        turnId: params.turnId,
+        messages,
+        model: this.llmService.smallModelName,
+        maxTokens: 60,
+        timeoutMs: 3000,
+      });
+    };
+
+    try {
+      const first = (await call()).text.trim();
+      if (first && !this.isFillerDuplicate(first, recentFillers)) {
+        return first;
+      }
+      const retry = (
+        await call(
+          "Your previous attempt was rejected because it repeats a recently used opener. Produce a COMPLETELY different sentence — different words, different structure.",
+        )
+      ).text.trim();
+      if (retry && !this.isFillerDuplicate(retry, recentFillers)) {
+        return retry;
+      }
+      return this.fillerFallback(asrText, recentFillers);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Filler generation failed, skipped: ${message}`);
+      return "";
+    }
+  }
+
+  /** 身份/偏好问句的确定性模板；非此类问句返回 null 走小模型 */
+  private fillerTemplateFor(
+    asrText: string,
+    recentFillers: string[],
+  ): string | null {
+    const isZh = /[\u4e00-\u9fff]/.test(asrText);
+    let pool: string[] | null = null;
+    if (LlmAdapterService.SELF_IDENTITY_QUESTION.test(asrText)) {
+      pool = isZh
+        ? LlmAdapterService.IDENTITY_FILLERS_ZH
+        : LlmAdapterService.IDENTITY_FILLERS_EN;
+    } else if (LlmAdapterService.SELF_PREFERENCE_QUESTION.test(asrText)) {
+      pool = isZh
+        ? LlmAdapterService.PREFERENCE_FILLERS_ZH
+        : LlmAdapterService.PREFERENCE_FILLERS_EN;
+    }
+    if (!pool) {
+      return null;
+    }
+    return (
+      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
+    );
+  }
+
+  /** 重试仍重复时的兜底：通用模板池里挑一条最近没用过的 */
+  private fillerFallback(asrText: string, recentFillers: string[]): string {
+    const pool = /[\u4e00-\u9fff]/.test(asrText)
+      ? LlmAdapterService.GENERIC_FILLERS_ZH
+      : LlmAdapterService.GENERIC_FILLERS_EN;
+    return (
+      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
+    );
+  }
+
+  /** 归一化比对（去大小写/空白/标点/符号）：挡逐字复读与近重复 */
+  private isFillerDuplicate(text: string, recentFillers: string[]): boolean {
+    const normalized = LlmAdapterService.normalizeFiller(text);
+    return recentFillers.some(
+      (recent) => LlmAdapterService.normalizeFiller(recent) === normalized,
+    );
+  }
+
+  private static normalizeFiller(text: string): string {
+    return text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
   }
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */

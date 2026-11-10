@@ -256,26 +256,46 @@ describe("LlmService", () => {
       expect(without[0].content).toContain("小象 Elly");
     });
 
-    it("主模型禁令：第一句必须是实质内容，禁止纯承接开头", () => {
+    it("fillerHeard 注入 handoff：主模型知道孩子刚听到的那句承接", () => {
+      for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
+        const messages = service.buildEnglishTutorPrompt(
+          "球不见了",
+          undefined,
+          { mode, fillerHeard: "好呀，故事时间到啦～" },
+        );
+        // 串行后 filler 原文注入主模型：防重复从「抽象禁令」升级为「给事实」
+        expect(messages[0].content).toContain("好呀，故事时间到啦～");
+        expect(messages[0].content).toContain("never repeat or paraphrase");
+      }
+    });
+
+    it("无 fillerHeard 时不含 handoff，也不再携带抽象承接禁令", () => {
       for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
         const messages = service.buildEnglishTutorPrompt(
           "球不见了",
           undefined,
           { mode },
         );
-        // 承接已由 filler 通道播完，主模型再承接 = 孩子听两遍（实机事故）
-        expect(messages[0].content).toContain(
+        // filler 失败/关闭时没有任何承接被播报，禁令反而限制正常表达
+        expect(messages[0].content).not.toContain("never repeat or paraphrase");
+        expect(messages[0].content).not.toContain(
           "first sentence must carry real content",
         );
+        expect(messages[0].content).not.toContain("直接推进故事");
       }
     });
 
-    it("故事模式额外禁止先评论孩子的话", () => {
-      const messages = service.buildEnglishTutorPrompt("球不见了", undefined, {
-        mode: "idiom_story",
-        promptTemplate: "讲一个成语故事。",
-      });
-      expect(messages[0].content).toContain("直接推进故事");
+    it("事实边界：爱丽/艾丽是 Elly 误听须认领，想象陈述不得确认为事实", () => {
+      for (const mode of ["free_chat", "english_chat"]) {
+        const messages = service.buildEnglishTutorPrompt(
+          "听风原野里有爱丽",
+          undefined,
+          { mode },
+        );
+        // 实机事故：主模型把 ASR 误听变体当成新朋友，还说「我记下啦」
+        expect(messages[0].content).toContain("爱丽");
+        expect(messages[0].content).toContain("我记下啦");
+      }
     });
 
     it("人设段固定中文自称写法，防止「艾莉/Elly」不一致", () => {
@@ -434,16 +454,19 @@ describe("LlmService", () => {
       );
     });
 
-    it("should tell the model to skip repeated acknowledgments after the filler", () => {
-      const messages = service.buildEnglishTutorPrompt("我喜欢上海的天气");
+    it("should hand off the exact filler line to the main model when provided", () => {
+      const messages = service.buildEnglishTutorPrompt(
+        "我喜欢上海的天气",
+        undefined,
+        { fillerHeard: "原来你喜欢上海的天气呀" },
+      );
 
-      // 衔接丝滑：filler 寒暄已先行播报，正式回答直接进入正题、不得重复承接
-      expect(messages[0].content).toContain(
-        "just heard a short warm acknowledgment",
-      );
-      expect(messages[0].content).toContain(
-        "first sentence must carry real content",
-      );
+      // 衔接丝滑：主模型拿到 filler 原文，直接从内容开始、不重复承接
+      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
+      expect(messages[0].content).toContain("already finished playing");
+
+      const without = service.buildEnglishTutorPrompt("我喜欢上海的天气");
+      expect(without[0].content).not.toContain("already finished playing");
     });
   });
 
@@ -808,6 +831,15 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain("at least 6 words");
     });
 
+    it("身份类 few-shot 已移除（身份问句改走确定性模板），事实确认禁令保留", () => {
+      const messages = service.buildFillerPrompt("Elly 你最喜欢什么颜色？");
+
+      // 身份问句不再依赖小模型自觉：模板化后 few-shot 失去存在意义
+      expect(messages[0].content).not.toContain("你在想听风原野里都有谁呀");
+      expect(messages[0].content).not.toContain("你想知道我喜欢什么呀");
+      expect(messages[0].content).toContain("Never confirm");
+    });
+
     it("should list recent fillers as banned openers when provided", () => {
       const messages = service.buildFillerPrompt("我喜欢上海的天气", [
         "原来你喜欢上海的天气呀",
@@ -900,10 +932,10 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain(
         "Never confirm or repeat factual claims",
       );
-      // few-shot 反例：错误前提不确认
-      expect(messages[0].content).toContain("你在想听风原野里都有谁呀");
-      // few-shot 反例：问 Elly 自己也只承接
-      expect(messages[0].content).toContain("你想知道我喜欢什么呀");
+      // 问 Elly 自己也只承接，不抢答
+      expect(messages[0].content).toContain(
+        "not even questions about yourself",
+      );
     });
   });
 
