@@ -1,10 +1,13 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { DevicesService } from "./devices.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { RedisService } from "@/common/redis/redis.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
 import { DeviceLinkService } from "../device-link/device-link.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
+import { PROVISION_RECENT_KEY } from "../client-api/client-api.constants";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
@@ -13,8 +16,10 @@ describe("DevicesService", () => {
   let service: DevicesService;
   let prisma: any;
   let deviceLink: any;
+  let redis: { zRangeByScoreWithScores: jest.Mock };
 
   beforeEach(async () => {
+    redis = { zRangeByScoreWithScores: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DevicesService,
@@ -59,6 +64,11 @@ describe("DevicesService", () => {
             controlVolume: jest.fn(),
           },
         },
+        { provide: RedisService, useValue: redis },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -69,6 +79,78 @@ describe("DevicesService", () => {
 
   it("should be defined", () => {
     expect(service).toBeDefined();
+  });
+
+  describe("provisionCandidates", () => {
+    const NOW = 1_800_000_000_000;
+
+    beforeEach(() => {
+      jest.spyOn(Date, "now").mockReturnValue(NOW);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("returns empty when no device came online recently", async () => {
+      const result = await service.provisionCandidates("user-1");
+      expect(result).toEqual({ devices: [] });
+      expect(redis.zRangeByScoreWithScores).toHaveBeenCalledWith(
+        PROVISION_RECENT_KEY,
+        NOW - 120_000,
+        NOW,
+      );
+      expect(prisma.device.findMany).not.toHaveBeenCalled();
+    });
+
+    it("returns candidates sorted by recency with macTail and ISO time", async () => {
+      redis.zRangeByScoreWithScores.mockResolvedValue([
+        { member: "aabbccddeeff", score: NOW - 10_000 },
+        { member: "90fe1de7a1ca", score: NOW - 5_000 },
+      ]);
+      prisma.device.findMany.mockResolvedValue([
+        { deviceId: "aabbccddeeff", bindings: [] },
+        { deviceId: "90fe1de7a1ca", bindings: [] },
+      ]);
+
+      const result = await service.provisionCandidates("user-1");
+
+      expect(result.devices).toEqual([
+        {
+          deviceId: "90fe1de7a1ca",
+          macTail: "e7a1ca",
+          lastSeenAt: new Date(NOW - 5_000).toISOString(),
+        },
+        {
+          deviceId: "aabbccddeeff",
+          macTail: "ddeeff",
+          lastSeenAt: new Date(NOW - 10_000).toISOString(),
+        },
+      ]);
+    });
+
+    it("excludes devices already bound to the current user", async () => {
+      redis.zRangeByScoreWithScores.mockResolvedValue([
+        { member: "aabbccddeeff", score: NOW - 10_000 },
+        { member: "90fe1de7a1ca", score: NOW - 5_000 },
+      ]);
+      prisma.device.findMany.mockResolvedValue([
+        { deviceId: "aabbccddeeff", bindings: [{ id: "binding-1" }] },
+        { deviceId: "90fe1de7a1ca", bindings: [] },
+      ]);
+
+      const result = await service.provisionCandidates("user-1");
+
+      expect(result.devices.map((d: any) => d.deviceId)).toEqual([
+        "90fe1de7a1ca",
+      ]);
+      expect(prisma.device.findMany).toHaveBeenCalledWith({
+        where: { deviceId: { in: ["aabbccddeeff", "90fe1de7a1ca"] } },
+        include: {
+          bindings: { where: { userId: "user-1" }, select: { id: true } },
+        },
+      });
+    });
   });
 
   describe("bind", () => {

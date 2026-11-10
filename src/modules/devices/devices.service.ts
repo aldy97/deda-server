@@ -7,10 +7,16 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { RedisService } from "@/common/redis/redis.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
 import { DeviceLinkService } from "../device-link/device-link.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
+import {
+  PROVISION_RECENT_KEY,
+  resolveProvisionWindowMs,
+} from "../client-api/client-api.constants";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
@@ -22,12 +28,58 @@ const BINDING_TRANSACTION_OPTIONS = {
 
 @Injectable()
 export class DevicesService {
+  private readonly provisionWindowMs: number;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly deviceStatusService: DeviceStatusService,
     private readonly deviceLink: DeviceLinkService,
     private readonly manufacturer: ManufacturerService,
-  ) {}
+    private readonly redis: RedisService,
+    configService: ConfigService,
+  ) {
+    this.provisionWindowMs = resolveProvisionWindowMs(
+      configService.get<string>("PROVISION_CLAIM_WINDOW_SEC"),
+    );
+  }
+
+  /**
+   * 配网认领候选：最近窗口内通过 client-api loginMac 上线、
+   * 且尚未绑定当前用户的设备，按上线时间倒序。
+   * 多设备同时配网时由小程序让用户选择，禁止自动绑定。
+   */
+  async provisionCandidates(userId: string) {
+    const now = Date.now();
+    const entries = await this.redis.zRangeByScoreWithScores(
+      PROVISION_RECENT_KEY,
+      now - this.provisionWindowMs,
+      now,
+    );
+    if (entries.length === 0) {
+      return { devices: [] };
+    }
+
+    const devices = await this.prisma.device.findMany({
+      where: { deviceId: { in: entries.map((entry) => entry.member) } },
+      include: { bindings: { where: { userId }, select: { id: true } } },
+    });
+    const boundDeviceIds = new Set(
+      devices
+        .filter((device) => device.bindings.length > 0)
+        .map((device) => device.deviceId),
+    );
+
+    return {
+      devices: entries
+        .filter((entry) => !boundDeviceIds.has(entry.member))
+        .sort((a, b) => b.score - a.score)
+        .map((entry) => ({
+          deviceId: entry.member,
+          macTail: entry.member.slice(-6),
+          lastSeenAt: new Date(entry.score).toISOString(),
+        })),
+    };
+  }
 
   async bind(userId: string, dto: BindDeviceDto) {
     if (!dto.deviceId && !dto.deviceCode) {
