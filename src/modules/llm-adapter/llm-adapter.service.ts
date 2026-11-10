@@ -8,6 +8,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
 import { LlmService, LlmMessage } from "@/modules/llm/llm.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
@@ -133,6 +134,20 @@ export class LlmAdapterService {
     // chat_main / filler / memory_extract 全程贯穿，dashboard 按轮次串联
     // 调用链路（实机事故：turnId 生成过晚且未传入主流，链路只剩 1 条）
     const turnId = randomUUID();
+
+    // 打断推断（方案 A）：新一轮开始即判定上一轮 assistant 回复是否仍在
+    // 估算播放窗口内；fire-and-forget，失败只记日志，不阻塞本轮首音
+    if (device) {
+      void markPreviousReplyInterrupted(this.prisma, device.id).catch(
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Interruption marking failed for device=${device.deviceId}: ${message}`,
+          );
+        },
+      );
+    }
 
     // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const verdict = this.childSafety.checkL1(asrText);

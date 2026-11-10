@@ -143,8 +143,27 @@ GET /analytics/llm/summary?startDate=&endDate=
    // 只返回区间内有调用的场景；分母 0 时 successRate=null；分位数用 percentile_cont 口径
 
 GET /analytics/llm/trend?startDate=&endDate=&granularity=day&scene=
-→ { granularity, series: [{ date, calls, successRate, p50LatencyMs, avgFirstTokenMs, totalTokens }] }
+→ { granularity, series: [{ date, calls, successRate, p50LatencyMs,
+                            avgFirstTokenMs, p50FirstTokenMs, p90FirstTokenMs,
+                            totalTokens }] }
    // granularity: day/week/month；scene 缺省=全部聚合，非法值 400；无数据日期补零（比率与分位数 null）
+   // p50FirstTokenMs/p90FirstTokenMs：首包分位数（percentile_cont），仅流式场景有样本
+
+GET /analytics/llm/turn-handoff?startDate=&endDate=&gapThresholdMs=0
+→ { turnsWithChat, turnsWithBoth, turnsMissingFiller, turnsUnknown,
+    gapThresholdMs, gapP50Ms, gapP90Ms, gapRate,
+    topGaps: [{ turnId, gapMs, createdAt }] }
+   // 轮次衔接健康度（防死空气，生成侧口径）：按 turnId join 同轮 filler 与 chat_main，
+   // gapMs = chat_main 首包时刻 − filler 生成完成时刻；gap > 阈值记空窗，gapRate = 空窗轮数/双样本轮数
+   // turnsMissingFiller：有 chat_main 但无 filler（filler 静默降级）的轮数，本身是待盯信号
+   // turnsUnknown：两者都有但 chat_main.firstTokenMs 为 null；topGaps 按 gapMs 倒序取前 10
+   // 口径警示：生成侧时刻 ≠ 设备播放侧真实死空气（filler 播放时长不在 llm_usage_logs）
+
+GET /analytics/llm/slow-calls?startDate=&endDate=&scene=&limit=20
+→ { items: [{ id, scene, tier, model, latencyMs, firstTokenMs, totalTokens,
+              turnId, deviceId, createdAt }] }
+   // 慢调用长尾（仅 success=true 且 latencyMs 非空），latencyMs 倒序；limit ≤ 50；
+   // 失败调用由 recent-failures 覆盖；deviceId 为业务设备 ID，匿名/后台调用为 null
 
 GET /analytics/llm/recent-failures?page=1&pageSize=20&scene=
 → { total, page, pageSize,
@@ -180,10 +199,30 @@ GET /analytics/messages
    // 列表不含 rawPayload；deviceId 为业务设备 ID（内部 resolve 成 UUID）；
    // spokeAt 区间闭区间、Asia/Shanghai 当日边界；keyword 大小写不敏感 ≤50 字；
    // sort 白名单仅 spokeAt_asc / spokeAt_desc；范围倒置 / 非法枚举 / pageSize 越界 → 400
+   // status 枚举：completed / failed / interrupted（interrupted=被打断，推断口径见下）
+
+GET /analytics/messages/modes?startDate=&endDate=
+→ { categories: [{ key, name, messageCount,
+                   modes: [{ key, name, messageCount }] }] }
+   // 对话模式选项源（供过滤下拉）：配置表 conversation_mode_categories/conversation_modes
+   // 全量启用项（sortOrder 升序）+ 区间内消息数（spokeAt 口径，仅参考，0 也返回）；
+   // 分类 messageCount 按顶层 mode 统计（含无子模式的消息），子模式按 conversationModeKey
+
+GET /analytics/messages/interruption-rate?startDate=&endDate=
+→ { assistantTotal, interrupted, interruptionRate,
+    byMode: [{ mode, assistantTotal, interrupted, interruptionRate }] }
+   // AI 回复打断率：分母 = assistant 消息总数，分子 = status=interrupted；
+   // mode 为 null 的历史消息归入 "(unknown)"；分母 0 时比率为 null
 
 GET /analytics/messages/:id
 → 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
 ```
+
+打断判定（`interrupted`）为**服务端推断口径**（`common/interruption/interruption.util.ts`，
+非设备真实事件）：新一轮对话开始时，若该设备上一轮 assistant 回复的估算播放窗口
+（content 字数 × 120ms，封顶 60s）尚未结束，则把上一轮标记为 interrupted。
+vendor（/vendor/text）与 llm-adapter（百度 RTC 直连）两条链路入口均已接入，
+fire-and-forget 不阻塞首音；孩子话密/家长插话都会计入，dashboard 展示须标注「疑似」。
 
 ## 设备运维（admin 手动操作）
 

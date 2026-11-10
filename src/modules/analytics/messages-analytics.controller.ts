@@ -42,8 +42,8 @@ export class MessagesQueryDto {
   role?: "user" | "assistant";
 
   @IsOptional()
-  @IsIn(["completed", "failed"])
-  status?: "completed" | "failed";
+  @IsIn(["completed", "failed", "interrupted"])
+  status?: "completed" | "failed" | "interrupted";
 
   @IsOptional()
   @IsString()
@@ -85,6 +85,19 @@ export class MessagesQueryDto {
   pageSize?: number = 20;
 }
 
+/** modes / interruption-rate 共用：可选日期区间 */
+export class MessagesStatsQueryDto {
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: DATE_MESSAGE })
+  startDate?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: DATE_MESSAGE })
+  endDate?: string;
+}
+
 @ApiTags("analytics-messages")
 @ApiBearerAuth()
 @UseGuards(AnalyticsAuthGuard)
@@ -99,6 +112,25 @@ export class MessagesAnalyticsController {
   })
   listMessages(@Query() query: MessagesQueryDto) {
     return this.messages.listMessages(query);
+  }
+
+  // 注意：具名路由必须声明在 @Get(":id") 之前，否则会被 ":id" 抢先匹配
+  @Get("modes")
+  @ApiOperation({
+    summary:
+      "对话模式选项源（配置表全量启用项含展示名 + 区间内各模式消息数；供过滤下拉使用）",
+  })
+  getModes(@Query() query: MessagesStatsQueryDto) {
+    return this.messages.getModes(query);
+  }
+
+  @Get("interruption-rate")
+  @ApiOperation({
+    summary:
+      "AI 回复打断率（分母=assistant 消息总数，分子=interrupted；interrupted 为服务端推断口径，非设备真实事件）",
+  })
+  getInterruptionRate(@Query() query: MessagesStatsQueryDto) {
+    return this.messages.getInterruptionRate(query);
   }
 
   @Get(":id")

@@ -36,7 +36,12 @@ describe("LlmAdapterModule", () => {
   };
   let prisma: {
     device: { findFirst: jest.Mock; create: jest.Mock };
-    message: { create: jest.Mock; findMany: jest.Mock };
+    message: {
+      create: jest.Mock;
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      update: jest.Mock;
+    };
     deviceConfig: { findFirst: jest.Mock };
     childProfile: { findUnique: jest.Mock };
     conversationMode: { findFirst: jest.Mock };
@@ -105,6 +110,8 @@ describe("LlmAdapterModule", () => {
       message: {
         create: jest.fn().mockResolvedValue({}),
         findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        update: jest.fn().mockResolvedValue({}),
       },
       deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
       childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
@@ -925,6 +932,47 @@ describe("LlmAdapterModule", () => {
         filler: null,
         answer: "Hi there",
       });
+    });
+
+    it("新一轮开始时对上一轮 assistant 回复做打断推断（fire-and-forget）", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      // 上一轮 assistant 回复 100 字、2 秒前发出 → 仍在估算播放窗口内
+      prisma.message.findFirst.mockResolvedValue({
+        id: "prev-assistant",
+        content: "啊".repeat(100),
+        spokeAt: new Date(Date.now() - 2000),
+      });
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+
+      await collect(service.streamReply(boundRequest));
+      // fire-and-forget：等微任务/IO 队列排空再断言
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(prisma.message.findFirst).toHaveBeenCalledWith({
+        where: {
+          deviceId: "dev-internal-1",
+          role: "assistant",
+          status: "completed",
+        },
+        orderBy: { spokeAt: "desc" },
+        select: { id: true, content: true, spokeAt: true },
+      });
+      expect(prisma.message.update).toHaveBeenCalledWith({
+        where: { id: "prev-assistant" },
+        data: { status: "interrupted" },
+      });
+    });
+
+    it("匿名链路不做打断推断", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      await collect(
+        service.streamReply({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      );
+      expect(prisma.message.findFirst).not.toHaveBeenCalled();
     });
 
     it("creates the device when the hint is unknown", async () => {

@@ -102,6 +102,8 @@ describe("VendorService", () => {
             message: {
               findMany: jest.fn(),
               create: jest.fn(),
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn().mockResolvedValue({}),
             },
             conversationSession: {
               findUnique: jest.fn().mockResolvedValue(null),
@@ -194,6 +196,73 @@ describe("VendorService", () => {
   });
 
   describe("handleTextIn", () => {
+    it("新一轮开始时对上一轮 assistant 回复做打断推断（fire-and-forget）", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      // 上一轮 assistant 回复 100 字、2 秒前发出 → 仍在估算播放窗口内
+      prisma.message.findFirst.mockResolvedValue({
+        id: "prev-assistant",
+        content: "啊".repeat(100),
+        spokeAt: new Date(Date.now() - 2000),
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      await service.handleTextIn(dto);
+      // fire-and-forget：等微任务/IO 队列排空再断言
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(prisma.message.findFirst).toHaveBeenCalledWith({
+        where: {
+          deviceId: "uuid-001",
+          role: "assistant",
+          status: "completed",
+        },
+        orderBy: { spokeAt: "desc" },
+        select: { id: true, content: true, spokeAt: true },
+      });
+      expect(prisma.message.update).toHaveBeenCalledWith({
+        where: { id: "prev-assistant" },
+        data: { status: "interrupted" },
+      });
+    });
+
+    it("打断推断失败不阻塞本轮回复", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      prisma.message.findFirst.mockRejectedValue(new Error("db down"));
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("你好呀");
+    });
+
     it("should call LLM, ensure device exists, and persist conversation", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
