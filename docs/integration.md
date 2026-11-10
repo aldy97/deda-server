@@ -54,6 +54,25 @@
 | 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前顶层模式过滤；自由对话可继续按子模式过滤；topics 按 `mode + conversationModeKey` 全量分组 |
 | 设备状态/控制      | `GET /devices/:id/status`<br>`POST /devices/:id/control`                                               | 设备详情/控制页                                                                                         | `src/modules/devices/devices.controller.ts`<br>`src/modules/device-link/device-link.service.ts`                                  | 2026-11 起接机芯厂新 MQTT 协议（`docs/vendor-mqtt-protocol.md`）：status 为真实值（`online/offline`，`battery/isCharging` 可 `null`，前端需容错）；control 仅 `volume` 真实下发，其余动作协议待补 |
 
+## 设备配网与认领链路（BLE + client-api，2026-11 起）
+
+```
+小程序 BLE 配网(status=0)
+  → 设备连 WiFi → 设备直连本服务 POST /client/user/user/loginMac
+    （校验 macKey 派生密码；建档 Device(deviceId=小写MAC)；
+      响应头 Authorization 返回 LLM_ADAPTER_API_KEY；写入认领窗口）
+  → 小程序轮询 GET /devices/provision-candidates
+    （窗口内未绑定当前用户的设备；恰 1 台自动绑，多台用户选）
+  → POST /devices/bind {deviceId: mac} 完成绑定
+  → 设备每轮对话前后调 POST /client/bot/bot/start|stop 登记实例
+```
+
+- `client-api` 三个接口是**设备固件直连**本服务的 HTTP 接口（机芯厂《设备端接口文档》v1.1），无 JWT，不进入统一响应信封（设备只认 `code:200`），不进 Swagger；实现：`src/modules/client-api/`。
+- 设备业务 ID 与 MAC 同值（十二位小写）：百度 RTC 回调 `deviceid`、`loginMac` 上报、`devices/bind` 三方收敛，`llm-adapter` resolveDevice 按 deviceId/macAddress 双列归一化匹配，换手机重绑数据连续。
+- 认领窗口：Redis sorted set `provision:recent`，默认 120 秒（`PROVISION_CLAIM_WINDOW_SEC`）；无 REDIS_URL 时内存降级，多实例部署必须配 Redis。
+- MQTT 旧公共主题 `loginMac` 已被机芯厂新协议取消，Device 建档以 HTTP `loginMac` 为唯一入口；`device-link` 保留旧监听仅兼容老固件。
+- 密钥：`DEVICE_LOGIN_MAC_KEY`（与固件共享，不落仓库）。
+
 ## 设备排序契约
 
 - 前端拖拽结束后调用 `PUT /devices/order`，请求体为 `{ "orderedDeviceIds": ["dev-002", "dev-001"] }`；数组必须包含当前用户全部已绑定设备，且顺序就是期望显示顺序。
