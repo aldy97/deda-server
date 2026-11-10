@@ -106,6 +106,37 @@ describe("LlmService", () => {
       );
     });
 
+    it("should persist turnId to the usage log when provided", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "ok" } }] },
+      } as any);
+
+      await service.complete({
+        scene: "chat_main",
+        turnId: "turn-abc",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ turnId: "turn-abc" }),
+      });
+    });
+
+    it("should persist null turnId when not provided", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "ok" } }] },
+      } as any);
+
+      await service.complete({
+        scene: "chat_main",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ turnId: null }),
+      });
+    });
+
     it("should throw error when API key is missing", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -423,6 +454,27 @@ describe("LlmService", () => {
         }),
         expect.objectContaining({ responseType: "stream" }),
       );
+    });
+
+    it("should persist turnId for streaming calls", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        service.completeStream({
+          scene: "chat_main",
+          turnId: "turn-stream-1",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ turnId: "turn-stream-1" }),
+      });
     });
 
     it("should use the overridden model when provided", async () => {

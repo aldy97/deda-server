@@ -35,6 +35,8 @@ export interface LlmCompleteOptions {
   scene: LlmScene;
   /** 设备内部 UUID（devices.id）；后台任务无设备上下文时省略 */
   deviceId?: string;
+  /** 对话轮次 ID（监控埋点可选）；后台任务无轮次上下文时省略 */
+  turnId?: string;
   messages: LlmMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -389,6 +391,7 @@ export class LlmService {
           completionTokens: entry.usage?.completion_tokens ?? null,
           totalTokens: entry.usage?.total_tokens ?? null,
           deviceId: entry.options.deviceId ?? null,
+          turnId: entry.options.turnId ?? null,
         },
       })
       .then(

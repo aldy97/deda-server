@@ -116,6 +116,16 @@ describe("ChildMemoriesService", () => {
     llm.complete.mockResolvedValue({ text: "[]" });
   });
 
+  it("threads the source turnId into the memory_extract LLM call", async () => {
+    llm.complete.mockResolvedValue({ text: "[]" });
+
+    await service.extractAndStore(input("今天很开心", "turn-xyz"));
+
+    expect(llm.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ scene: "memory_extract", turnId: "turn-xyz" }),
+    );
+  });
+
   it("should create the first active memory from an explicit preference", async () => {
     llm.complete.mockResolvedValue({ text: extraction("red") });
 

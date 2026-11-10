@@ -43,6 +43,7 @@ export class ChildMemoriesService {
     const result = await this.llmService.complete({
       scene: "memory_extract",
       deviceId: input.deviceId,
+      turnId: input.turnId,
       model: this.llmService.smallModelName,
       temperature: 0,
       maxTokens: 300,

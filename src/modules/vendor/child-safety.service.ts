@@ -239,11 +239,16 @@ export class ChildSafetyService {
    * L2：小模型安全分类，补 L1 的语义盲区。
    * 失败时放行（fail-open）：L3 大模型 prompt 常驻安全规则是兜底。
    */
-  async classifyL2(asrText: string, deviceId?: string): Promise<SafetyVerdict> {
+  async classifyL2(
+    asrText: string,
+    deviceId?: string,
+    turnId?: string,
+  ): Promise<SafetyVerdict> {
     try {
       const result = await this.llmService.complete({
         scene: "safety_l2",
         deviceId,
+        turnId,
         model: this.llmService.smallModelName,
         temperature: 0,
         maxTokens: 10,

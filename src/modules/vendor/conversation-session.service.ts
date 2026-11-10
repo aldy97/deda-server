@@ -44,6 +44,7 @@ export class ConversationSessionService {
   async resolve(
     deviceId: string,
     asrText: string,
+    turnId?: string,
   ): Promise<ConversationIntent> {
     const session = await this.prisma.conversationSession.findUnique({
       where: { deviceId },
@@ -59,7 +60,7 @@ export class ConversationSessionService {
           return activeMode;
         }
         if (this.isExplicitModeSwitch(asrText)) {
-          return this.classifyAndActivate(deviceId, asrText, true);
+          return this.classifyAndActivate(deviceId, asrText, true, turnId);
         }
         if (this.isExplicitExit(asrText)) {
           await this.reset(deviceId);
@@ -75,7 +76,7 @@ export class ConversationSessionService {
     if (!this.isRoutingCandidate(asrText)) {
       return "free_chat";
     }
-    return this.classifyAndActivate(deviceId, asrText, false);
+    return this.classifyAndActivate(deviceId, asrText, false, turnId);
   }
 
   async reset(deviceId: string): Promise<void> {
@@ -95,8 +96,9 @@ export class ConversationSessionService {
     deviceId: string,
     asrText: string,
     hadActiveSession: boolean,
+    turnId?: string,
   ): Promise<ConversationIntent> {
-    const intent = await this.classify(asrText, deviceId);
+    const intent = await this.classify(asrText, deviceId, turnId);
     const persistentIntent = this.persistentMode(intent);
     if (persistentIntent) {
       await this.activate(deviceId, persistentIntent);
@@ -109,12 +111,14 @@ export class ConversationSessionService {
   private async classify(
     asrText: string,
     deviceId?: string,
+    turnId?: string,
   ): Promise<ConversationIntent> {
     // TODO(可用性)：灰度补充分类模型超时、限流与非法输出的真实指标。
     try {
       const result = await this.llmService.complete({
         scene: "intent_classify",
         deviceId,
+        turnId,
         model: this.llmService.smallModelName,
         temperature: 0,
         maxTokens: 10,
