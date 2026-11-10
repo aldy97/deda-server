@@ -827,9 +827,11 @@ export class LlmAdapterService {
    * 串行 filler：非流式生成一句承接（3s 超时），作为 SSE 前导播报并注入
    * 主模型 prompt。三层防线：
    * 1. 身份/偏好问句走确定性模板（实机事故：小模型抢答名字、主客颠倒）；
-   * 2. 模型生成后与近 5 轮 filler 归一化比对，重复则带强禁令重试一次
-   *    （实机事故：同一句 filler 三连复读，小模型无视 prompt 禁用清单）；
-   * 3. 仍重复则从兜底模板池取一条，保证绝不复读。
+   * 2. 模型生成后确定性校验：与近 5 轮归一化比对防逐字复读（实机事故：
+   *    同一句 filler 三连复读）；拒绝以人设名标签开头（实机事故：连续
+   *    8 轮「小象 Elly：X 真 Y 呀」同构口癖，像剧本角色标签）。
+   *    不合格则带强禁令重试一次；
+   * 3. 仍不合格则从兜底模板池取一条。
    * 任何失败静默返回 ""，主链路照常。
    */
   private async generateFiller(params: {
@@ -853,6 +855,17 @@ export class LlmAdapterService {
       return templated;
     }
 
+    const persona = params.device
+      ? (LlmService.CHARACTER_PERSONAS[params.device.characterKey ?? "elly"] ??
+        LlmService.CHARACTER_PERSONAS.elly)
+      : LlmService.CHARACTER_PERSONAS.elly;
+    // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝剧本式名标签开头
+    const personaName = persona.split("：")[0];
+    const isUnacceptable = (text: string) =>
+      !text ||
+      this.isFillerDuplicate(text, recentFillers) ||
+      this.isPersonaLabeled(text, personaName);
+
     const call = (extraInstruction?: string) => {
       const messages = this.llmService.buildFillerPrompt(
         asrText,
@@ -860,11 +873,7 @@ export class LlmAdapterService {
         {
           intent: params.intent,
           adventureDeclined: params.adventureDeclined,
-          persona: params.device
-            ? (LlmService.CHARACTER_PERSONAS[
-                params.device.characterKey ?? "elly"
-              ] ?? LlmService.CHARACTER_PERSONAS.elly)
-            : undefined,
+          persona: params.device ? persona : undefined,
           childBrief: params.childProfile
             ? LlmService.buildChildBrief(params.childProfile)
             : undefined,
@@ -886,15 +895,15 @@ export class LlmAdapterService {
 
     try {
       const first = (await call()).text.trim();
-      if (first && !this.isFillerDuplicate(first, recentFillers)) {
+      if (!isUnacceptable(first)) {
         return first;
       }
       const retry = (
         await call(
-          "Your previous attempt was rejected because it repeats a recently used opener. Produce a COMPLETELY different sentence — different words, different structure.",
+          "Your previous attempt was rejected: it repeats a recently used opener or starts with your own name like a script label. Produce a COMPLETELY different sentence — different words, different structure, no name label.",
         )
       ).text.trim();
-      if (retry && !this.isFillerDuplicate(retry, recentFillers)) {
+      if (!isUnacceptable(retry)) {
         return retry;
       }
       return this.fillerFallback(asrText, recentFillers);
@@ -945,6 +954,14 @@ export class LlmAdapterService {
     return recentFillers.some(
       (recent) => LlmAdapterService.normalizeFiller(recent) === normalized,
     );
+  }
+
+  /** 拒绝剧本式名标签开头（「小象 Elly：…」）；名字内部空白容忍零到多个 */
+  private isPersonaLabeled(text: string, personaName: string): boolean {
+    const escape = (segment: string) =>
+      segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = personaName.split(/\s+/).map(escape).join("\\s*");
+    return new RegExp(`^${pattern}[：:,，]?\\s*`, "i").test(text);
   }
 
   private static normalizeFiller(text: string): string {

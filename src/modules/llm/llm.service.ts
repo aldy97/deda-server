@@ -441,7 +441,7 @@ Rules:
 1. Reply in the same language the child just used.
 2. Keep it under 20 words, in a natural spoken style.
 3. Never answer the question or provide real content — the main reply comes later.
-4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row.
+4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row, and never start with your own name or a script-style label (e.g. "小象 Elly：…") — speak as yourself, not as a narrator.
 5. No lists, no emojis, no questions.
 6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
 7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.

@@ -581,6 +581,35 @@ describe("LlmAdapterModule", () => {
       expect(chunks[0].length).toBeGreaterThanOrEqual(4);
     });
 
+    it("filler 以人设名标签开头时判定不合格并重试", async () => {
+      // 实机事故：小模型顽固口癖「小象 Elly：X 真 Y 呀」连续 8 轮同构，
+      // 像剧本角色标签。精确去重挡不住结构重复，需确定性拒绝
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.complete
+        .mockResolvedValueOnce({ text: "小象 Elly：蓝色真美呢" })
+        .mockResolvedValueOnce({ text: "哇，冒险的心已经飞起来啦" });
+      llm.completeStream.mockReturnValue(makeStream(["答"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(llm.complete).toHaveBeenCalledTimes(2);
+      expect(chunks[0]).toBe("哇，冒险的心已经飞起来啦");
+    });
+
+    it("重试仍带人设名标签时回落兜底模板池", async () => {
+      configGet.mockImplementation((key: string) =>
+        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
+      );
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.complete.mockResolvedValue({ text: "小象 Elly：蓝色真美呢" });
+      llm.completeStream.mockReturnValue(makeStream(["答"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(llm.complete).toHaveBeenCalledTimes(2); // 有上限，不死循环
+      expect(chunks[0]).not.toContain("小象 Elly");
+      expect(chunks[0].length).toBeGreaterThanOrEqual(4);
+    });
+
     it("身份/偏好问句的 filler 走确定性模板，不调用小模型", async () => {
       // 实机事故：「你叫什么名字」filler 抢答出名字，主模型又答一遍；
       // 「你最喜欢什么颜色」filler 主客颠倒成「你喜欢什么颜色呀」

@@ -831,6 +831,13 @@ describe("LlmService", () => {
       expect(messages[0].content).toContain("at least 6 words");
     });
 
+    it("should ban script-style name-label openers (小象 Elly：…)", () => {
+      const messages = service.buildFillerPrompt("我最喜欢蓝色");
+
+      // 实机事故：filler 连续 8 轮以「小象 Elly：」开头，像剧本角色标签
+      expect(messages[0].content).toContain("never start with your own name");
+    });
+
     it("身份类 few-shot 已移除（身份问句改走确定性模板），事实确认禁令保留", () => {
       const messages = service.buildFillerPrompt("Elly 你最喜欢什么颜色？");
 
