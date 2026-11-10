@@ -574,8 +574,10 @@ export class LlmAdapterService {
    * 解析设备身份：显式 header 优先，其次请求体 deviceid（机芯厂正式约定，
    * 与小程序家长绑定编号一致），最后 fallback user 字段（旧约定兼容）。
    * MAC 归一化（去分隔符、小写）后
-   * 同时按 deviceId / macAddress 两列匹配，查不到则以原值建档
-   * （同老链路 ensureDeviceExists 的 4G 未绑定场景语义）。
+   * 同时按 deviceId / macAddress 两列匹配，查不到则建档
+   * （同老链路 ensureDeviceExists 的 4G 未绑定场景语义）；
+   * raw 为 MAC 形态时以归一化小写值建档，与 client-api loginMac
+   * 的建档口径一致，避免大小写差异产生重复 Device。
    */
   private async resolveDevice(
     req: ChatCompletionRequest,
@@ -600,10 +602,12 @@ export class LlmAdapterService {
         characterKey: existing.characterKey,
       };
     }
+    const isMac = MAC_PATTERN.test(raw);
+    const normalized = isMac ? this.normalizeMac(raw) : null;
     const created = await this.prisma.device.create({
       data: {
-        deviceId: raw,
-        macAddress: MAC_PATTERN.test(raw) ? this.normalizeMac(raw) : null,
+        deviceId: normalized ?? raw,
+        macAddress: normalized,
       },
     });
     return {

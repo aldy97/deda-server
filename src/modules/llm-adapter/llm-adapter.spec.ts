@@ -937,6 +937,21 @@ describe("LlmAdapterModule", () => {
       });
     });
 
+    it("creates MAC-like devices with the normalized lowercase id", async () => {
+      prisma.device.findFirst.mockResolvedValue(null);
+      prisma.device.create.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["ok"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        user: "AA:BB:CC:DD:EE:FF",
+      };
+      await collect(service.streamReply(req));
+      // 与 client-api loginMac 建档口径一致：MAC 形态一律归一化小写
+      expect(prisma.device.create).toHaveBeenCalledWith({
+        data: { deviceId: "aabbccddeeff", macAddress: "aabbccddeeff" },
+      });
+    });
+
     it("matches MAC-like hints case/separator-insensitively", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       llm.completeStream.mockReturnValue(makeStream(["ok"])());

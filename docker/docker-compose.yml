@@ -45,6 +45,9 @@ services:
       MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
       # LLM 适配层与主模型
       LLM_ADAPTER_API_KEY: ${LLM_ADAPTER_API_KEY:-}
+      # 机芯厂设备侧接口（client-api）：设备上线共享密钥与认领窗口
+      DEVICE_LOGIN_MAC_KEY: ${DEVICE_LOGIN_MAC_KEY:-}
+      PROVISION_CLAIM_WINDOW_SEC: ${PROVISION_CLAIM_WINDOW_SEC:-120}
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.deepseek.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

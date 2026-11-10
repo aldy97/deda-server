@@ -161,8 +161,9 @@ deda-server/
 | **production** | 正式用户 | `api.deda.example.com` | 机芯厂商云生产环境 |
 
 **关键原则**：
-- 机芯设备只连接机芯厂商云，不直接连接 deda-server。
-- 机芯厂商云需要支持配置不同环境的 deda-server 地址（WebSocket/MQTT/HTTP）。
+- 语音链路：设备 ⇄ 百度 RTC 云，百度回调本服务 LLM 适配层（`POST /v1/chat/completions`）。
+- 设备上线/实例登记：2026-11 起设备固件**直连**本服务 `POST /client/**`（`src/modules/client-api/`，机芯厂《设备端接口文档》v1.1），不再经机芯厂商云中转。
+- 设备状态/控制指令：走 MQTT（机芯厂商云 broker），见 `docs/vendor-mqtt-protocol.md`。
 - 测试/生产数据库、Redis、MQTT topic 必须隔离。
 - 禁止本地/测试环境连接生产数据库。
 

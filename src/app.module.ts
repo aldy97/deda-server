@@ -30,6 +30,7 @@ import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
 import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
+import { ClientApiModule } from "./modules/client-api/client-api.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
 
 /**
@@ -90,6 +91,7 @@ const staticImports = existsSync(dashboardDistPath)
     SleepConfigsModule,
     SleepSchedulerModule,
     LlmAdapterModule,
+    ClientApiModule,
     AnalyticsModule,
     ...staticImports,
   ],

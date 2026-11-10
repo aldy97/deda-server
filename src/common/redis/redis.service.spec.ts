@@ -7,6 +7,9 @@ const mockGet = jest.fn();
 const mockSet = jest.fn();
 const mockSetex = jest.fn();
 const mockDel = jest.fn();
+const mockZadd = jest.fn();
+const mockZrangebyscore = jest.fn();
+const mockZremrangebyscore = jest.fn();
 
 jest.mock("ioredis", () => ({
   __esModule: true,
@@ -17,6 +20,9 @@ jest.mock("ioredis", () => ({
     set: mockSet,
     setex: mockSetex,
     del: mockDel,
+    zadd: mockZadd,
+    zrangebyscore: mockZrangebyscore,
+    zremrangebyscore: mockZremrangebyscore,
   })),
 }));
 
@@ -95,5 +101,54 @@ describe("RedisService", () => {
     now.mockReturnValue(2_001);
     await expect(service.getValue("expiring")).resolves.toBeNull();
     await expect(service.getValue("permanent")).resolves.toBe("value");
+  });
+
+  it("delegates sorted set operations to Redis", async () => {
+    mockZadd.mockResolvedValue(1);
+    mockZrangebyscore.mockResolvedValue(["dev-b", "200", "dev-a", "100"]);
+    mockZremrangebyscore.mockResolvedValue(1);
+    const service = createService();
+
+    await service.zAdd("zkey", 100, "dev-a");
+    const entries = await service.zRangeByScoreWithScores("zkey", 0, 300);
+    await service.zRemRangeByScore("zkey", 0, 50);
+
+    expect(mockZadd).toHaveBeenCalledWith("zkey", 100, "dev-a");
+    expect(mockZrangebyscore).toHaveBeenCalledWith(
+      "zkey",
+      0,
+      300,
+      "WITHSCORES",
+    );
+    expect(entries).toEqual([
+      { member: "dev-b", score: 200 },
+      { member: "dev-a", score: 100 },
+    ]);
+    expect(mockZremrangebyscore).toHaveBeenCalledWith("zkey", 0, 50);
+  });
+
+  it("supports sorted sets in in-memory mode", async () => {
+    const service = createService("");
+
+    await service.zAdd("zkey", 100, "dev-a");
+    await service.zAdd("zkey", 200, "dev-b");
+    await service.zAdd("zkey", 150, "dev-a"); // 同 member 覆盖 score
+
+    expect(await service.zRangeByScoreWithScores("zkey", 0, 300)).toEqual([
+      { member: "dev-a", score: 150 },
+      { member: "dev-b", score: 200 },
+    ]);
+    expect(await service.zRangeByScoreWithScores("zkey", 0, 100)).toEqual([]);
+
+    await service.zRemRangeByScore("zkey", 0, 160);
+    expect(await service.zRangeByScoreWithScores("zkey", 0, 300)).toEqual([
+      { member: "dev-b", score: 200 },
+    ]);
+
+    await service.zRemRangeByScore("missing-key", 0, 300);
+    expect(
+      await service.zRangeByScoreWithScores("missing-key", 0, 300),
+    ).toEqual([]);
+    expect(mockZadd).not.toHaveBeenCalled();
   });
 });
