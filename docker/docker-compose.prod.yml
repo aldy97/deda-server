@@ -25,8 +25,9 @@ services:
     deploy:
       resources:
         limits:
+          # ARMS 探针额外占 100-200M，随探针接入上调
           cpus: '1'
-          memory: 1G
+          memory: 1536M
 
   postgres:
     container_name: deda-postgres-prod
