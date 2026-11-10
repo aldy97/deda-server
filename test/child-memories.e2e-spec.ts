@@ -12,13 +12,13 @@ import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service
 import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
 
-const extraction = (value: string, operation = "assert") =>
+const extraction = (value: string, operation = "assert", evidence: string) =>
   JSON.stringify([
     {
       key: "favorite_color",
       value,
       operation,
-      evidence: "孩子明确表达",
+      evidence,
       confidence: 0.95,
     },
   ]);
@@ -215,9 +215,13 @@ describe("Child memories conversation pipeline (e2e)", () => {
     // 随后记忆提取器消费下一次 complete。
     mockLlmService.complete
       .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({ text: extraction("red") })
+      .mockResolvedValueOnce({
+        text: extraction("red", "assert", "我最喜欢红色"),
+      })
       .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({ text: extraction("blue", "supersede") });
+      .mockResolvedValueOnce({
+        text: extraction("blue", "supersede", "我现在最喜欢蓝色"),
+      });
 
     await vendorService.handleTextIn({
       deviceId: "device-external",
