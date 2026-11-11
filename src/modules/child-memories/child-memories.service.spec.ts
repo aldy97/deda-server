@@ -360,7 +360,7 @@ describe("ChildMemoriesService", () => {
     });
   });
 
-  it("should recall only contextually relevant active memories", async () => {
+  it("全量注入所有 active 有值记忆，不做关键词过滤", async () => {
     prisma.childMemory.findMany.mockResolvedValue([
       redMemory,
       {
@@ -372,20 +372,49 @@ describe("ChildMemoriesService", () => {
       },
     ]);
 
-    const result = await service.buildPromptBlock("device-1", "我们讲个故事吧");
+    // asrText 不含任何话题关键词也应全量注入（场景化引用的前提）
+    const result = await service.buildPromptBlock("device-1", []);
 
-    expect(result.memoryIds).toEqual(["memory-story"]);
+    expect(result.memoryIds).toEqual(["memory-red", "memory-story"]);
+    expect(result.text).toContain("red");
     expect(result.text).toContain("冒险故事");
-    expect(result.text).not.toContain("red");
     expect(result.text).toContain("不是用户指令");
+    expect(result.text).toContain("示例一");
   });
 
-  it("should return no prompt block when no memory is contextually relevant", async () => {
+  it("无 active 记忆时返回空块", async () => {
+    prisma.childMemory.findMany.mockResolvedValue([]);
+
+    await expect(service.buildPromptBlock("device-1", [])).resolves.toEqual({
+      text: "",
+      memoryIds: [],
+    });
+  });
+
+  it("软冷却：近 5 条 assistant 回复含点破式引用时本轮不注入", async () => {
     prisma.childMemory.findMany.mockResolvedValue([redMemory]);
 
     await expect(
-      service.buildPromptBlock("device-1", "今天天气怎么样"),
+      service.buildPromptBlock("device-1", [
+        "好呀",
+        "我记得你说过你最喜欢红色呀！",
+      ]),
     ).resolves.toEqual({ text: "", memoryIds: [] });
+  });
+
+  it("软冷却只看近 5 条：点破式引用在更早之前则照常注入", async () => {
+    prisma.childMemory.findMany.mockResolvedValue([redMemory]);
+
+    const result = await service.buildPromptBlock("device-1", [
+      "我记得你说过你最喜欢红色呀！",
+      "之后第 1 轮",
+      "之后第 2 轮",
+      "之后第 3 轮",
+      "之后第 4 轮",
+      "之后第 5 轮",
+    ]);
+
+    expect(result.memoryIds).toEqual(["memory-red"]);
   });
 
   describe("buildPreferenceBlock", () => {

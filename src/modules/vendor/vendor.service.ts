@@ -388,7 +388,8 @@ export class VendorService {
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
-    // 只在非故事主回答中注入相关记忆；filler 和故事模式不使用。
+    // free_chat 全量注入 5 槽位记忆（含软冷却：传入近 5 条 assistant 原文）；
+    // filler 和故事模式不使用此块（故事模式走 buildPreferenceBlock 轻量偏好块）。
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
@@ -397,7 +398,10 @@ export class VendorService {
       try {
         memoryPrompt = await this.childMemoriesService.buildPromptBlock(
           device.id,
-          dto.asrText,
+          history
+            .filter((message) => message.role === "assistant")
+            .slice(-5)
+            .map((message) => message.content),
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -421,7 +425,12 @@ export class VendorService {
       });
     }
     if (memoryPrompt.text) {
-      extraSystem.push({ role: "system", content: memoryPrompt.text });
+      // 记忆块贴尾注入（本轮 user 之前）：头部主 system + 历史构成稳定前缀，
+      // DeepSeek 上下文缓存按前缀命中；块在尾部，注入与否/内容变化都不击穿缓存
+      baseMessages.splice(baseMessages.length - 1, 0, {
+        role: "system",
+        content: memoryPrompt.text,
+      });
     }
     const messages: LlmMessage[] = [...extraSystem, ...baseMessages];
 

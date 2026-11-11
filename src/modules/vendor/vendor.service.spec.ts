@@ -1143,15 +1143,18 @@ describe("VendorService", () => {
       expect(result.responseText).toContain("我记得你最喜欢蓝色！");
       expect(childMemoriesService.buildPromptBlock).toHaveBeenCalledWith(
         "uuid-s1",
-        "你还记得我喜欢什么颜色吗？",
+        ["你最喜欢红色。"],
       );
       const answerCall = llmService.completeStream.mock.calls.find(
         ([options]) => options.model !== "small-llm",
       );
-      expect(answerCall?.[0].messages[0]).toEqual({
+      // 记忆块贴尾注入：位于本轮 user 之前，保住头部前缀缓存
+      const answerMessages = answerCall?.[0].messages ?? [];
+      expect(answerMessages[answerMessages.length - 2]).toEqual({
         role: "system",
         content: "孩子当前最喜欢蓝色。",
       });
+      expect(answerMessages[answerMessages.length - 1].role).toBe("user");
       const fillerCall = llmService.completeStream.mock.calls.find(
         ([options]) => options.model === "small-llm",
       );

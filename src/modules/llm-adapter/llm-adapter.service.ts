@@ -374,8 +374,8 @@ export class LlmAdapterService {
         });
     }
 
-    // 记忆注入：free_chat 走相关性召回；其余意图（故事/英语角等）注入
-    // 轻量偏好块，保证「Elly 懂我」跨模式连续；favorite_story_type 透出
+    // 记忆注入：free_chat 全量注入 5 槽位（含软冷却）；其余意图（故事/英语角等）
+    // 注入轻量偏好块，保证「Elly 懂我」跨模式连续；favorite_story_type 透出
     // 给故事话术主动选题（均对齐「不增加 LLM 调用」的确定性口径）
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
@@ -387,7 +387,10 @@ export class LlmAdapterService {
         if (intent === "free_chat") {
           memoryPrompt = await this.childMemories.buildPromptBlock(
             device.id,
-            asrText,
+            history
+              .filter((message) => message.role === "assistant")
+              .slice(-5)
+              .map((message) => message.content),
           );
         } else {
           const preference = await this.childMemories.buildPreferenceBlock(
@@ -458,11 +461,15 @@ export class LlmAdapterService {
     const messages: LlmMessage[] = [
       ...baiduSystem,
       ...(emotionalHarmGuidance ? [emotionalHarmGuidance] : []),
-      ...(memoryPrompt.text
-        ? [{ role: "system" as const, content: memoryPrompt.text }]
-        : []),
       ...built,
     ];
+    if (memoryPrompt.text) {
+      // 记忆块贴尾注入（本轮 user 之前）：头部保持 DeepSeek 前缀缓存命中
+      messages.splice(messages.length - 1, 0, {
+        role: "system" as const,
+        content: memoryPrompt.text,
+      });
+    }
 
     // 主模型流式：filler（如有）先作为 SSE 前导 chunk 外发，随后主模型
     // 按流直出（串行后不再需要双泵缓冲交错）。大模型失败时：
