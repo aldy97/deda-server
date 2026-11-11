@@ -51,6 +51,14 @@ export class ParentReportsAnalyticsService {
           suggestion: true,
           generatorModel: true,
           generatedAt: true,
+          // 该日报的家长反馈（多个绑定账号可分别评价 → 数组）
+          feedbacks: {
+            select: {
+              isUseful: true,
+              updatedAt: true,
+              user: { select: { nickname: true, phone: true } },
+            },
+          },
         },
       }),
     ]);
@@ -64,7 +72,22 @@ export class ParentReportsAnalyticsService {
         deviceCode: device.deviceCode,
         characterKey: device.characterKey,
       },
-      items: rows,
+      items: rows.map((row) => ({
+        reportDate: row.reportDate,
+        generationStatus: row.generationStatus,
+        expressionObservation: row.expressionObservation,
+        emotionObservation: row.emotionObservation,
+        thinkingObservation: row.thinkingObservation,
+        suggestion: row.suggestion,
+        generatorModel: row.generatorModel,
+        generatedAt: row.generatedAt,
+        feedbacks: row.feedbacks.map((feedback) => ({
+          isUseful: feedback.isUseful,
+          // feedbackAt 口径与反馈列表一致：updatedAt（家长可改票，取最新状态时间）
+          feedbackAt: feedback.updatedAt,
+          user: feedback.user,
+        })),
+      })),
     };
   }
 }

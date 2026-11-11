@@ -149,9 +149,12 @@ GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
 → { total, page, pageSize,
     device: { deviceId, deviceCode, characterKey },
     items: [{ reportDate, generationStatus, expressionObservation, emotionObservation,
-              thinkingObservation, suggestion, generatorModel, generatedAt }] }
+              thinkingObservation, suggestion, generatorModel, generatedAt,
+              feedbacks: [{ isUseful, feedbackAt, user: { nickname, phone } }] }] }
    // 单设备日报列表，按 reportDate 倒序；generationStatus 非 completed 的行也返回
-   // （观察字段为空），便于排查生成失败；设备不存在 404
+   // （观察字段为空），便于排查生成失败；设备不存在 404；
+   // feedbacks 为该日报的家长反馈（多个绑定账号可分别评价 → 数组，无反馈为 []），
+   // feedbackAt=updatedAt（家长可改票，取最新状态时间）
 ```
 
 ## 模型监控（LLM）
