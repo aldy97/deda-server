@@ -256,32 +256,18 @@ describe("LlmService", () => {
       expect(without[0].content).toContain("小象 Elly");
     });
 
-    it("fillerHeard 注入 handoff：主模型知道孩子刚听到的那句承接", () => {
-      for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
-        const messages = service.buildEnglishTutorPrompt(
-          "球不见了",
-          undefined,
-          { mode, fillerHeard: "好呀，故事时间到啦～" },
-        );
-        // 串行后 filler 原文注入主模型：防重复从「抽象禁令」升级为「给事实」
-        expect(messages[0].content).toContain("好呀，故事时间到啦～");
-        expect(messages[0].content).toContain("never repeat or paraphrase");
-      }
-    });
-
-    it("无 fillerHeard 时不含 handoff，也不再携带抽象承接禁令", () => {
+    it("handoff 不再内嵌 system prompt：buildEnglishTutorPrompt 无 fillerHeard 参数", () => {
       for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
         const messages = service.buildEnglishTutorPrompt(
           "球不见了",
           undefined,
           { mode },
         );
-        // filler 失败/关闭时没有任何承接被播报，禁令反而限制正常表达
+        // 方案 B：handoff 改由 buildFillerHandoffMessage 产出独立 system
+        // 消息贴 user 消息前注入，主 prompt 不再携带任何承接相关内容
+        expect(messages[0].content).not.toContain("承接语");
+        expect(messages[0].content).not.toContain("already finished playing");
         expect(messages[0].content).not.toContain("never repeat or paraphrase");
-        expect(messages[0].content).not.toContain(
-          "first sentence must carry real content",
-        );
-        expect(messages[0].content).not.toContain("直接推进故事");
       }
     });
 
@@ -453,20 +439,41 @@ describe("LlmService", () => {
         messagesWithoutOptions[0].content,
       );
     });
+  });
 
-    it("should hand off the exact filler line to the main model when provided", () => {
-      const messages = service.buildEnglishTutorPrompt(
-        "我喜欢上海的天气",
-        undefined,
-        { fillerHeard: "原来你喜欢上海的天气呀" },
+  describe("buildFillerHandoffMessage", () => {
+    it("产出贴 user 消息前的独立 system 消息：filler 原文 + 三条衔接禁令", () => {
+      const msg = service.buildFillerHandoffMessage(
+        "原来你喜欢上海的天气呀，快多跟我说说呢……",
       );
 
-      // 衔接丝滑：主模型拿到 filler 原文，直接从内容开始、不重复承接
-      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
-      expect(messages[0].content).toContain("already finished playing");
+      // 方案 B：handoff 是独立 system 消息（非内嵌主 prompt），
+      // 由调用方 splice 到本轮 user 消息前，离生成点最近
+      expect(msg.role).toBe("system");
+      expect(msg.content).toContain(
+        "「原来你喜欢上海的天气呀，快多跟我说说呢……」",
+      );
+      expect(msg.content).toContain("直接从实质内容起句");
+      expect(msg.content).toContain("不要以孩子的名字开头");
+      expect(msg.content).toContain("语气词");
+      expect(msg.content).toContain("不要重复或换写承接语已经表达过的意象");
+    });
 
-      const without = service.buildEnglishTutorPrompt("我喜欢上海的天气");
-      expect(without[0].content).not.toContain("already finished playing");
+    it("附好/坏起句示范，让禁令可模仿", () => {
+      const msg = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……");
+
+      expect(msg.content).toContain("好例");
+      expect(msg.content).toContain("坏例");
+    });
+
+    it("注入前清洗：换行与多余空白压平、截断 100 字（防小模型产出污染指令位）", () => {
+      const messy =
+        service.buildFillerHandoffMessage("第一行\n第二行   多空格");
+      expect(messy.content).toContain("「第一行 第二行 多空格」");
+
+      const long = service.buildFillerHandoffMessage("字".repeat(150));
+      expect(long.content).toContain(`「${"字".repeat(100)}」`);
+      expect(long.content).not.toContain("字".repeat(101));
     });
   });
 
@@ -933,14 +940,14 @@ describe("LlmService", () => {
   });
 
   describe("buildFillerPrompt", () => {
-    it("should build a first-response prompt echoing the user input", () => {
+    it("构建中文首响承接 prompt：角色定位、语言跟随、不答实质问题", () => {
       const messages = service.buildFillerPrompt("我喜欢上海的天气");
 
       expect(messages).toHaveLength(2);
       expect(messages[0].role).toBe("system");
-      expect(messages[0].content).toContain("first-response");
-      expect(messages[0].content).toContain("same language");
-      expect(messages[0].content).toContain("Never answer");
+      expect(messages[0].content).toContain("首响承接层");
+      expect(messages[0].content).toContain("用孩子刚说的语言回复");
+      expect(messages[0].content).toContain("绝不回答问题");
       expect(messages[1]).toEqual({
         role: "user",
         content: "我喜欢上海的天气",
@@ -954,144 +961,143 @@ describe("LlmService", () => {
       expect(messages[0].content).not.toContain("textbook context");
     });
 
-    it("should include few-shot examples and a variety constraint", () => {
+    it("长度下限抬到中文 15-20 字 / 英文 8-12 词（音频覆盖主模型首包）", () => {
+      const messages = service.buildFillerPrompt("Hello");
+
+      // 防死空气：filler 音频是等待大模型首 chunk 的天然缓冲。
+      // 实测 gap P90=2.36s，10 字 filler（约 1.5s）盖不住，抬到 15-20 字
+      // （约 2.5-3.5s）才能完全覆盖
+      expect(messages[0].content).toContain("15 到 20 个字");
+      expect(messages[0].content).toContain("8 到 12 个词");
+    });
+
+    it("few-shot 中文示例均为 15-20 字且不带名字，英文示例 8-12 词", () => {
       const messages = service.buildFillerPrompt("我喜欢上海的天气");
 
-      // 业内 filler prompt 标配：few-shot 示例 + 措辞多样性约束
-      expect(messages[0].content).toContain("Examples:");
-      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
-      expect(messages[0].content).toContain("That is such a fun question!");
-      expect(messages[0].content).toContain("vary");
+      // 模型会模仿示例长度与结构：示例必须自身达标
+      expect(messages[0].content).toContain("示例：");
+      const zhExamples = [
+        "原来你喜欢上海的天气呀，快多跟我说说呢……",
+        "去公园玩啦，听起来就让人觉得好开心呀……",
+      ];
+      for (const example of zhExamples) {
+        expect(messages[0].content).toContain(example);
+        const cjkCount = [...example.replace(/[\s\p{P}\p{S}]/gu, "")].length;
+        expect(cjkCount).toBeGreaterThanOrEqual(15);
+        expect(cjkCount).toBeLessThanOrEqual(20);
+        expect(example).not.toContain("贝果");
+      }
+      expect(messages[0].content).toContain(
+        "Wow, that is such a fun question to think about!",
+      );
     });
 
-    it("should require a trailing transitional tone for a smooth handover", () => {
-      const messages = service.buildFillerPrompt("Hello");
-
-      // 衔接丝滑：filler 以承接语气收尾，让大模型回答自然接棒
-      expect(messages[0].content).toContain("transitional tone");
-    });
-
-    it("should enforce a minimum length so the filler audio covers the answer TTFT", () => {
-      const messages = service.buildFillerPrompt("Hello");
-
-      // 防死空气：filler 音频是等待大模型首 chunk 的天然缓冲，
-      // 过短的 filler（如「嗯嗯」）音频不足 1 秒，缓冲失效——故约束下限
-      expect(messages[0].content).toContain("at least 10 characters");
-      expect(messages[0].content).toContain("at least 6 words");
-    });
-
-    it("should ban script-style name-label openers (小象 Elly：…)", () => {
+    it("硬禁：不以孩子名字开头、不出现自己名字、不新增意象", () => {
       const messages = service.buildFillerPrompt("我最喜欢蓝色");
 
-      // 实机事故：filler 连续 8 轮以「小象 Elly：」开头，像剧本角色标签
-      expect(messages[0].content).toContain("never start with your own name");
+      // 实机事故：每句 filler 都以「贝果，」开头，结构性复读
+      expect(messages[0].content).toContain("不要以孩子的名字开头");
+      // 实机事故：filler 自称「小象 Elly 听到……」，与主回答自我指称撞车
+      expect(messages[0].content).toContain("不要出现你自己的名字");
+      // 实机事故：filler 诗意延展（「像小星星在心里闪闪发亮」），
+      // 主回答跟着复述意象——filler 越抒情，主模型越有东西可复读
+      expect(messages[0].content).toContain(
+        "禁止比喻、诗意延展或添加孩子没说的新意象",
+      );
     });
 
-    it("身份类 few-shot 已移除（身份问句改走确定性模板），事实确认禁令保留", () => {
-      const messages = service.buildFillerPrompt("Elly 你最喜欢什么颜色？");
+    it("保留旧防线：延续语气收尾、不预告实质内容、不确认事实", () => {
+      const messages = service.buildFillerPrompt("继续冒险故事");
 
-      // 身份问句不再依赖小模型自觉：模板化后 few-shot 失去存在意义
-      expect(messages[0].content).not.toContain("你在想听风原野里都有谁呀");
-      expect(messages[0].content).not.toContain("你想知道我喜欢什么呀");
-      expect(messages[0].content).toContain("Never confirm");
+      expect(messages[0].content).toContain("延续的语气收尾");
+      expect(messages[0].content).toContain("很久很久以前");
+      expect(messages[0].content).toContain("绝不确认或复述孩子说的事实");
+      // 问 Elly 自己也只承接，不抢答
+      expect(messages[0].content).toContain("包括关于你自己的问题");
     });
 
-    it("should list recent fillers as banned openers when provided", () => {
+    it("最近用过的 filler 进入中文禁用清单", () => {
       const messages = service.buildFillerPrompt("我喜欢上海的天气", [
-        "原来你喜欢上海的天气呀",
-        "Wow, that sounds fun!",
+        "原来你喜欢上海的天气呀，快多跟我说说呢……",
+        "Wow, tell me more about it right now!",
       ]);
 
       // 跨轮次多样性：最近用过的 filler 原文进入禁用清单
-      expect(messages[0].content).toContain("do NOT reuse");
-      expect(messages[0].content).toContain("原来你喜欢上海的天气呀");
-      expect(messages[0].content).toContain("Wow, that sounds fun!");
+      expect(messages[0].content).toContain("不要复用或近似模仿");
+      expect(messages[0].content).toContain(
+        "「原来你喜欢上海的天气呀，快多跟我说说呢……」",
+      );
+      expect(messages[0].content).toContain(
+        "「Wow, tell me more about it right now!」",
+      );
       // 用户输入仍在 user 消息，不被历史污染
       expect(messages).toHaveLength(2);
       expect(messages[1].content).toBe("我喜欢上海的天气");
     });
 
-    it("should not add a banned-openers section when recent fillers are absent", () => {
+    it("无最近 filler 时不加禁用清单段", () => {
       // 首轮对话 / 旧数据无 filler：prompt 保持原样（向后兼容）
       for (const recent of [undefined, [] as string[]]) {
         const messages = service.buildFillerPrompt("Hello", recent);
-        expect(messages[0].content).not.toContain("do NOT reuse");
+        expect(messages[0].content).not.toContain("不要复用或近似模仿");
       }
     });
 
-    it("should forbid announcing or starting actual content", () => {
-      const messages = service.buildFillerPrompt("继续冒险故事");
-
-      // 衔接防矛盾：filler 绝不预告/抢跑实质内容（故事开头、模式启动等）
-      expect(messages[0].content).toContain(
-        "Never announce, preview, promise, or start any actual content",
-      );
-      expect(messages[0].content).toContain("once upon a time");
-    });
-
-    it("should include a decline context when today's adventure is already done", () => {
+    it("冒险门禁情境：中文中性承接指令，不得预告冒险", () => {
       const messages = service.buildFillerPrompt("继续冒险故事", [], {
         intent: "adventure_story",
         adventureDeclined: true,
       });
 
-      // 门禁拒绝情境：filler 只能中性拖延，不得预告冒险
-      expect(messages[0].content).toContain("ALREADY FINISHED");
-      expect(messages[0].content).toContain("Do NOT announce");
+      expect(messages[0].content).toContain("今天的冒险已经结束");
+      expect(messages[0].content).toContain("不要宣告、承诺或预告冒险");
     });
 
-    it("should include a story context for story intents without decline", () => {
+    it("故事意图情境：引导语示例 ≥15 字，不抢跑故事内容", () => {
       const messages = service.buildFillerPrompt("讲一个英语故事", [], {
         intent: "english_story",
       });
 
-      expect(messages[0].content).toContain("the main reply WILL tell a story");
-      expect(messages[0].content).toContain("never start or preview the story");
+      expect(messages[0].content).toContain("主回答会讲一个故事");
+      expect(messages[0].content).toContain("绝不自己开始或预告故事内容");
+      const leadIn = "好呀，故事时间到啦，把耳朵竖起来咯……";
+      expect(messages[0].content).toContain(leadIn);
+      expect(
+        [...leadIn.replace(/[\s\p{P}\p{S}]/gu, "")].length,
+      ).toBeGreaterThanOrEqual(15);
     });
 
-    it("should add no context section for plain free chat", () => {
+    it("纯自由对话不加情境段", () => {
       const messages = service.buildFillerPrompt("你好", [], {
         intent: "free_chat",
       });
 
-      expect(messages[0].content).not.toContain("Context for this turn");
+      expect(messages[0].content).not.toContain("本轮背景");
     });
 
-    it("should include identity guardrail when persona is provided", () => {
+    it("人设护栏：身份声明 + 禁止编造名字", () => {
       const messages = service.buildFillerPrompt("你叫什么名字", [], {
         persona: "小象 Elly：听风原野的居民，性格温暖好奇。",
       });
 
       // 身份兜底：filler 不得编造名字（防与主回答人设矛盾）
-      expect(messages[0].content).toContain("Your identity");
+      expect(messages[0].content).toContain("你的身份");
       expect(messages[0].content).toContain("小象 Elly");
-      expect(messages[0].content).toContain("Never invent a different name");
+      expect(messages[0].content).toContain("绝不给自己编造别的名字");
     });
 
-    it("should include child brief when provided and omit when empty", () => {
+    it("孩子档案：知道名字但本句不用名字称呼", () => {
       const withBrief = service.buildFillerPrompt("你好呀", [], {
         childBrief: "名叫 Amy，5 岁，女孩",
       });
-      expect(withBrief[0].content).toContain("The child you are talking to");
+      expect(withBrief[0].content).toContain("你正在和这个孩子说话");
       expect(withBrief[0].content).toContain("名叫 Amy，5 岁，女孩");
-      expect(withBrief[0].content).toContain("never invent facts");
+      // 实机事故：「may address them by name naturally」导致每句都喊名字
+      expect(withBrief[0].content).toContain("不要用名字称呼");
+      expect(withBrief[0].content).toContain("不要编造");
 
       const without = service.buildFillerPrompt("你好呀", [], {});
-      expect(without[0].content).not.toContain("The child you are talking to");
-    });
-
-    it("filler 职责边界：不确认事实、不答实质问题（含问 Elly 自己）", () => {
-      const messages = service.buildFillerPrompt("听风原野里有艾莉", [], {});
-
-      // 禁止复述/确认孩子陈述的事实（实机事故：filler 确认错误前提，
-      // 主模型再纠正，听起来自相矛盾）
-      expect(messages[0].content).toContain(
-        "Never confirm or repeat factual claims",
-      );
-      // 问 Elly 自己也只承接，不抢答
-      expect(messages[0].content).toContain(
-        "not even questions about yourself",
-      );
+      expect(without[0].content).not.toContain("你正在和这个孩子说话");
     });
   });
 

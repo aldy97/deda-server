@@ -24,6 +24,7 @@ describe("LlmAdapterModule", () => {
   let llm: {
     buildEnglishTutorPrompt: jest.Mock;
     buildFillerPrompt: jest.Mock;
+    buildFillerHandoffMessage: jest.Mock;
     complete: jest.Mock;
     completeStream: jest.Mock;
     smallModelName: string;
@@ -79,6 +80,10 @@ describe("LlmAdapterModule", () => {
       buildFillerPrompt: jest
         .fn()
         .mockReturnValue([{ role: "system", content: "filler-sys" }]),
+      buildFillerHandoffMessage: jest.fn((text: string) => ({
+        role: "system",
+        content: `handoff:${text}`,
+      })),
       complete: jest.fn().mockResolvedValue({ text: "嗯——" }),
       completeStream: jest.fn(),
       smallModelName: "small-model",
@@ -479,19 +484,58 @@ describe("LlmAdapterModule", () => {
       );
     });
 
-    it("streams filler before the answer and persists the boundary", async () => {
-      // 显式开启 filler（生产默认开，测试默认关）
+    const enableFiller = () =>
       configGet.mockImplementation((key: string) =>
         key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
       );
+
+    /** filler 与主模型都走 completeStream，按 scene 分流 mock */
+    const mockStreamsByScene = (
+      fillerChunks: string[] | Error,
+      mainChunks: string[],
+    ) => {
+      llm.completeStream.mockImplementation((opts: { scene: string }) => {
+        if (opts.scene === "filler") {
+          if (fillerChunks instanceof Error) {
+            return (async function* () {
+              throw fillerChunks;
+            })();
+          }
+          return makeStream(fillerChunks)();
+        }
+        return makeStream(mainChunks)();
+      });
+    };
+
+    /** 只看 filler 场景的调用（completeStream 同时服务主模型） */
+    const fillerCalls = () =>
+      llm.completeStream.mock.calls.filter(
+        (call: Array<{ scene: string }>) => call[0].scene === "filler",
+      );
+    const mainCalls = () =>
+      llm.completeStream.mock.calls.filter(
+        (call: Array<{ scene: string }>) => call[0].scene === "chat_main",
+      );
+
+    it("流式 filler 头部校验后先行播出并持久化边界，原文经 handoff 消息注入主模型", async () => {
+      // 显式开启 filler（生产默认开，测试默认关）
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete.mockResolvedValue({ text: "嗯——" }); // filler 先行（非流式）
-      llm.completeStream.mockReturnValue(makeStream(["正式", "答案"])()); // 主模型随后
+      // filler 分三段：首段满 8 字头部缓冲 → 校验通过立即外发，后续直通
+      mockStreamsByScene(
+        ["嗯——冒险呀，让", "我想想呢", "……"],
+        ["正式", "答案"],
+      );
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["嗯——", "正式", "答案"]);
-      // 串行：filler 非流式先完成，原文注入主模型 prompt 后才启动主模型，
-      // 结构上杜绝「主模型重复 filler 已说的内容」
-      expect(llm.complete).toHaveBeenCalledWith(
+      expect(chunks).toEqual([
+        "嗯——冒险呀，让",
+        "我想想呢",
+        "……",
+        "正式",
+        "答案",
+      ]);
+      // filler 改走小模型流式（首音提前到 TTFT）：scene/model/上限/超时
+      expect(llm.completeStream).toHaveBeenCalledWith(
         expect.objectContaining({
           scene: "filler",
           model: "small-model",
@@ -499,14 +543,23 @@ describe("LlmAdapterModule", () => {
           timeoutMs: expect.any(Number),
         }),
       );
-      expect(llm.complete.mock.invocationCallOrder[0]).toBeLessThan(
-        llm.completeStream.mock.invocationCallOrder[0],
-      );
-      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(Array),
-        expect.objectContaining({ fillerHeard: "嗯——" }),
-      );
+      // 串行：filler 流先完成，主模型才启动
+      expect(llm.completeStream.mock.calls[0][0].scene).toBe("filler");
+      expect(llm.completeStream.mock.calls[1][0].scene).toBe("chat_main");
+      // handoff（方案 B）：filler 原文作为独立 system 消息贴在本轮 user
+      // 消息前注入，离生成点最近
+      const mainMessages = mainCalls()[0][0].messages;
+      expect(mainMessages[mainMessages.length - 2]).toEqual({
+        role: "system",
+        content: "handoff:嗯——冒险呀，让我想想呢……",
+      });
+      expect(mainMessages[mainMessages.length - 1]).toEqual({
+        role: "user",
+        content: "我想玩每日冒险",
+      });
+      // buildEnglishTutorPrompt 不再携带 fillerHeard（handoff 已外移）
+      const promptOptions = llm.buildEnglishTutorPrompt.mock.calls[0][2];
+      expect(promptOptions).not.toHaveProperty("fillerHeard");
       expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
         "我想玩每日冒险",
         [],
@@ -515,114 +568,180 @@ describe("LlmAdapterModule", () => {
           adventureDeclined: false,
         }),
       );
+      // 落库边界：content 为播报全文，filler/answer 结构化存 rawPayload
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toEqual({
-        filler: "嗯——",
+        filler: "嗯——冒险呀，让我想想呢……",
         answer: "正式答案",
       });
-      expect(assistantCall.data.content).toBe("嗯——\n正式答案");
+      expect(assistantCall.data.content).toBe(
+        "嗯——冒险呀，让我想想呢……\n正式答案",
+      );
     });
 
-    it("skips filler silently when the filler stream fails", async () => {
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+    it("filler 生成失败时回落兜底模板池，过渡音覆盖不缺席", async () => {
+      // dashboard 实测：filler 缺失轮完全没有防死空气缓冲。
+      // 失败不再静默跳过，兜底模板（≥15 字）保证每轮都有覆盖
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete.mockRejectedValue(new Error("small model down")); // filler 失败
-      llm.completeStream.mockReturnValue(makeStream(["答案"])());
+      mockStreamsByScene(new Error("small model down"), ["答案"]);
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["答案"]);
-      // filler 失败：主模型 prompt 不含 handoff（没播的东西不需要禁令）
-      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(Array),
-        expect.objectContaining({ fillerHeard: undefined }),
-      );
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload).toEqual({
-        filler: null,
-        answer: "答案",
+      expect(chunks).toHaveLength(2);
+      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15);
+      expect(chunks[1]).toBe("答案");
+      // 模板 filler 同样注入 handoff 并落库
+      const mainMessages = mainCalls()[0][0].messages;
+      expect(mainMessages[mainMessages.length - 2]).toEqual({
+        role: "system",
+        content: `handoff:${chunks[0]}`,
       });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.filler).toBe(chunks[0]);
     });
 
-    it("filler 与近 5 轮重复时重试一次，重试不重复则采用", async () => {
-      // 实机事故：同一句 filler「小象 Elly 呀，名字像风铃轻轻响呢～」三连复读，
-      // 小模型无视 prompt 禁用清单——需要确定性去重兜底
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+    it("filler 以孩子名字开头时中止重试，违规内容一字不外发", async () => {
+      // 实机事故：每句 filler 都以「贝果，」开头，结构性复读
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      prisma.message.findMany.mockResolvedValue([
-        {
-          role: "assistant",
-          content: "嗯——\n上一轮回答",
-          rawPayload: { filler: "嗯——", answer: "上一轮回答" },
-        },
-      ]);
-      llm.complete
-        .mockResolvedValueOnce({ text: "嗯——" }) // 与上一轮逐字重复
-        .mockResolvedValueOnce({ text: "哇，想玩冒险呀——" });
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
+      prisma.childProfile.findUnique.mockResolvedValue({
+        name: "贝果",
+        englishName: null,
+        birthday: "2020-06-01",
+        gender: "female",
+      });
+      let attempt = 0;
+      llm.completeStream.mockImplementation((opts: { scene: string }) => {
+        if (opts.scene === "filler") {
+          attempt += 1;
+          // 首次：语气词+孩子名开头（规避不了——剥离语气词后仍是名字）
+          return makeStream(
+            attempt === 1
+              ? ["呀，贝果是不是心里有点闷闷的呀……"]
+              : ["听到你说心里闷闷的呀，我陪你呢……"],
+          )();
+        }
+        return makeStream(["答"])();
+      });
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(llm.complete).toHaveBeenCalledTimes(2);
-      expect(chunks[0]).toBe("哇，想玩冒险呀——");
+      expect(chunks[0]).toBe("听到你说心里闷闷的呀，我陪你呢……");
+      expect(chunks.join("")).not.toContain("贝果");
+      expect(fillerCalls()).toHaveLength(2);
+      // 重试带强禁令
+      const retryMessages = fillerCalls()[1][0].messages;
+      expect(retryMessages[retryMessages.length - 1].content).toContain(
+        "被拒绝了",
+      );
     });
 
-    it("重试仍重复时回落兜底模板池，不再调用小模型", async () => {
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+    it("filler 以英文名开头同样硬禁（childName 优先 englishName）", async () => {
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      prisma.message.findMany.mockResolvedValue([
-        {
-          role: "assistant",
-          content: "嗯——\n上一轮回答",
-          rawPayload: { filler: "嗯——", answer: "上一轮回答" },
-        },
-      ]);
-      llm.complete.mockResolvedValue({ text: "嗯——" }); // 两次都重复
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
+      prisma.childProfile.findUnique.mockResolvedValue({
+        name: "莉莉",
+        englishName: "Lily",
+        birthday: "2020-06-01",
+        gender: "female",
+      });
+      let attempt = 0;
+      llm.completeStream.mockImplementation((opts: { scene: string }) => {
+        if (opts.scene === "filler") {
+          attempt += 1;
+          return makeStream(
+            attempt === 1
+              ? ["Lily, you drew a cat? Lovely!"]
+              : ["Drawing a cat sounds so much fun!"],
+          )();
+        }
+        return makeStream(["答"])();
+      });
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(llm.complete).toHaveBeenCalledTimes(2); // 初次 + 一次重试，有上限
-      expect(chunks[0]).not.toBe("嗯——");
-      expect(chunks[0].length).toBeGreaterThanOrEqual(4);
+      expect(chunks[0]).toBe("Drawing a cat sounds so much fun!");
+      expect(fillerCalls()).toHaveLength(2);
     });
 
-    it("filler 以人设名标签开头时判定不合格并重试", async () => {
-      // 实机事故：小模型顽固口癖「小象 Elly：X 真 Y 呀」连续 8 轮同构，
-      // 像剧本角色标签。精确去重挡不住结构重复，需确定性拒绝
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+    it("filler 含人设名时中止重试；重试仍违规回落兜底模板池", async () => {
+      // 实机事故：连续 8 轮「小象 Elly：X 真 Y 呀」同构口癖（名标签开头）；
+      // 以及「小象 Elly 听到风在笑呢」式第三人称自称（头部出现人设名）
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete
-        .mockResolvedValueOnce({ text: "小象 Elly：蓝色真美呢" })
-        .mockResolvedValueOnce({ text: "哇，冒险的心已经飞起来啦" });
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
+      mockStreamsByScene(["小象 Elly：蓝色真美呢"], ["答"]);
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(llm.complete).toHaveBeenCalledTimes(2);
-      expect(chunks[0]).toBe("哇，冒险的心已经飞起来啦");
-    });
-
-    it("重试仍带人设名标签时回落兜底模板池", async () => {
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete.mockResolvedValue({ text: "小象 Elly：蓝色真美呢" });
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(llm.complete).toHaveBeenCalledTimes(2); // 有上限，不死循环
+      expect(fillerCalls()).toHaveLength(2); // 初次 + 一次重试，有上限
       expect(chunks[0]).not.toContain("小象 Elly");
-      expect(chunks[0].length).toBeGreaterThanOrEqual(4);
+      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15); // 模板池兜底
+      expect(chunks[1]).toBe("答");
     });
 
-    it("身份/偏好问句的 filler 走确定性模板，不调用小模型", async () => {
+    it("filler 与近 5 轮逐字重复时仍播出（流式不可撤回），告警并依赖 prompt 禁用清单", async () => {
+      // 流式权衡：全文去重无法在外发前定论，硬门让位给首音延迟，
+      // 防线 = prompt 禁用清单 + 事后 warn 供 dashboard/日志观测
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.message.findMany.mockResolvedValue([
+        {
+          role: "assistant",
+          content: "嗯——冒险真让人期待呀……\n上一轮回答",
+          rawPayload: {
+            filler: "嗯——冒险真让人期待呀……",
+            answer: "上一轮回答",
+          },
+        },
+      ]);
+      const warnSpy = jest
+        .spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        )
+        .mockImplementation(() => undefined);
+      mockStreamsByScene(["嗯——冒险真让人期待呀……"], ["答"]);
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks[0]).toBe("嗯——冒险真让人期待呀……");
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("repeated"));
+      warnSpy.mockRestore();
+    });
+
+    it("filler 低于 15 字下限时仍播出但告警（流式不可撤回）", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const warnSpy = jest
+        .spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        )
+        .mockImplementation(() => undefined);
+      mockStreamsByScene(["嗯——我在听"], ["答"]);
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks[0]).toBe("嗯——我在听");
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("floor"));
+      warnSpy.mockRestore();
+    });
+
+    it("filler 外发后断流：保留已播部分，不重试不回补，主模型照常", async () => {
+      // 半截 filler 已播给孩子，撤回/重试都会让孩子听到冲突内容
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockImplementation((opts: { scene: string }) => {
+        if (opts.scene === "filler") {
+          return (async function* () {
+            yield "哇，你说的话真有意思";
+            throw new Error("socket hang up");
+          })();
+        }
+        return makeStream(["答"])();
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["哇，你说的话真有意思", "答"]);
+      expect(fillerCalls()).toHaveLength(1); // 不重试
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.filler).toBe("哇，你说的话真有意思");
+    });
+
+    it("身份/偏好问句的 filler 走确定性模板（≥15 字），不调用小模型", async () => {
       // 实机事故：「你叫什么名字」filler 抢答出名字，主模型又答一遍；
       // 「你最喜欢什么颜色」filler 主客颠倒成「你喜欢什么颜色呀」
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       llm.completeStream.mockReturnValue(makeStream(["我叫小象 Elly"])());
       const req: ChatCompletionRequest = {
@@ -630,15 +749,16 @@ describe("LlmAdapterModule", () => {
         messages: [{ role: "user", content: "你叫什么名字" }],
       };
       const chunks = await collect(service.streamReply(req));
-      expect(llm.complete).not.toHaveBeenCalled();
+      expect(fillerCalls()).toHaveLength(0);
       expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
       expect(chunks[0]).toContain("名字");
+      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15);
       // 模板 filler 同样注入主模型 handoff
-      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(Array),
-        expect.objectContaining({ fillerHeard: chunks[0] }),
-      );
+      const mainMessages = mainCalls()[0][0].messages;
+      expect(mainMessages[mainMessages.length - 2]).toEqual({
+        role: "system",
+        content: `handoff:${chunks[0]}`,
+      });
     });
 
     it("never touches the adventure engine when anonymous", async () => {
@@ -686,15 +806,16 @@ describe("LlmAdapterModule", () => {
       // 不兜底，孩子听完半句 filler 后死寂
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete.mockResolvedValue({ text: "嗯——" });
-      llm.completeStream.mockReturnValue(
-        failingStream(
-          new LlmUpstreamError(
-            "upstream_error",
-            "ECONNRESET: socket hang up",
-            false,
-          ),
-        ),
+      llm.completeStream.mockImplementation((opts: { scene: string }) =>
+        opts.scene === "filler"
+          ? makeStream(["嗯——"])()
+          : failingStream(
+              new LlmUpstreamError(
+                "upstream_error",
+                "ECONNRESET: socket hang up",
+                false,
+              ),
+            ),
       );
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["嗯——", FALLBACK]);
@@ -744,23 +865,32 @@ describe("LlmAdapterModule", () => {
     });
 
     it("可重试的上游失败自动重试一次，第二次成功则整轮正常", async () => {
-      // filler 播报 1.5-2s 正好掩盖一次重试延迟，孩子侧无感
+      // filler 播报 2.5-3.5s 正好掩盖一次重试延迟，孩子侧无感
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.complete.mockResolvedValue({ text: "嗯——" });
-      llm.completeStream
-        .mockReturnValueOnce(
-          failingStream(
-            new LlmUpstreamError(
-              "upstream_error",
-              "ECONNRESET: socket hang up",
-              true,
-            ),
-          ),
-        )
-        .mockReturnValueOnce(makeStream(["正式", "答案"])());
+      let mainAttempts = 0;
+      llm.completeStream.mockImplementation((opts: { scene: string }) => {
+        if (opts.scene === "filler") {
+          return makeStream(["嗯——"])();
+        }
+        mainAttempts += 1;
+        return mainAttempts === 1
+          ? failingStream(
+              new LlmUpstreamError(
+                "upstream_error",
+                "ECONNRESET: socket hang up",
+                true,
+              ),
+            )
+          : makeStream(["正式", "答案"])();
+      });
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(llm.completeStream).toHaveBeenCalledTimes(2);
+      // 主模型初次 + 一次重试（filler 不算在内）
+      expect(
+        llm.completeStream.mock.calls.filter(
+          (call: Array<{ scene: string }>) => call[0].scene === "chat_main",
+        ),
+      ).toHaveLength(2);
       expect(chunks).toEqual(["嗯——", "正式", "答案"]);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.status).toBe("completed");
@@ -1274,8 +1404,11 @@ describe("LlmAdapterModule", () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolve.mockResolvedValue("adventure_story");
       adventure.isCompletedToday.mockResolvedValue(true);
-      llm.complete.mockResolvedValue({ text: "嗯——" });
-      llm.completeStream.mockReturnValue(makeStream(["今天冒险完成啦"])());
+      llm.completeStream.mockImplementation((opts: { scene: string }) =>
+        opts.scene === "filler"
+          ? makeStream(["嗯——"])()
+          : makeStream(["今天冒险完成啦"])(),
+      );
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "继续冒险故事" }],
@@ -1299,8 +1432,11 @@ describe("LlmAdapterModule", () => {
         ...deviceRow,
         characterKey: "polly",
       });
-      llm.complete.mockResolvedValue({ text: "画小猫听起来真棒呀" });
-      llm.completeStream.mockReturnValue(makeStream(["画得真好"])());
+      llm.completeStream.mockImplementation((opts: { scene: string }) =>
+        opts.scene === "filler"
+          ? makeStream(["画小猫听起来真棒呀"])()
+          : makeStream(["画得真好"])(),
+      );
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "我今天画了一只小猫" }],
@@ -1331,8 +1467,11 @@ describe("LlmAdapterModule", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       });
-      llm.complete.mockResolvedValue({ text: "你好呀 Lily" });
-      llm.completeStream.mockReturnValue(makeStream(["Hi Lily"])());
+      llm.completeStream.mockImplementation((opts: { scene: string }) =>
+        opts.scene === "filler"
+          ? makeStream(["你好呀你在做什么呢"])()
+          : makeStream(["Hi Lily"])(),
+      );
 
       await collect(service.streamReply(boundRequest));
 

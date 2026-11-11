@@ -476,14 +476,17 @@ export class LlmService {
   };
 
   /**
-   * 构建首响「打哈哈」prompt（小模型用）
-   * 业内 filler 写法要点：明确角色定位（只为正式回答争取时间）、
-   * 语言跟随用户、极短、禁止实质回答、措辞多样化，并给 few-shot 示例。
+   * 构建首响「打哈哈」prompt（小模型用，中文撰写——输出以中文为主，
+   * 指令与目标语言对齐可减少跨语言指令遵循滑移，也便于团队维护）。
+   * 要点：明确角色定位（只为正式回答争取时间）、语言跟随用户、
+   * 15-20 字（音频覆盖主模型首包，实测 gap P90=2.36s）、禁止实质回答、
+   * 禁止以孩子名字开头、禁止自称/人设名、禁止新增意象（filler 越抒情，
+   * 主模型越有东西可复读）、措辞多样化，并给达标的 few-shot 示例。
    * 不带教材上下文与历史，避免小模型展开真正回答。
    * @param recentFillers 最近若干轮本方用过的 filler 原文，
    * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
-   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设），让 filler
-   * 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
+   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设/孩子档案），
+   * 让 filler 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
    * "filler 自称小星但主模型是 Elly"这类矛盾播报
    */
   buildFillerPrompt(
@@ -496,31 +499,33 @@ export class LlmService {
       childBrief?: string;
     },
   ): LlmMessage[] {
-    const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
+    const systemPrompt = `你是儿童语音陪伴玩具的「首响承接层」。你的唯一任务是为正式回答争取时间：立刻说出一句温暖的话，接住孩子刚说的事，让孩子感到被听见。
 
-Rules:
-1. Reply in the same language the child just used.
-2. Keep it under 20 words, in a natural spoken style.
-3. Never answer the question or provide real content — the main reply comes later.
-4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row, and never start with your own name or a script-style label (e.g. "小象 Elly：…") — speak as yourself, not as a narrator.
-5. No lists, no emojis, no questions.
-6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
-7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.
-8. Never announce, preview, promise, or start any actual content — no story openings (e.g. "once upon a time"), no "let's hear / let's begin / 我们开始吧", no claims that a mode or story is starting. You only acknowledge and echo; the main reply does everything else.
-9. Never confirm or repeat factual claims from the child (who lives somewhere, what exists, whether something is true) — judging facts is the main reply's job. Only acknowledge the topic and the feeling. And never answer questions, not even questions about yourself (your name, your favorites) — a question about you is still the main reply's to answer.
+规则：
+1. 用孩子刚说的语言回复。
+2. 中文 15 到 20 个字，英文 8 到 12 个词，口语自然。你的话会被立刻语音播报，用来盖住正式回答的准备时间——太短会留下尴尬的沉默。
+3. 绝不回答问题或提供实质内容——正式回答稍后由主回答给出。
+4. 回声孩子话里的关键词，让 TA 觉得被听见；措辞要多样，绝不连续两次用同样的开头。
+5. 不要以孩子的名字开头——正式回答里会自然称呼 TA，你这句不需要。
+6. 不要出现你自己的名字，也不要以人设名标签开头（如「小象 Elly：…」）——用你自己的口吻说话，不要像旁白报幕。
+7. 不要列表、不要 emoji、不要提问。
+8. 以延续的语气收尾（如「呀」「呢」「……」），让正式回答自然接棒——绝不听起来像一句说完的封闭结论。
+9. 绝不宣告、预告、承诺或开始任何实质内容——不要故事开场（如「很久很久以前」），不要「我们来听听吧/我们开始吧」，不要声称某个故事或模式即将开始。你只负责承接与回声。
+10. 绝不确认或复述孩子说的事实（谁住在哪里、什么东西存在、某件事是真是假）——判断事实是主回答的工作。只承接话题和感受。也不回答任何问题，包括关于你自己的问题（你的名字、你的喜好）——关于你的问题同样由主回答来答。
+11. 只回声孩子说过的话：禁止比喻、诗意延展或添加孩子没说的新意象（如「像小星星在心里闪闪发亮」）——你多加的每一个意象，主回答都可能不得不重复一遍。
 
-Examples:
-Child: 我喜欢上海的天气 → 原来你喜欢上海的天气呀
-Child: Why is the sky blue? → That is such a fun question!
-Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
-Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
+示例：
+孩子：我喜欢上海的天气 → 原来你喜欢上海的天气呀，快多跟我说说呢……
+孩子：Why is the sky blue? → Wow, that is such a fun question to think about!
+孩子：我昨天去公园玩了 → 去公园玩啦，听起来就让人觉得好开心呀……
+孩子：I can draw a cat → Wow, drawing a cat sounds lovely, tell me more about it!`;
 
     const contextSection = this.buildFillerContextSection(turnContext);
 
     const bannedSection =
       recentFillers && recentFillers.length > 0
-        ? `\n\nRecently used openers (do NOT reuse or closely imitate any of them):\n${recentFillers
-            .map((filler) => `- "${filler}"`)
+        ? `\n\n最近用过的承接语（不要复用或近似模仿其中任何一句）：\n${recentFillers
+            .map((filler) => `- 「${filler}」`)
             .join("\n")}`
         : "";
 
@@ -544,18 +549,19 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
     if (turnContext?.persona) {
       // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
       parts.push(
-        `Your identity: ${turnContext.persona} Never invent a different name or identity for yourself.`,
+        `你的身份：${turnContext.persona} 绝不给自己编造别的名字或身份。`,
       );
     }
     if (turnContext?.childBrief) {
-      // 与主模型共享同一份孩子档案摘要，称呼保持一致（大小模型不像两个人）
+      // 与主模型共享同一份孩子档案摘要，称呼保持一致（大小模型不像两个人）。
+      // 但本句不要用名字称呼（实机事故：每句 filler 都以孩子名开头）
       parts.push(
-        `The child you are talking to: ${turnContext.childBrief}. You may address them by name naturally, but never invent facts beyond this.`,
+        `你正在和这个孩子说话：${turnContext.childBrief}。你知道 TA 的名字，但这句话里不要用名字称呼 TA，也不要编造此处之外的事实。`,
       );
     }
     if (turnContext?.adventureDeclined) {
       parts.push(
-        `Context for this turn (never mention it explicitly): the child asked for the daily adventure, but today's adventure is ALREADY FINISHED — the main reply will gently say so and suggest another topic. Do NOT announce, promise, or preview the adventure; give only a neutral warm acknowledgment.`,
+        `本轮背景（绝不明说）：孩子想玩每日冒险，但今天的冒险已经结束——主回答会温柔说明并提议别的话题。不要宣告、承诺或预告冒险，只给中性温暖的承接。`,
       );
     } else if (
       turnContext?.intent &&
@@ -568,10 +574,31 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
       ].includes(turnContext.intent)
     ) {
       parts.push(
-        `Context for this turn (never mention it explicitly): the main reply WILL tell a story. A short warm lead-in like "好呀，故事时间到啦" is fine, but never start or preview the story content yourself.`,
+        `本轮背景（绝不明说）：主回答会讲一个故事。一句温暖的引导语没问题（如「好呀，故事时间到啦，把耳朵竖起来咯……」），但绝不自己开始或预告故事内容。`,
       );
     }
     return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
+  }
+
+  /**
+   * 串行链路 handoff（方案 B）：filler 原文已在主模型生成前播报完毕，
+   * 产出独立 system 消息，由调用方 splice 到本轮 user 消息前注入——
+   * 离生成点最近，recency 最强（实机事故：埋在长 system prompt 中段的
+   * 一句英文禁令压不住人设段/档案段对「语气词+孩子名开场」的诱导，
+   * 主回答屡屡以「呀，贝果……」再承接开场）。
+   * 注入前清洗：去换行/多余空白、截断 100 字，防小模型产出污染指令位。
+   */
+  buildFillerHandoffMessage(fillerText: string): LlmMessage {
+    const sanitized = fillerText.replace(/\s+/g, " ").trim().slice(0, 100);
+    return {
+      role: "system",
+      content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。请从它自然接续：
+1. 直接从实质内容起句——第一句话就必须回应孩子说的事本身。
+2. 不要以「呀」「嗯」「哦」等语气词加再承接开场，也不要以孩子的名字开头。
+3. 不要重复或换写承接语已经表达过的意象、情绪或内容。
+好例（承接语是「去公园玩啦，听起来就让人觉得好开心呀……」）：「公园里最好玩的是什么呀？滑梯还是秋千？」
+坏例：「呀，去公园玩听起来好开心呢」——语气词开场加复述承接语，全踩。`,
+    };
   }
 
   /**
@@ -626,7 +653,9 @@ ${params.segmentText}
    * @param asrText 当前用户输入
    * @param history 同设备同模式的最近对话历史
    * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板、
-   * 设备角色（characterKey → 人设段落，让模型始终以该角色自居）
+   * 设备角色（characterKey → 人设段落，让模型始终以该角色自居）。
+   * filler 衔接（handoff）不在此处：由 buildFillerHandoffMessage 产出
+   * 独立 system 消息，调用方贴到本轮 user 消息前注入（方案 B）。
    */
   buildEnglishTutorPrompt(
     asrText: string,
@@ -642,12 +671,6 @@ ${params.segmentText}
       mode?: string;
       conversationModeKey?: string;
       characterKey?: string;
-      /**
-       * 本轮已播报的 filler 原文（串行链路：filler 先于主模型生成）。
-       * 有值时注入 handoff 行，主模型从内容开始、不重复承接；
-       * 无值（filler 关闭/失败/超时）时什么都不加——没播的东西不需要禁令。
-       */
-      fillerHeard?: string;
     },
   ): LlmMessage[] {
     const childProfile = options?.childProfile;
@@ -721,18 +744,7 @@ Rules:
       ? `${promptTemplate}\n\n${rulesSection}`
       : rulesSection;
 
-    // 串行链路 handoff：filler 原文已在主模型生成前播报完毕，
-    // 主模型拿到具体事实（而非抽象禁令），直接从内容开始、不重复承接
-    const fillerHandoffSection = options?.fillerHeard
-      ? `The child has just heard this exact acknowledgment (already finished playing): "${options.fillerHeard}". Continue naturally from it — start directly with real content, and never repeat or paraphrase what was already said.`
-      : "";
-
-    const systemPrompt = [
-      personaSection,
-      childProfileSection,
-      templateSection,
-      fillerHandoffSection,
-    ]
+    const systemPrompt = [personaSection, childProfileSection, templateSection]
       .filter((section) => section.length > 0)
       .join("\n\n");
 
