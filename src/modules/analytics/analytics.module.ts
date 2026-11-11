@@ -30,6 +30,8 @@ import { MemoriesAnalyticsController } from "./memories-analytics.controller";
 import { MemoriesAnalyticsService } from "./memories-analytics.service";
 import { LlmAnalyticsController } from "./llm-analytics.controller";
 import { LlmAnalyticsService } from "./llm-analytics.service";
+import { ParentReportsAnalyticsController } from "./parent-reports-analytics.controller";
+import { ParentReportsAnalyticsService } from "./parent-reports-analytics.service";
 import { DevicesAdminController } from "./devices-admin.controller";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 
@@ -48,6 +50,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     MessagesAnalyticsController,
     MemoriesAnalyticsController,
     LlmAnalyticsController,
+    ParentReportsAnalyticsController,
   ],
   providers: [
     {
@@ -76,6 +79,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     MessagesAnalyticsService,
     MemoriesAnalyticsService,
     LlmAnalyticsService,
+    ParentReportsAnalyticsService,
   ],
 })
 export class AnalyticsModule {}

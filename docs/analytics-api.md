@@ -125,6 +125,35 @@ GET /analytics/quality/conversation?startDate=&endDate=&granularity=day
    // totalTurns=role=user 消息数；failedTurns=assistant status=failed；安全拦截=rawPayload 含 safetyCategory
 ```
 
+## 反馈与日报（用户详情页）
+
+```
+GET /analytics/feedback/parent-reports?startDate=&endDate=&isUseful=&deviceId=&page=&pageSize=
+→ { total, page, pageSize,
+    summary: { usefulCount, notUsefulCount, usefulRate },
+    items: [{ id, reportDate, isUseful, feedbackAt, user: { nickname, phone } | null,
+              device: { deviceId, deviceCode, characterKey },
+              report: { reportDate, generationStatus, expressionObservation,
+                        emotionObservation, thinkingObservation, suggestion, generatedAt } }] }
+   // 日期区间按 reportDate；summary 为区间内整体有用率，不受 isUseful 过滤影响；
+   // report 为该反馈对应的日报内容（同设备同 reportDate）；deviceId 为业务设备 ID，
+   // 查不到设备返回空页（summary 清零）
+
+GET /analytics/feedback/user-feedbacks?startDate=&endDate=&hasContact=&deviceId=&page=&pageSize=
+→ { total, page, pageSize,
+    items: [{ id, content, contact, createdAt, user: { nickname, phone } | null }] }
+   // 日期区间按 createdAt；deviceId 经 UserDeviceBinding 反查该设备全部绑定账号的反馈；
+   // 设备不存在或无绑定用户返回空页
+
+GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
+→ { total, page, pageSize,
+    device: { deviceId, deviceCode, characterKey },
+    items: [{ reportDate, generationStatus, expressionObservation, emotionObservation,
+              thinkingObservation, suggestion, generatorModel, generatedAt }] }
+   // 单设备日报列表，按 reportDate 倒序；generationStatus 非 completed 的行也返回
+   // （观察字段为空），便于排查生成失败；设备不存在 404
+```
+
 ## 模型监控（LLM）
 
 数据源 `llm_usage_logs`：`LlmService.complete()/completeStream()` 单点埋点（fire-and-forget，
