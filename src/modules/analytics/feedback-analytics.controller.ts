@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsInt,
   IsOptional,
+  IsString,
   Matches,
   Max,
   Min,
@@ -43,6 +44,12 @@ export class ParentReportFeedbacksQueryDto {
   @IsBoolean()
   isUseful?: boolean;
 
+  /** 业务设备 ID（Device.deviceId），非内部 UUID；查不到设备返回空页 */
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @IsString()
+  deviceId?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -73,6 +80,12 @@ export class UserFeedbacksQueryDto {
   @IsBoolean()
   hasContact?: boolean;
 
+  /** 业务设备 ID：经绑定关系反查该设备全部绑定账号的反馈 */
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @IsString()
+  deviceId?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -97,7 +110,7 @@ export class FeedbackAnalyticsController {
   @Get("parent-reports")
   @ApiOperation({
     summary:
-      "家长报告有用性反馈（日期区间按 reportDate；summary 为区间内整体有用率，不受 isUseful 过滤影响）",
+      "家长报告有用性反馈（日期区间按 reportDate；summary 为区间内整体有用率，不受 isUseful 过滤影响；deviceId 为业务设备 ID，单设备过滤；items 携带对应日报内容 report）",
   })
   listParentReportFeedbacks(@Query() query: ParentReportFeedbacksQueryDto) {
     return this.feedbackAnalytics.listParentReportFeedbacks(query);
@@ -106,7 +119,7 @@ export class FeedbackAnalyticsController {
   @Get("user-feedbacks")
   @ApiOperation({
     summary:
-      "用户反馈列表（日期区间按 createdAt；hasContact=true 仅看留联系方式；用户已注销时 user 为 null）",
+      "用户反馈列表（日期区间按 createdAt；hasContact=true 仅看留联系方式；用户已注销时 user 为 null；deviceId 为业务设备 ID，经绑定关系反查该设备全部绑定账号）",
   })
   listUserFeedbacks(@Query() query: UserFeedbacksQueryDto) {
     return this.feedbackAnalytics.listUserFeedbacks(query);

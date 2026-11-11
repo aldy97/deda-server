@@ -7,8 +7,22 @@ type Row = Record<string, any>;
 function buildPrisma(data: {
   parentReportFeedbacks?: Row[];
   feedbacks?: Row[];
+  device?: Row | null;
+  boundUserIds?: string[];
 }) {
   return {
+    device: {
+      findUnique: jest.fn((_args?: any) =>
+        Promise.resolve(data.device ?? null),
+      ),
+    },
+    userDeviceBinding: {
+      findMany: jest.fn((_args?: any) =>
+        Promise.resolve(
+          (data.boundUserIds ?? []).map((userId) => ({ userId })),
+        ),
+      ),
+    },
     parentReportFeedback: {
       count: jest.fn(
         (_args?: any) => (data.parentReportFeedbacks ?? []).length,
@@ -49,6 +63,13 @@ describe("FeedbackAnalyticsService", () => {
             updatedAt,
             user: { nickname: "熊妈", phone: "138****0000" },
             report: {
+              reportDate: "2026-10-31",
+              generationStatus: "completed",
+              expressionObservation: "主动用了三个新单词",
+              emotionObservation: null,
+              thinkingObservation: null,
+              suggestion: "多鼓励开口",
+              generatedAt: new Date("2026-11-01T00:30:00Z"),
               device: {
                 deviceId: "dev-1",
                 deviceCode: "DEDA-001",
@@ -78,6 +99,16 @@ describe("FeedbackAnalyticsService", () => {
           deviceId: "dev-1",
           deviceCode: "DEDA-001",
           characterKey: "elly",
+        },
+        // 反馈对应的日报内容（同 reportDate 同设备）
+        report: {
+          reportDate: "2026-10-31",
+          generationStatus: "completed",
+          expressionObservation: "主动用了三个新单词",
+          emotionObservation: null,
+          thinkingObservation: null,
+          suggestion: "多鼓励开口",
+          generatedAt: new Date("2026-11-01T00:30:00Z"),
         },
       });
       const findManyArgs = prisma.parentReportFeedback.findMany.mock
@@ -212,6 +243,92 @@ describe("FeedbackAnalyticsService", () => {
       const expectedEnd = new Date("2026-10-31T00:00:00");
       expectedEnd.setDate(expectedEnd.getDate() + 1);
       expect(countArgs.where.createdAt.lt).toEqual(expectedEnd);
+    });
+  });
+
+  describe("listParentReportFeedbacks deviceId 过滤", () => {
+    it("业务 deviceId resolve 成内部 UUID 后过滤（含 count 与 groupBy）", async () => {
+      const prisma = buildPrisma({
+        device: { id: "internal-uuid-1", deviceId: "dev-1" },
+      });
+      const service = await buildService(prisma);
+
+      await service.listParentReportFeedbacks({ deviceId: "dev-1" });
+
+      expect(prisma.device.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: "dev-1" },
+        select: { id: true },
+      });
+      const countArgs = prisma.parentReportFeedback.count.mock
+        .calls[0]?.[0] as any;
+      expect(countArgs.where.deviceId).toBe("internal-uuid-1");
+      const groupByArgs = prisma.parentReportFeedback.groupBy.mock
+        .calls[0]?.[0] as any;
+      expect(groupByArgs.where.deviceId).toBe("internal-uuid-1");
+    });
+
+    it("设备不存在 → 空页且 summary 清零，不查反馈表", async () => {
+      const prisma = buildPrisma({ device: null });
+      const service = await buildService(prisma);
+
+      const result = await service.listParentReportFeedbacks({
+        deviceId: "no-such-device",
+      });
+
+      expect(result.total).toBe(0);
+      expect(result.items).toEqual([]);
+      expect(result.summary).toEqual({
+        usefulCount: 0,
+        notUsefulCount: 0,
+        usefulRate: 0,
+      });
+      expect(prisma.parentReportFeedback.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("listUserFeedbacks deviceId 过滤", () => {
+    it("经绑定关系反查 userIds 过滤（该设备全部绑定账号的反馈）", async () => {
+      const prisma = buildPrisma({
+        device: { id: "internal-uuid-1", deviceId: "dev-1" },
+        boundUserIds: ["user-1", "user-2"],
+      });
+      const service = await buildService(prisma);
+
+      await service.listUserFeedbacks({ deviceId: "dev-1" });
+
+      expect(prisma.userDeviceBinding.findMany).toHaveBeenCalledWith({
+        where: { deviceId: "internal-uuid-1" },
+        select: { userId: true },
+      });
+      const countArgs = prisma.feedback.count.mock.calls[0]?.[0] as any;
+      expect(countArgs.where.userId).toEqual({ in: ["user-1", "user-2"] });
+    });
+
+    it("设备无绑定用户 → 空页，不查反馈表", async () => {
+      const prisma = buildPrisma({
+        device: { id: "internal-uuid-1", deviceId: "dev-1" },
+        boundUserIds: [],
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.listUserFeedbacks({ deviceId: "dev-1" });
+
+      expect(result.total).toBe(0);
+      expect(result.items).toEqual([]);
+      expect(prisma.feedback.findMany).not.toHaveBeenCalled();
+    });
+
+    it("设备不存在 → 空页，不查反馈表", async () => {
+      const prisma = buildPrisma({ device: null });
+      const service = await buildService(prisma);
+
+      const result = await service.listUserFeedbacks({
+        deviceId: "no-such-device",
+      });
+
+      expect(result.total).toBe(0);
+      expect(result.items).toEqual([]);
+      expect(prisma.feedback.findMany).not.toHaveBeenCalled();
     });
   });
 });
