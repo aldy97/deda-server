@@ -55,6 +55,7 @@ describe("DevicesController", () => {
         success: true,
         deviceId: "dev-001",
         alreadyBound: false,
+        hasChildProfile: false,
       };
       service.bind.mockResolvedValue(expected);
 

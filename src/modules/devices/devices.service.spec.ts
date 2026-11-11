@@ -32,6 +32,9 @@ describe("DevicesService", () => {
               findMany: jest.fn(),
               create: jest.fn(),
             },
+            childProfile: {
+              findUnique: jest.fn(),
+            },
             userDeviceBinding: {
               findUnique: jest.fn(),
               findMany: jest.fn(),
@@ -165,6 +168,7 @@ describe("DevicesService", () => {
         id: "device-uuid-001",
         deviceId: "dev-001",
       });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.create.mockResolvedValue({ id: "binding-001" });
 
@@ -185,10 +189,15 @@ describe("DevicesService", () => {
           sortOrder: 0,
         },
       });
+      expect(prisma.childProfile.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+        select: { id: true },
+      });
       expect(result).toEqual({
         success: true,
         deviceId: "dev-001",
         alreadyBound: false,
+        hasChildProfile: false,
       });
     });
 
@@ -201,6 +210,7 @@ describe("DevicesService", () => {
         id: "device-uuid-002",
         deviceId: "dev-002",
       });
+      prisma.childProfile.findUnique.mockResolvedValue({ id: "profile-002" });
       prisma.userDeviceBinding.findUnique.mockResolvedValue({
         id: "binding-002",
       });
@@ -213,6 +223,32 @@ describe("DevicesService", () => {
         success: true,
         deviceId: "dev-002",
         alreadyBound: true,
+        hasChildProfile: true,
+      });
+    });
+
+    it("should report hasChildProfile=false when rebinding a device whose profile was never filled", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-004",
+      };
+
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-004",
+        deviceId: "dev-004",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.userDeviceBinding.findUnique.mockResolvedValue({
+        id: "binding-004",
+      });
+
+      const result = await service.bind("user-001", dto);
+
+      expect(prisma.userDeviceBinding.create).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-004",
+        alreadyBound: true,
+        hasChildProfile: false,
       });
     });
 
@@ -226,6 +262,7 @@ describe("DevicesService", () => {
         deviceId: "dev-003",
         deviceCode: "CODE123",
       });
+      prisma.childProfile.findUnique.mockResolvedValue({ id: "profile-003" });
       prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.create.mockResolvedValue({ id: "binding-003" });
 
@@ -238,6 +275,7 @@ describe("DevicesService", () => {
         success: true,
         deviceId: "dev-003",
         alreadyBound: false,
+        hasChildProfile: true,
       });
     });
 

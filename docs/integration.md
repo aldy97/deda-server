@@ -64,6 +64,8 @@
   → 小程序轮询 GET /devices/provision-candidates
     （窗口内未绑定当前用户的设备；恰 1 台自动绑，多台用户选）
   → POST /devices/bind {deviceId: mac} 完成绑定
+    （响应含 hasChildProfile：设备当前是否已有孩子档案，与是否本人绑过无关；
+      为 false 时小程序直接 redirectTo 孩子信息填写页 owner-info?from=bind）
   → 设备每轮对话前后调 POST /client/bot/bot/start|stop 登记实例
 ```
 
