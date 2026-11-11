@@ -117,7 +117,8 @@
   "data": {
     "battery": 80,
     "volume": 50,
-    "version": "1.2.3"
+    "version": "1.2.3",
+    "charging": false
   }
 }
 ```
@@ -127,6 +128,7 @@
 | battery | int | 0-100 | 电量百分比 |
 | volume | int | 0-100 | 音量百分比 |
 | version | string | - | 固件版本号，格式 x.y.z |
+| charging | bool | true/false | 是否正在充电。**2026-11-11 约定增补**：机芯厂待实现；未上报时服务端按 `null` 处理，不影响既有链路 |
 
 **服务端行为**: 更新设备电量、音量、版本信息，推送状态到App端，如有新固件则自动下发升级指令。
 

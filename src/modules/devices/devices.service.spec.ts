@@ -486,6 +486,7 @@ describe("DevicesService", () => {
         battery: 80,
         volume: 50,
         version: "1.2.3",
+        charging: true,
         lastSeenAt,
         online: true,
       });
@@ -497,7 +498,7 @@ describe("DevicesService", () => {
         deviceId: "dev-001",
         status: "online",
         battery: 80,
-        isCharging: null,
+        isCharging: true,
         lastActiveAt: new Date(lastSeenAt).toISOString(),
       });
     });
@@ -528,6 +529,7 @@ describe("DevicesService", () => {
         battery: null,
         volume: null,
         version: null,
+        charging: null,
         lastSeenAt: null,
         online: false,
       });

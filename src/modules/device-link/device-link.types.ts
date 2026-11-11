@@ -42,11 +42,13 @@ export interface DeviceLinkMessage<T = unknown> {
   data?: T | null;
 }
 
-/** query 上报数据：电量 / 音量 / 固件版本 */
+/** query 上报数据：电量 / 音量 / 固件版本 / 充电状态 */
 export interface DeviceQueryData {
   battery?: number;
   volume?: number;
   version?: string;
+  /** 充电状态（2026-11-11 与机芯厂约定增补，固件待实现；未上报视为未知） */
+  charging?: boolean;
 }
 
 /** volume 指令/回执数据 */
@@ -60,6 +62,7 @@ export interface DeviceLinkStatus {
   battery: number | null;
   volume: number | null;
   version: string | null;
+  charging: boolean | null;
   /** 最后一次收到该设备任意上报的时间（Unix 毫秒） */
   lastSeenAt: number | null;
 }

@@ -82,6 +82,7 @@ export class DeviceLinkService implements OnModuleInit {
       battery: null,
       volume: null,
       version: null,
+      charging: null,
       lastSeenAt: null,
     };
 
@@ -224,6 +225,8 @@ export class DeviceLinkService implements OnModuleInit {
         typeof data.version === "string" && data.version.length > 0
           ? data.version
           : current.version,
+      charging:
+        typeof data.charging === "boolean" ? data.charging : current.charging,
       lastSeenAt: Date.now(),
     };
 

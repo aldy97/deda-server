@@ -147,6 +147,50 @@ describe("DeviceLinkService", () => {
       });
     });
 
+    it("should merge charging flag from query report (protocol extension)", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 80, charging: true },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.charging).toBe(true);
+      expect(cached.battery).toBe(80);
+    });
+
+    it("should keep cached charging when query report omits it", async () => {
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 66,
+          volume: 40,
+          version: "1.2.3",
+          charging: false,
+          lastSeenAt: Date.now(),
+        }),
+      );
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 70 },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.charging).toBe(false);
+      expect(cached.battery).toBe(70);
+    });
+
     it("should keep cached battery when volume reply only carries volume", async () => {
       redisService.getValue.mockResolvedValue(
         JSON.stringify({
@@ -275,6 +319,7 @@ describe("DeviceLinkService", () => {
         battery: null,
         volume: null,
         version: null,
+        charging: null,
         lastSeenAt: null,
         online: false,
       });

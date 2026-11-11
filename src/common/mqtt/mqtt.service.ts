@@ -42,10 +42,14 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
    * @param url broker 地址，例如 mqtt://localhost:1883
    */
   connect(url: string): void {
+    // broker 开启认证时（公网环境必须）从 env 读取账密；缺省匿名连接
+    const username = this.config.get<string>("MQTT_USERNAME");
+    const password = this.config.get<string>("MQTT_PASSWORD");
     this.client = mqtt.connect(url, {
       reconnectPeriod: 5000,
       connectTimeout: 30 * 1000,
       clean: true,
+      ...(username ? { username, password } : {}),
     });
 
     this.client.on("connect", () => {
