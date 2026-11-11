@@ -69,3 +69,43 @@ export async function markPreviousReplyInterrupted(
   });
   return last.id;
 }
+
+/** 落库时判定入参：兼容 PrismaService 与测试 mock */
+export interface NewerTurnQueryPrisma {
+  message: {
+    findFirst(args: {
+      where: { deviceId: string; role: string; spokeAt: { gt: Date } };
+      select: { id: true };
+    }): Promise<{ id: string } | null>;
+  };
+}
+
+/**
+ * 落库时打断判定（方案 A 补覆盖）：assistant 回复生成完毕准备落库时，
+ * 若该设备已存在更新的 user 消息（本轮 LLM 生成期间孩子又开口），
+ * 说明回复未及完整播报即被打断，调用方应落库为 interrupted 而非 completed。
+ *
+ * 与 markPreviousReplyInterrupted 互补，两者共同覆盖完整时间线：
+ * - 本函数覆盖「LLM 生成期间被打断」：新一轮到达时 assistant 行尚不存在，
+ *   markPreviousReplyInterrupted 查不到它，标记落空；
+ * - markPreviousReplyInterrupted 覆盖「已落库 completed、TTS 播放中被打断」。
+ *
+ * 单调收敛约定：所有路径只把 status 推向 interrupted / failed，
+ * 任何路径都不会把 interrupted 改回 completed。
+ */
+export async function wasSupersededByNewerTurn(
+  prisma: NewerTurnQueryPrisma,
+  deviceInternalId: string,
+  turnUserSpokeAt: Date,
+): Promise<boolean> {
+  const newer = await prisma.message.findFirst({
+    where: {
+      deviceId: deviceInternalId,
+      role: "user",
+      // 严格大于：排除本轮自身（同刻时钟下自身 spokeAt 不命中 gt）
+      spokeAt: { gt: turnUserSpokeAt },
+    },
+    select: { id: true },
+  });
+  return newer !== null;
+}

@@ -219,10 +219,19 @@ GET /analytics/messages/:id
 ```
 
 打断判定（`interrupted`）为**服务端推断口径**（`common/interruption/interruption.util.ts`，
-非设备真实事件）：新一轮对话开始时，若该设备上一轮 assistant 回复的估算播放窗口
-（content 字数 × 120ms，封顶 60s）尚未结束，则把上一轮标记为 interrupted。
-vendor（/vendor/text）与 llm-adapter（百度 RTC 直连）两条链路入口均已接入，
-fire-and-forget 不阻塞首音；孩子话密/家长插话都会计入，dashboard 展示须标注「疑似」。
+非设备真实事件），由两个互补机制覆盖完整时间线：
+
+1. **新轮开始标记**（`markPreviousReplyInterrupted`）：新一轮对话开始时，若该设备
+   上一轮 assistant 回复的估算播放窗口（content 字数 × 120ms，封顶 60s）尚未结束，
+   则把上一轮标记为 interrupted——覆盖「已落库 completed、TTS 播放中被打断」。
+2. **落库时判定**（`wasSupersededByNewerTurn`）：assistant 回复在 LLM 完整生成后才
+   落库；落库前若该设备已存在更新的 user 消息（本轮生成期间孩子又开口），说明回复
+   未及完整播报即被打断，直接落库 interrupted——覆盖「LLM 生成期间被打断」。
+   LLM 失败时 failed 优先于 interrupted；判定查询失败降级 completed，不阻塞落库。
+
+vendor（/vendor/text）与 llm-adapter（百度 RTC 直连）两条链路均已接入；
+新轮开始标记为 fire-and-forget 不阻塞首音。状态单调收敛：任何路径都不会把
+interrupted 改回 completed。孩子话密/家长插话都会计入，dashboard 展示须标注「疑似」。
 
 ## 设备运维（admin 手动操作）
 

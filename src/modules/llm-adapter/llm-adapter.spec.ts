@@ -820,6 +820,87 @@ describe("LlmAdapterModule", () => {
     });
   });
 
+  describe("interrupted 落库（方案 A 落库时判定）", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "你好" }],
+    };
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+    const assistantCreate = () =>
+      prisma.message.create.mock.calls.find(
+        (call) => (call[0] as any).data.role === "assistant",
+      )![0] as any;
+    /** findFirst 双用途区分：assistant=上一轮在播回复；user+spokeAt.gt=落库时打断判定 */
+    const mockSuperseded = (superseded: boolean) =>
+      prisma.message.findFirst.mockImplementation((args: any) => {
+        if (args.where.role === "user" && args.where.spokeAt?.gt) {
+          return Promise.resolve(superseded ? { id: "newer-user-msg" } : null);
+        }
+        return Promise.resolve(null);
+      });
+
+    it("本轮 LLM 生成期间孩子又开口 → assistant 落库 interrupted", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      mockSuperseded(true);
+      llm.completeStream.mockReturnValue(makeStream(["你好呀"])());
+
+      await collect(service.streamReply(boundRequest));
+
+      expect(assistantCreate().data.status).toBe("interrupted");
+    });
+
+    it("无更新 user 消息 → completed（回归）", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      mockSuperseded(false);
+      llm.completeStream.mockReturnValue(makeStream(["你好呀"])());
+
+      await collect(service.streamReply(boundRequest));
+
+      expect(assistantCreate().data.status).toBe("completed");
+    });
+
+    it("LLM 失败且生成期间被打断 → failed 优先于 interrupted", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      mockSuperseded(true);
+      llm.completeStream.mockReturnValue(
+        (async function* () {
+          throw new LlmUpstreamError(
+            "upstream_error",
+            "HTTP 400: bad request",
+            false,
+          );
+        })(),
+      );
+
+      await collect(service.streamReply(boundRequest));
+
+      expect(assistantCreate().data.status).toBe("failed");
+    });
+
+    it("落库时打断判定查询失败 → 降级 completed，不影响回复流", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.message.findFirst.mockImplementation((args: any) => {
+        if (args.where.role === "user" && args.where.spokeAt?.gt) {
+          return Promise.reject(new Error("db down"));
+        }
+        return Promise.resolve(null);
+      });
+      llm.completeStream.mockReturnValue(makeStream(["你好呀"])());
+
+      const chunks = await collect(service.streamReply(boundRequest));
+
+      expect(chunks).toEqual(["你好呀"]);
+      expect(assistantCreate().data.status).toBe("completed");
+    });
+  });
+
   describe("parseChatCompletionRequest", () => {
     it("accepts a minimal valid request", () => {
       const result = parseChatCompletionRequest({

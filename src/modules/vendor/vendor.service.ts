@@ -21,7 +21,10 @@ import {
   ConversationIntent,
   ConversationSessionService,
 } from "./conversation-session.service";
-import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
+import {
+  markPreviousReplyInterrupted,
+  wasSupersededByNewerTurn,
+} from "@/common/interruption/interruption.util";
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
@@ -486,14 +489,31 @@ export class VendorService {
       `handleTextIn deviceId=${dto.deviceId}, asrText=${dto.asrText}, mode=${mode}`,
     );
 
-    // 补写 assistant 消息；LLM 失败时标 failed,与真实回答可区分
+    // 落库时打断判定（与 markPreviousReplyInterrupted 互补）：本轮 LLM
+    // 生成期间孩子又开口（已存在更新的 user 消息）→ 回复未及完整播报，
+    // 落库 interrupted。判定失败降级 completed，不阻塞回复落库。
+    let superseded = false;
+    try {
+      superseded = await wasSupersededByNewerTurn(
+        this.prisma,
+        device.id,
+        sourceOccurredAt,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Superseded check failed for deviceId=${dto.deviceId}: ${message}`,
+      );
+    }
+
+    // 补写 assistant 消息；LLM 失败时标 failed（优先于 interrupted）,与真实回答可区分
     await this.prisma.message.create({
       data: {
         deviceId: device.id,
         turnId,
         role: "assistant",
         content: reply.responseText,
-        status: llmFailed ? "failed" : "completed",
+        status: llmFailed ? "failed" : superseded ? "interrupted" : "completed",
         mode,
         conversationModeKey: activeConfig?.conversationModeKey ?? null,
         // 边界标注（方案 3）：content 保持播报全文纯净，

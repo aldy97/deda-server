@@ -206,11 +206,17 @@ describe("VendorService", () => {
         deviceId: "dev-001",
       } as any);
       // 上一轮 assistant 回复 100 字、2 秒前发出 → 仍在估算播放窗口内
-      prisma.message.findFirst.mockResolvedValue({
-        id: "prev-assistant",
-        content: "啊".repeat(100),
-        spokeAt: new Date(Date.now() - 2000),
-      } as any);
+      // （findFirst 双用途区分：仅 assistant 查询命中上一轮回复；
+      // user 落库时判定返回 null = 本轮生成期间孩子未再开口）
+      prisma.message.findFirst.mockImplementation((args: any) =>
+        args.where.role === "assistant"
+          ? Promise.resolve({
+              id: "prev-assistant",
+              content: "啊".repeat(100),
+              spokeAt: new Date(Date.now() - 2000),
+            })
+          : Promise.resolve(null),
+      );
       prisma.deviceConfig.findFirst.mockResolvedValue(null);
       prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
@@ -261,6 +267,105 @@ describe("VendorService", () => {
       const result = await service.handleTextIn(dto);
 
       expect(result.responseText).toContain("你好呀");
+    });
+
+    it("本轮 LLM 生成期间孩子又开口（落库时判定）→ assistant 落库 interrupted", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      // findFirst 双用途区分：assistant=上一轮在播回复（无）；
+      // user+spokeAt.gt=落库时打断判定（存在更新的 user 消息 → 被打断）
+      prisma.message.findFirst.mockImplementation((args: any) => {
+        if (args.where.role === "user" && args.where.spokeAt?.gt) {
+          return Promise.resolve({ id: "newer-user-msg" });
+        }
+        return Promise.resolve(null);
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      await service.handleTextIn(dto);
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call: any) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.status).toBe("interrupted");
+    });
+
+    it("LLM 失败且生成期间被打断 → failed 优先于 interrupted", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-003",
+        asrText: "Hello",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-003",
+        deviceId: "dev-003",
+      } as any);
+      prisma.message.findFirst.mockImplementation((args: any) => {
+        if (args.where.role === "user" && args.where.spokeAt?.gt) {
+          return Promise.resolve({ id: "newer-user-msg" });
+        }
+        return Promise.resolve(null);
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-003" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "Hello" },
+      ] as any);
+      mockAnswerFailure(new Error("LLM timeout"));
+
+      await service.handleTextIn(dto);
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call: any) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.status).toBe("failed");
+    });
+
+    it("落库时打断判定查询失败 → 降级 completed，不阻塞回复", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      prisma.message.findFirst.mockImplementation((args: any) => {
+        if (args.where.role === "user" && args.where.spokeAt?.gt) {
+          return Promise.reject(new Error("db down"));
+        }
+        return Promise.resolve(null);
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("你好呀");
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call: any) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.status).toBe("completed");
     });
 
     it("should call LLM, ensure device exists, and persist conversation", async () => {
