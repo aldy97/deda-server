@@ -209,13 +209,33 @@ describe("MqttService", () => {
 
   describe("onModuleInit", () => {
     it("should connect when MQTT_URL is configured", () => {
-      (config.get as jest.Mock).mockReturnValue("mqtt://localhost:1883");
+      (config.get as jest.Mock).mockImplementation((key: string) =>
+        key === "MQTT_URL" ? "mqtt://localhost:1883" : undefined,
+      );
       service.onModuleInit();
 
       expect(mqtt.connect).toHaveBeenCalledWith("mqtt://localhost:1883", {
         reconnectPeriod: 5000,
         connectTimeout: 30000,
         clean: true,
+      });
+    });
+
+    it("should pass username/password when MQTT credentials are configured", () => {
+      (config.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === "MQTT_URL") return "mqtt://localhost:1883";
+        if (key === "MQTT_USERNAME") return "deda";
+        if (key === "MQTT_PASSWORD") return "secret";
+        return undefined;
+      });
+      service.onModuleInit();
+
+      expect(mqtt.connect).toHaveBeenCalledWith("mqtt://localhost:1883", {
+        reconnectPeriod: 5000,
+        connectTimeout: 30000,
+        clean: true,
+        username: "deda",
+        password: "secret",
       });
     });
 
