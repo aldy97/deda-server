@@ -218,6 +218,7 @@ Content-Type: application/json
 | `success` | boolean | 是否成功 |
 | `deviceId` | string | 设备业务 ID |
 | `alreadyBound` | boolean | `true` 表示当前用户此前已绑定 |
+| `hasChildProfile` | boolean | 该设备当前是否已存在孩子档案（填过任意字段即为 `true`）；与是否本人绑过无关。为 `false` 时前端应在绑定成功后自动引导填写孩子信息 |
 
 ### 3.2 查询当前用户设备列表
 

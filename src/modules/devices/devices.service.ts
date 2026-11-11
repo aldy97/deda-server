@@ -113,6 +113,15 @@ export class DevicesService {
         throw new Error("deviceId or deviceCode is required");
       }
 
+      // hasChildProfile 只表达「该设备当前是否存在孩子档案」（填过任意字段即存在），
+      // 与当前用户是否绑过无关：绑过但没填档案重绑时仍为 false，
+      // 前端据此决定绑定成功后是否自动引导填写孩子信息。
+      const childProfile = await tx.childProfile.findUnique({
+        where: { deviceId: device.id },
+        select: { id: true },
+      });
+      const hasChildProfile = !!childProfile;
+
       const existing = await tx.userDeviceBinding.findUnique({
         where: {
           userId_deviceId: {
@@ -123,7 +132,12 @@ export class DevicesService {
       });
 
       if (existing) {
-        return { success: true, deviceId: device.deviceId, alreadyBound: true };
+        return {
+          success: true,
+          deviceId: device.deviceId,
+          alreadyBound: true,
+          hasChildProfile,
+        };
       }
 
       const lastBinding = await tx.userDeviceBinding.aggregate({
@@ -139,7 +153,12 @@ export class DevicesService {
         },
       });
 
-      return { success: true, deviceId: device.deviceId, alreadyBound: false };
+      return {
+        success: true,
+        deviceId: device.deviceId,
+        alreadyBound: false,
+        hasChildProfile,
+      };
     }, BINDING_TRANSACTION_OPTIONS);
   }
 
