@@ -46,4 +46,5 @@ EXPOSE 3000
 # 启动前执行 Prisma migrate deploy，再启动服务
 # schema 必须显式指定（仓库内位于 src/prisma，非默认 prisma/ 目录）
 # 注意：无 tsconfig.build.json，nest build 保留目录结构，入口为 dist/src/main
-CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/prisma/schema.prisma && node dist/src/main"]
+# ARMS 应用监控：配置了 ARMS_LICENSE_KEY 才预加载探针（零源码侵入），否则原样启动
+CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/prisma/schema.prisma && if [ -n \"$ARMS_LICENSE_KEY\" ]; then node -r @loongsuite/cms_node_sdk/register dist/src/main; else node dist/src/main; fi"]

@@ -37,6 +37,10 @@ services:
       # Analytics Dashboard 管理员鉴权
       ANALYTICS_JWT_SECRET: ${ANALYTICS_JWT_SECRET:-}
       ANALYTICS_ADMIN_USERS: ${ANALYTICS_ADMIN_USERS:-[]}
+      # ARMS 应用监控（可选；不配 LicenseKey 则探针不加载，服务原样启动）
+      ARMS_APP_NAME: ${ARMS_APP_NAME:-}
+      ARMS_REGION_ID: ${ARMS_REGION_ID:-}
+      ARMS_LICENSE_KEY: ${ARMS_LICENSE_KEY:-}
       # 机芯厂
       MANUFACTURER_BASE_URL: ${MANUFACTURER_BASE_URL}
       MANUFACTURER_API_KEY: ${MANUFACTURER_API_KEY:-}

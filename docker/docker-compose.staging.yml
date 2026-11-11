@@ -27,8 +27,9 @@ services:
     deploy:
       resources:
         limits:
+          # ARMS 探针额外占 100-200M，随探针接入上调
           cpus: '0.75'
-          memory: 768M
+          memory: 1G
 
   postgres:
     container_name: deda-postgres-staging
