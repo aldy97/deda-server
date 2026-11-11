@@ -9,6 +9,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { VendorGateway } from "@/modules/vendor/vendor.gateway";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
+import { PushSenderService } from "@/modules/push-notifications/push-sender.service";
 import { SleepConfig } from "@prisma/client";
 
 const SCAN_INTERVAL_MS = 60 * 1000;
@@ -56,6 +57,7 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly vendorGateway: VendorGateway,
     private readonly conversationSessionService: ConversationSessionService,
+    private readonly pushSender: PushSenderService,
   ) {}
 
   onModuleInit() {
@@ -97,6 +99,21 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
         data: { lastTriggeredDate: dateKey },
       });
       if (claimed.count !== 1) continue;
+
+      // 服务通知与设备在线状态解耦：离线也推（WS 下行失败时家长的兜底提醒）
+      try {
+        await this.pushSender.sendSleepReminder({
+          deviceInternalId: config.device.id,
+          deviceId: config.device.deviceId,
+          sleepTime: config.sleepTime,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Sleep push failed for ${config.device.deviceId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
 
       try {
         await this.deliverSleepEntry(config);

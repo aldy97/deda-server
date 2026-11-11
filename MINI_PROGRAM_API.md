@@ -98,6 +98,7 @@ Content-Type: application/json
 | 学习统计 | 10 | 仪表盘、趋势、主题、时间线、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 | 哄睡配置 | 2 | 查询、部分更新 |
+| 推送订阅 | 1 | 上报订阅消息授权结果 |
 
 ---
 
@@ -1112,7 +1113,52 @@ Query：
 
 ---
 
-## 11. 小程序接入注意事项
+## 11. 推送订阅
+
+哄睡服务通知走微信「一次性订阅消息」：小程序端在用户手势上调用 `wx.requestSubscribeMessage`，随后把授权结果上报到本接口；后端按「用户 + 模板」维度累计可推送额度，哄睡时间到点时向设备当前所有绑定家长各消耗 1 点额度推送一次。
+
+约定：
+
+- 额度按「用户 + 模板」维度累计，与设备无关；解绑/wipe 后发送时按当前绑定关系取人，关系不存在即不再推送。
+- 同一模板多次 accept 额度累加，单次上报最多 +30；reject 会清零该模板的剩余额度。
+- 后端未配置模板白名单（`WECHAT_TMPL_SLEEP_REMINDER`）时本接口一律 400。
+
+### 11.1 上报订阅消息授权结果
+
+- Method：`POST`
+- Path：`/push-subscriptions`
+- 鉴权：Bearer Token
+- Content-Type：`application/json`
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| templateId | string | 是 | 微信订阅消息模板 ID（须在后端白名单内） |
+| result | string | 是 | 授权结果：`accept` / `reject` |
+| count | number | 否 | 本次新增额度（仅 accept 有效），默认 1，上限 30 |
+
+响应数据：
+
+```json
+{
+  "templateId": "tmpl-sleep-reminder",
+  "quota": 5,
+  "status": "active"
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| templateId | string | 模板 ID |
+| quota | number | 累计后的剩余推送额度 |
+| status | string | `active` / `rejected` / `exhausted` |
+
+异常：`templateId` 不在白名单返回 400。
+
+---
+
+## 12. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。
