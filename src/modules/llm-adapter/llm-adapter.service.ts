@@ -76,7 +76,7 @@ const STORY_INTENTS: ConversationIntent[] = [
  * → L1 安全闸 → 冒险等待态接管 → L2 分类 + 意图路由并行
  * → sleep_config 确定性短链路 → 冒险每日门禁/开集
  * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
- * → filler（小模型打哈哈）+ 主模型流（后台泵并发）→ assistant 落库。
+ * → 流式 filler（小模型打哈哈，头部校验后即播）→ 主模型流 → assistant 落库。
  *
  * 与老链路的原理性降级（已确认接受）：
  * - 冒险 10s 沉默超时推送：新链路无服务器推送通道，交互点无限期等孩子
@@ -413,15 +413,16 @@ export class LlmAdapterService {
     // 孩子档案：主模型 prompt 与 filler 情境共用，提前于串行 filler 取
     const childProfile = device ? await this.getChildProfile(device.id) : null;
 
-    // 串行 filler：小模型非流式先行生成一句承接（实测约 0.4s，被 filler
-    // 语音播报时长完全吸收），原文注入主模型 prompt，从结构上杜绝
+    // 流式 filler：小模型流式生成，头部缓冲校验通过立即外发（首音提前到
+    // TTFT，不再等整句生成完），原文注入主模型 handoff，从结构上杜绝
     // 「主模型重复 filler 已说的内容」。身份/偏好问句走确定性模板；
-    // 与近 5 轮重复时重试一次，仍重复回落模板池。失败/关闭静默无 filler。
+    // 头部违规（孩子名开头/人设名出现）重试一次，仍违规或失败回落模板池
+    // （不再静默无 filler——缺失轮完全没有防死空气缓冲）。
     const fillerEnabled =
       this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
     let fillerText = "";
     if (fillerEnabled) {
-      fillerText = await this.generateFiller({
+      for await (const chunk of this.streamFiller({
         asrText,
         recentFillers,
         intent,
@@ -429,7 +430,10 @@ export class LlmAdapterService {
         device,
         childProfile,
         turnId,
-      });
+      })) {
+        fillerText += chunk;
+        yield chunk;
+      }
     }
 
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
@@ -456,7 +460,6 @@ export class LlmAdapterService {
       mode,
       conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
       characterKey: device?.characterKey,
-      fillerHeard: fillerText || undefined,
     });
     const messages: LlmMessage[] = [
       ...baiduSystem,
@@ -470,14 +473,21 @@ export class LlmAdapterService {
         content: memoryPrompt.text,
       });
     }
-
-    // 主模型流式：filler（如有）先作为 SSE 前导 chunk 外发，随后主模型
-    // 按流直出（串行后不再需要双泵缓冲交错）。大模型失败时：
-    // 零输出且错误可重试 → 重试一次（filler 播报时长天然掩盖重试延迟）；
-    // answer 最终为空 → 无论 filler 是否已播都播兜底话术，不让孩子面对沉默。
     if (fillerText) {
-      yield fillerText;
+      // handoff（方案 B）：filler 原文作为独立 system 消息贴在记忆块之后、
+      // 本轮 user 之前——离生成点最近，recency 最强；且移出头部后主 prompt
+      // 跨轮稳定，DeepSeek 前缀缓存命中率反而提升
+      messages.splice(
+        messages.length - 1,
+        0,
+        this.llmService.buildFillerHandoffMessage(fillerText),
+      );
     }
+
+    // 主模型流式：filler（如有）已在上游逐 chunk 外发，主模型随后按流
+    // 直出。大模型失败时：零输出且错误可重试 → 重试一次（filler 播报
+    // 时长天然掩盖重试延迟）；answer 最终为空 → 无论 filler 是否已播都
+    // 播兜底话术，不让孩子面对沉默。
     let answerText = "";
     let llmFailed = false;
     const maxAttempts = 2; // 初次 + 一次重试，有上限不死循环
@@ -862,42 +872,51 @@ export class LlmAdapterService {
   private static readonly SELF_PREFERENCE_QUESTION =
     /你(最?(喜欢|爱)|喜欢什么|爱吃什么|平时喜欢)/i;
 
+  // 模板池统一 ≥15 字 / ≥8 词：模板也是过渡音覆盖，同样要盖住主模型首包
   private static readonly IDENTITY_FILLERS_ZH = [
-    "你在问我的名字呀…",
-    "你想知道我是谁呀…",
+    "你在问我的名字呀，让我想一想怎么介绍自己呢……",
+    "你想知道我是谁呀，这个问题还挺有意思的呢……",
   ];
   private static readonly PREFERENCE_FILLERS_ZH = [
-    "你想知道我喜欢什么呀…",
-    "你在问我的喜好呀…",
+    "你想知道我喜欢什么呀，让我认真想一想呢……",
+    "你在问我的喜好呀，我还真想跟你好好聊聊呢……",
   ];
-  private static readonly IDENTITY_FILLERS_EN = ["You're asking my name?"];
+  private static readonly IDENTITY_FILLERS_EN = [
+    "Oh, you are asking about my name? Let me think!",
+  ];
   private static readonly PREFERENCE_FILLERS_EN = [
-    "You want to know what I like?",
+    "You want to know what I like? Let me think about it!",
   ];
   private static readonly GENERIC_FILLERS_ZH = [
-    "嗯嗯，我在听呢～",
-    "哇，你说的真有意思呀～",
-    "哦？后来呢后来呢～",
-    "哈哈，我喜欢听你说话呢～",
+    "嗯嗯，我在认真听呢，你接着往下说呀……",
+    "哇，你说的话真有意思呀，我还想再听呢……",
+    "哦？这件事听起来好有趣呀，后来呢后来呢……",
+    "哈哈，我最喜欢听你说话啦，再多讲一点嘛……",
   ];
   private static readonly GENERIC_FILLERS_EN = [
-    "Hmm, I'm listening...",
-    "Wow, tell me more!",
-    "Oh, that sounds fun!",
+    "Hmm, I am listening carefully, keep going!",
+    "Wow, that sounds so fun, tell me more!",
+    "Oh really? I want to hear more about it!",
   ];
 
+  /** 流式 filler 头部缓冲长度（字符）：足以定论「孩子名开头 / 人设名出现」 */
+  private static readonly FILLER_HEAD_BUFFER_CHARS = 8;
+
+  /** filler 开头语气词/标点剥离集：判「孩子名开头」前先剥掉填充开场 */
+  private static readonly FILLER_LEADING_FILLER_CHARS =
+    /^[\s\p{P}\p{S}呀嗯啊哦哈哇噢唉嘿]+/u;
+
   /**
-   * 串行 filler：非流式生成一句承接（3s 超时），作为 SSE 前导播报并注入
-   * 主模型 prompt。三层防线：
-   * 1. 身份/偏好问句走确定性模板（实机事故：小模型抢答名字、主客颠倒）；
-   * 2. 模型生成后确定性校验：与近 5 轮归一化比对防逐字复读（实机事故：
-   *    同一句 filler 三连复读）；拒绝以人设名标签开头（实机事故：连续
-   *    8 轮「小象 Elly：X 真 Y 呀」同构口癖，像剧本角色标签）。
-   *    不合格则带强禁令重试一次；
-   * 3. 仍不合格则从兜底模板池取一条。
-   * 任何失败静默返回 ""，主链路照常。
+   * 流式 filler（3s 超时）：小模型流式生成，头部缓冲 8 字做确定性校验
+   * （孩子名开头 / 人设名出现——两类实机事故均为头部现象），通过后立即
+   * 外发、后续 chunk 直通，首音从「整句生成完」提前到「头部定论」。
+   * 头部违规则中止本条流（未外发任何内容），带强禁令重试一次；重试仍
+   * 违规或生成失败 → 回落兜底模板池，保证过渡音覆盖不缺席（不再静默
+   * 无 filler——dashboard 实测 filler 缺失轮完全没有防死空气缓冲）。
+   * 权衡声明：全文复读/长度下限退化为事后告警（已播不可撤回），
+   * prompt 禁用清单与示例是主防线。
    */
-  private async generateFiller(params: {
+  private async *streamFiller(params: {
     asrText: string;
     recentFillers: string[];
     intent: ConversationIntent;
@@ -910,26 +929,29 @@ export class LlmAdapterService {
       gender?: string | null;
     } | null;
     turnId: string;
-  }): Promise<string> {
+  }): AsyncGenerator<string> {
     const { asrText, recentFillers } = params;
 
     const templated = this.fillerTemplateFor(asrText, recentFillers);
     if (templated) {
-      return templated;
+      yield templated;
+      return;
     }
 
     const persona = params.device
       ? (LlmService.CHARACTER_PERSONAS[params.device.characterKey ?? "elly"] ??
         LlmService.CHARACTER_PERSONAS.elly)
       : LlmService.CHARACTER_PERSONAS.elly;
-    // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝剧本式名标签开头
+    // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝人设名出现
     const personaName = persona.split("：")[0];
-    const isUnacceptable = (text: string) =>
-      !text ||
-      this.isFillerDuplicate(text, recentFillers) ||
-      this.isPersonaLabeled(text, personaName);
+    // 孩子名硬禁（优先英文名，与 buildChildBrief 的称呼口径一致）；
+    // 无档案时跳过该校验
+    const childName =
+      params.childProfile?.englishName ??
+      params.childProfile?.name ??
+      undefined;
 
-    const call = (extraInstruction?: string) => {
+    const openStream = (extraInstruction?: string) => {
       const messages = this.llmService.buildFillerPrompt(
         asrText,
         recentFillers,
@@ -945,7 +967,7 @@ export class LlmAdapterService {
       if (extraInstruction) {
         messages.push({ role: "user", content: extraInstruction });
       }
-      return this.llmService.complete({
+      return this.llmService.completeStream({
         scene: "filler",
         deviceId: params.device?.id,
         turnId: params.turnId,
@@ -956,24 +978,137 @@ export class LlmAdapterService {
       });
     };
 
-    try {
-      const first = (await call()).text.trim();
-      if (!isUnacceptable(first)) {
-        return first;
+    let fullText = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let buffer = "";
+      let flushed = false;
+      let rejected = false;
+      try {
+        const stream = openStream(
+          attempt === 2
+            ? "你上一句被拒绝了：它以孩子的名字开头，或出现了你自己的人设名。请生成一句完全不同的话——不同的措辞、不同的结构、不带任何名字。"
+            : undefined,
+        );
+        for await (const chunk of stream) {
+          buffer += chunk;
+          if (flushed) {
+            // 头部已定论放行，后续 chunk 直通（首音之后零缓冲）
+            fullText += chunk;
+            yield chunk;
+            continue;
+          }
+          const verdict = this.checkFillerHead(buffer, childName, personaName);
+          if (verdict === "reject") {
+            rejected = true;
+            break; // 头部违规：中止本条流，未外发任何内容
+          }
+          if (verdict === "pass") {
+            flushed = true;
+            fullText += buffer;
+            yield buffer;
+            buffer = "";
+          }
+        }
+        if (!rejected && !flushed) {
+          // 全文不足头部缓冲长度（短句/空响应）：在完整文本上定论
+          if (
+            buffer &&
+            this.checkFillerHead(buffer, childName, personaName, true) !==
+              "reject"
+          ) {
+            flushed = true;
+            fullText += buffer;
+            yield buffer;
+          } else {
+            rejected = true; // 空响应或违规短句：走重试/兜底
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Filler stream attempt ${attempt} failed: ${message}`);
+        if (flushed) {
+          // 半截 filler 已播给孩子：不可撤回、不重试（避免孩子听到
+          // 「前半句 + 另一句」的冲突内容），保留已播部分直接结束
+          this.logFillerPostChecks(fullText, recentFillers, personaName);
+          return;
+        }
+        rejected = true; // 未外发 → 重试或兜底
       }
-      const retry = (
-        await call(
-          "Your previous attempt was rejected: it repeats a recently used opener or starts with your own name like a script label. Produce a COMPLETELY different sentence — different words, different structure, no name label.",
-        )
-      ).text.trim();
-      if (!isUnacceptable(retry)) {
-        return retry;
+      if (!rejected) {
+        this.logFillerPostChecks(fullText, recentFillers, personaName);
+        return;
       }
-      return this.fillerFallback(asrText, recentFillers);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Filler generation failed, skipped: ${message}`);
-      return "";
+    }
+
+    // 两次均违规/失败：兜底模板池（dedup-aware），保证过渡音覆盖不缺席
+    const fallback = this.fillerFallback(asrText, recentFillers);
+    this.logger.warn("Filler fell back to template pool");
+    yield fallback;
+  }
+
+  /**
+   * 流式 filler 头部校验：拒绝两类实机事故的头部现象
+   * （剥离语气词后以孩子名开头 / 任意位置出现人设名）。
+   * 缓冲不足 8 字且非终态时返回 undecided（继续等后续 chunk）。
+   */
+  private checkFillerHead(
+    buffer: string,
+    childName: string | undefined,
+    personaName: string,
+    final = false,
+  ): "pass" | "reject" | "undecided" {
+    const compact = buffer.replace(/\s+/g, "");
+    const compactPersona = personaName.replace(/\s+/g, "");
+    if (compactPersona && compact.includes(compactPersona)) {
+      return "reject";
+    }
+    if (childName) {
+      const stripped = buffer.replace(
+        LlmAdapterService.FILLER_LEADING_FILLER_CHARS,
+        "",
+      );
+      if (stripped.startsWith(childName)) {
+        return "reject";
+      }
+    }
+    return final ||
+      [...buffer].length >= LlmAdapterService.FILLER_HEAD_BUFFER_CHARS
+      ? "pass"
+      : "undecided";
+  }
+
+  /**
+   * 流式 filler 事后校验：已播不可撤回，违规只告警供日志/dashboard 观测。
+   * （复读与长度下限的硬门让位给首音延迟，prompt 禁用清单是主防线）
+   */
+  private logFillerPostChecks(
+    fullText: string,
+    recentFillers: string[],
+    personaName: string,
+  ): void {
+    if (!fullText) {
+      return;
+    }
+    if (this.isFillerDuplicate(fullText, recentFillers)) {
+      this.logger.warn(`Filler repeated despite banned list: ${fullText}`);
+    }
+    const isZh = /[\u4e00-\u9fff]/.test(fullText);
+    const tooShort = isZh
+      ? [...fullText.replace(/[\s\p{P}\p{S}]/gu, "")].length < 15
+      : fullText.trim().split(/\s+/).length < 8;
+    if (tooShort) {
+      this.logger.warn(
+        `Filler shorter than the 15-char/8-word floor: ${fullText}`,
+      );
+    }
+    const compactPersona = personaName.replace(/\s+/g, "");
+    if (
+      compactPersona &&
+      fullText.replace(/\s+/g, "").includes(compactPersona)
+    ) {
+      this.logger.warn(
+        `Filler contains persona name beyond head check: ${fullText}`,
+      );
     }
   }
 
@@ -1017,14 +1152,6 @@ export class LlmAdapterService {
     return recentFillers.some(
       (recent) => LlmAdapterService.normalizeFiller(recent) === normalized,
     );
-  }
-
-  /** 拒绝剧本式名标签开头（「小象 Elly：…」）；名字内部空白容忍零到多个 */
-  private isPersonaLabeled(text: string, personaName: string): boolean {
-    const escape = (segment: string) =>
-      segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = personaName.split(/\s+/).map(escape).join("\\s*");
-    return new RegExp(`^${pattern}[：:,，]?\\s*`, "i").test(text);
   }
 
   private static normalizeFiller(text: string): string {
