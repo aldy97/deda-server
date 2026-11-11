@@ -227,6 +227,45 @@ describe("DevicesService", () => {
       });
     });
 
+    it("should retry the whole bind transaction on P2034 then succeed", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-005",
+      };
+
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-005",
+        deviceId: "dev-005",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.userDeviceBinding.findUnique.mockResolvedValue({
+        id: "binding-005",
+      });
+      prisma.$transaction.mockRejectedValueOnce({ code: "P2034" });
+
+      const result = await service.bind("user-001", dto);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-005",
+        alreadyBound: true,
+        hasChildProfile: false,
+      });
+    });
+
+    it("should not retry bind on non-P2034 errors", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-006",
+      };
+
+      prisma.$transaction.mockRejectedValueOnce({ code: "P2002" });
+
+      await expect(service.bind("user-001", dto)).rejects.toMatchObject({
+        code: "P2002",
+      });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
     it("should report hasChildProfile=false when rebinding a device whose profile was never filled", async () => {
       const dto: BindDeviceDto = {
         deviceId: "dev-004",

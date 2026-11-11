@@ -5,6 +5,7 @@ import { LlmService } from "@/modules/llm/llm.service";
 import { ConfigService } from "@nestjs/config";
 import { VendorGateway } from "@/modules/vendor/vendor.gateway";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
+import { PushSenderService } from "@/modules/push-notifications/push-sender.service";
 
 describe("SleepSchedulerService", () => {
   let service: SleepSchedulerService;
@@ -12,6 +13,7 @@ describe("SleepSchedulerService", () => {
   let llm: any;
   let gateway: any;
   let session: any;
+  let pushSender: { sendSleepReminder: jest.Mock };
   let configGet: jest.Mock;
 
   // 2026-11-03T12:30:00Z = 北京时间 2026-11-03 20:30
@@ -34,6 +36,9 @@ describe("SleepSchedulerService", () => {
 
   beforeEach(async () => {
     configGet = jest.fn().mockReturnValue("true");
+    pushSender = {
+      sendSleepReminder: jest.fn().mockResolvedValue({ sent: 1, skipped: 0 }),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SleepSchedulerService,
@@ -59,6 +64,7 @@ describe("SleepSchedulerService", () => {
           provide: ConversationSessionService,
           useValue: { activateSleepMode: jest.fn() },
         },
+        { provide: PushSenderService, useValue: pushSender },
       ],
     }).compile();
 
@@ -244,6 +250,66 @@ describe("SleepSchedulerService", () => {
           ]),
         }),
       );
+    });
+
+    describe("sleep push notification", () => {
+      it("claim 成功后向所有绑定家长推送服务通知", async () => {
+        prisma.sleepConfig.findMany.mockResolvedValue([makeConfig()]);
+        prisma.sleepConfig.updateMany.mockResolvedValue({ count: 1 });
+        llm.complete.mockResolvedValue({ text: "故事。" });
+        gateway.pushSleepEntry.mockReturnValue(true);
+
+        await service.triggerDueSleepEntries(NOW);
+
+        expect(pushSender.sendSleepReminder).toHaveBeenCalledWith({
+          deviceInternalId: "device-uuid-001",
+          deviceId: "dev-001",
+          sleepTime: "20:30",
+        });
+      });
+
+      it("设备离线（WS 下行失败）时仍推送服务通知", async () => {
+        prisma.sleepConfig.findMany.mockResolvedValue([makeConfig()]);
+        prisma.sleepConfig.updateMany.mockResolvedValue({ count: 1 });
+        llm.complete.mockResolvedValue({ text: "故事。" });
+        gateway.pushSleepEntry.mockReturnValue(false);
+
+        await service.triggerDueSleepEntries(NOW);
+
+        expect(pushSender.sendSleepReminder).toHaveBeenCalled();
+      });
+
+      it("sleepTime 不匹配时不推送", async () => {
+        prisma.sleepConfig.findMany.mockResolvedValue([
+          makeConfig({ sleepTime: "21:30" }),
+        ]);
+
+        await service.triggerDueSleepEntries(NOW);
+
+        expect(pushSender.sendSleepReminder).not.toHaveBeenCalled();
+      });
+
+      it("当天已触发（claim 失败）时不重复推送", async () => {
+        prisma.sleepConfig.findMany.mockResolvedValue([makeConfig()]);
+        prisma.sleepConfig.updateMany.mockResolvedValue({ count: 0 });
+
+        await service.triggerDueSleepEntries(NOW);
+
+        expect(pushSender.sendSleepReminder).not.toHaveBeenCalled();
+      });
+
+      it("推送失败不影响哄睡内容下发、不抛出", async () => {
+        prisma.sleepConfig.findMany.mockResolvedValue([makeConfig()]);
+        prisma.sleepConfig.updateMany.mockResolvedValue({ count: 1 });
+        pushSender.sendSleepReminder.mockRejectedValue(new Error("push down"));
+        llm.complete.mockResolvedValue({ text: "故事。" });
+        gateway.pushSleepEntry.mockReturnValue(true);
+
+        await expect(
+          service.triggerDueSleepEntries(NOW),
+        ).resolves.toBeUndefined();
+        expect(gateway.pushSleepEntry).toHaveBeenCalled();
+      });
     });
   });
 });

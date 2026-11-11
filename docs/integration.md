@@ -135,6 +135,7 @@
 | filler 打哈哈首响 | ✅ | ✅ | SSE 前导 chunk，LLM_ADAPTER_FILLER=false 可关 |
 | 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
 | 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
+| 哄睡定时家长服务通知 | ❌ | ✅ | 一次性订阅消息额度池，到点全推绑定家长，见「哄睡服务通知推送」节 |
 | 主动播报（提醒/家长推送） | ✅ WS | 待确认 | 走百度服务端 API（interrupt/extra_msg），AK/SK 账号归属待与机芯厂确认 |
 
 - 延时预算：百度官方口径「第三方模型首句延时 + 约 1.0s」；立项书验收甲方处理段 ≤0.8s，因此上游调用强制 `thinking: disabled` + 流式。
@@ -231,6 +232,14 @@
 - 下行为服务端主动推送 `vendor:text:out`（payload 含 `context: { mode: "sleep_story", trigger: "scheduled" }`）；注意机芯厂 socket 目前仅在收到 `vendor:text:in` 后登记，设备整晚未发言时无映射会按离线跳过——联调需与机芯厂确认主动下行支持。
 - `song`/`mixed` 在儿歌内容源上线前降级为哄睡故事；`durationMinutes` 仅落库保存，暂不控制播放时长。定时推送不写 `messages` 表，哄睡统计口径待 §3.4 单独决策。
 - 语音改配置（sleep_config 意图）：孩子说「以后睡前都听儿歌」「哄睡改成20分钟」「明天九点半哄我睡觉」等修改含义指令时，走独立短链路——小模型抽取字段，白名单校验后确定性话术确认，不进冒险门禁与大模型主链路。孩子语音只能改 `contentType`（`story/song/mixed`）、`durationMinutes`（∈ {10,15,20,25,30}，语音改时长自动置 `durationMode=custom`）、`sleepTime`（`HH:mm`）；`enabled`/`forceSleep` 仅家长端可改。指令一律持久化到 `sleep_configs`（家长端可见），非法值/解析失败回复兜底话术、不落库。该轮 user/assistant 消息 `mode=free_chat`，assistant `rawPayload.sleepConfig` 记录实际修改字段（未生效为 null），回复 `context: { sleepConfig: <field|null> }`。
+
+## 哄睡服务通知推送
+
+- 机制：微信一次性订阅消息。小程序端在用户手势上调 `wx.requestSubscribeMessage` 后上报 `POST /push-subscriptions`（契约见 MINI_PROGRAM_API.md §11）；后端按「用户 + 模板」维护额度池（`push_subscriptions` 表），accept 累加、reject 清零。
+- 触发：定时哄睡 claim 成功后（`lastTriggeredDate` 抢占、每设备每天最多一次），向设备当前所有绑定家长各消耗 1 点额度推送一次，与设备在线状态解耦（设备离线时 WS 下行跳过，服务通知仍推，作为家长的兜底提醒）。
+- 解绑/wipe 语义：发送时按 `user_device_bindings` 当前关系取人，关系解除即不再推送，无需按设备清理订阅表。
+- 失败处理：errcode 43101（额度耗尽）→ 清零并标记 `exhausted`；40001/42001（token 失效）→ 强制刷新 access_token 重试一次；其他错误仅 warn 日志、不抛出、不影响哄睡内容下发。
+- 开关与配置：`PUSH_NOTIFICATIONS_ENABLED=true` 开启（默认关）；`WECHAT_TMPL_SLEEP_REMINDER` 为模板 ID 白名单（未配置时上报接口 400、推送不发送）；access_token 走 Redis 缓存（TTL 7000s）+ 进程内 single-flight。
 
 ## 联调顺序
 

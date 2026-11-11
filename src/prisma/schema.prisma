@@ -24,6 +24,7 @@ model User {
   childProfiles         ChildProfile[]
   feedbacks             Feedback[]
   parentReportFeedbacks ParentReportFeedback[]
+  pushSubscriptions     PushSubscription[]
 
   @@map("users")
 }
@@ -511,4 +512,23 @@ model LlmUsageLog {
   @@index([scene, success, createdAt])
   @@index([turnId])
   @@map("llm_usage_logs")
+}
+
+/// 小程序订阅消息额度池（路 B：一次性订阅 + 静默补额）。
+/// 额度语义：用户每次 accept（含「不再询问」后的静默 accept）+N，发送成功 -1；
+/// 无官方额度查询接口，本表为服务端账本，43101 时兜底清零。
+/// 发送时按当前绑定关系找人：解绑/wipe 后不再触达，无需按设备清理本表。
+model PushSubscription {
+  id         String   @id @default(uuid())
+  userId     String
+  templateId String // 微信订阅消息模板 ID
+  quota      Int      @default(0) // 剩余可发送条数
+  status     String   @default("active") // active / rejected / exhausted
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, templateId])
+  @@map("push_subscriptions")
 }
