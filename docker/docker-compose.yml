@@ -75,6 +75,19 @@ services:
       SLEEP_SCHEDULER_ENABLED: ${SLEEP_SCHEDULER_ENABLED:-false}
       # 家长报告生成（默认关，各环境 env 文件显式开启）
       PARENT_REPORT_GENERATION_ENABLED: ${PARENT_REPORT_GENERATION_ENABLED:-false}
+      # 阿里云 BSS 账单（LLM 费用看板的小模型金额真值来源）
+      # staging/prod 走 ECS 实例 RAM 角色：只配 ALIYUN_BSS_USE_RAM_ROLE=true，
+      # 无密钥落盘、STS 自动轮转，AK/SK 两项留空即可（仅本地调试才填）。
+      ALIYUN_BSS_USE_RAM_ROLE: ${ALIYUN_BSS_USE_RAM_ROLE:-false}
+      ALIYUN_BSS_ACCESS_KEY_ID: ${ALIYUN_BSS_ACCESS_KEY_ID:-}
+      ALIYUN_BSS_ACCESS_KEY_SECRET: ${ALIYUN_BSS_ACCESS_KEY_SECRET:-}
+      # 留空则首次运行探测百炼 ProductCode 并打日志；探测确认后建议固化，省一次全量拉取
+      ALIYUN_BSS_PRODUCT_CODE: ${ALIYUN_BSS_PRODUCT_CODE:-}
+      ALIYUN_BSS_ENDPOINT: ${ALIYUN_BSS_ENDPOINT:-}
+      # 账单增量同步（默认关）。开启后 onModuleInit 补拉一次，并每 N 分钟幂等重拉 T-1~T-lookback
+      LLM_COST_SYNC_ENABLED: ${LLM_COST_SYNC_ENABLED:-false}
+      LLM_COST_SYNC_INTERVAL_MINUTES: ${LLM_COST_SYNC_INTERVAL_MINUTES:-360}
+      LLM_COST_SYNC_LOOKBACK_DAYS: ${LLM_COST_SYNC_LOOKBACK_DAYS:-3}
     depends_on:
       - postgres
       - redis
