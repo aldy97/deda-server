@@ -92,7 +92,8 @@ describe("client-api + provision claim (e2e)", () => {
       mac: overMac,
       appid: "baidu-app-e2e",
       instanceid,
-      authorization: "e2e-baidu-control-auth",
+      authorization_Role: "e2e-role-auth",
+      authorization_TTS: "e2e-tts-auth",
       cloud_node: "cn",
       lang: "zh",
     });
@@ -173,6 +174,42 @@ describe("client-api + provision claim (e2e)", () => {
     // 新一轮实例正常登记与结束
     await botStart(mac, "111").expect(200);
     await botStop(mac, "111").expect(200);
+  });
+
+  it("v1.2 payload: start/stop lifecycle with dual signatures", async () => {
+    await loginMac().expect(200);
+
+    await request(app.getHttpServer())
+      .post("/client/bot/bot/start")
+      .send({
+        mac,
+        appid: "baidu-app-v1-2",
+        instanceid: "9223372036854775801",
+        authorization_Role: "v12-role-bce-signature",
+        authorization_TTS: "v12-tts-bce-signature",
+        cloud_node: "cn",
+        lang: "zh",
+      })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .post("/client/bot/bot/stop")
+      .send({ mac, instanceid: "9223372036854775801" })
+      .expect(200);
+  });
+
+  it("v1.1-only payload (authorization without new fields) is rejected 400", async () => {
+    await loginMac().expect(200);
+
+    await request(app.getHttpServer())
+      .post("/client/bot/bot/start")
+      .send({
+        mac,
+        appid: "baidu-app-v1-1",
+        instanceid: "9223372036854775802",
+        authorization: "old-style-auth",
+      })
+      .expect(400);
   });
 
   it("provision candidates: visible after loginMac, gone after bind, requires JWT", async () => {
