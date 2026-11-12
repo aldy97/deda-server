@@ -19,3 +19,8 @@
    新增依赖、prisma migrate、commit/push 同理。
 5. 改 controller/service 必须同步补改 *.spec.ts（与 TDD 铁律一致）；
    e2e 只打 TEST_DATABASE_URL 指向的隔离测试库（库名含 test）。
+
+## 子任务验收命令（多代理协作协议第 3 条锚点）
+
+主代理审查子代理产出时，必须亲自运行：
+`tsc --noEmit` 全绿 + 相关 `*.spec.ts` 全部通过。
