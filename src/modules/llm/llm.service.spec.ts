@@ -1,6 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmService, LlmUpstreamError } from "./llm.service";
+import * as llmCostUtil from "./llm-cost.util";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import axios from "axios";
 import { Readable } from "stream";
@@ -1441,6 +1442,239 @@ describe("LlmService", () => {
         unknown
       >;
       expect(payload).not.toHaveProperty("stream_options");
+    });
+  });
+
+  describe("成本与缓存 token 落库", () => {
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+    /**
+     * Step 0-A 实测样本（2026-11-12 真实调用 api.deepseek.com）：
+     * prompt_cache_hit_tokens + prompt_cache_miss_tokens === prompt_tokens
+     */
+    const DEEPSEEK_USAGE = {
+      prompt_tokens: 3607,
+      completion_tokens: 2,
+      total_tokens: 3609,
+      prompt_tokens_details: { cached_tokens: 3456 },
+      prompt_cache_hit_tokens: 3456,
+      prompt_cache_miss_tokens: 151,
+    };
+
+    /** 末 chunk 携带 usage（DeepSeek 官方：统计信息附加在最后一个内容块上） */
+    const sseWithUsage = (usage: unknown) =>
+      Readable.from([
+        'data: {"choices":[{"delta":{"content":"你"}}]}\n\n',
+        `data: ${JSON.stringify({
+          choices: [{ delta: {}, finish_reason: "stop" }],
+          usage,
+        })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+
+    const drainStream = async (gen: AsyncGenerator<string>) => {
+      const deltas: string[] = [];
+      for await (const delta of gen) deltas.push(delta);
+      return deltas;
+    };
+
+    beforeEach(() => {
+      // 只冻结 Date（峰谷判定按请求发生时刻），不影响流与 flush 的调度原语
+      jest.useFakeTimers({
+        doNotFake: ["setImmediate", "nextTick", "queueMicrotask"],
+      });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      jest.restoreAllMocks();
+    });
+
+    it("流式成功：写入 cacheHitInputTokens 与按高峰定价快照的 costMicroCny", async () => {
+      jest.setSystemTime(new Date("2026-11-12T01:30:00Z")); // 北京周四 09:30 → 高峰
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage(DEEPSEEK_USAGE),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          cacheHitInputTokens: 3456,
+          costMicroCny: 456, // 151×2 + 3456×0.04 + 2×8
+        }),
+      });
+    });
+
+    it("同一 usage 落在空闲时段则按半价计（228 micro）", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z")); // 北京周四 12:30 → 空闲
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage(DEEPSEEK_USAGE),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ costMicroCny: 228 }),
+      });
+    });
+
+    it("上游未回传缓存字段：cacheHitInputTokens=null，金额退化为未命中价上界", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage({ prompt_tokens: 3607, completion_tokens: 2 }),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          cacheHitInputTokens: null,
+          costMicroCny: 3615, // 3607×1 + 2×4
+        }),
+      });
+    });
+
+    it("usage 无 token：两列都是 null，绝不写 0", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage({}),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          cacheHitInputTokens: null,
+          costMicroCny: null,
+        }),
+      });
+    });
+
+    it("DashScope 形状 prompt_tokens_details.cached_tokens 也解析并按 qwen 阶梯价计", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage({
+          prompt_tokens: 1000,
+          completion_tokens: 100,
+          total_tokens: 1100,
+          prompt_tokens_details: { cached_tokens: 512 },
+        }),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "filler",
+          model: "qwen-flash",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          tier: "small",
+          cacheHitInputTokens: 512,
+          costMicroCny: 239, // 488×0.15 + 512×0.03 + 100×1.5
+        }),
+      });
+    });
+
+    it("未定价模型：token 与缓存数照记，costMicroCny=null（接口据此报未计价条数）", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage(DEEPSEEK_USAGE),
+      } as never);
+
+      await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          cacheHitInputTokens: 3456,
+          costMicroCny: null,
+        }),
+      });
+    });
+
+    it("计价抛异常时兜底 null：对话内容照常返回，日志照常写库", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      jest.spyOn(llmCostUtil, "costMicroCnyOf").mockImplementation(() => {
+        throw new Error("pricing table broken");
+      });
+      mockedAxios.post.mockResolvedValueOnce({
+        data: sseWithUsage(DEEPSEEK_USAGE),
+      } as never);
+
+      const deltas = await drainStream(
+        service.completeStream({
+          scene: "chat_main",
+          messages: [{ role: "user", content: "Hi" }],
+        }),
+      );
+      await flush();
+
+      expect(deltas).toEqual(["你"]);
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          success: true,
+          cacheHitInputTokens: 3456,
+          costMicroCny: null,
+        }),
+      });
+    });
+
+    it("非流式 complete 同样写入两列", async () => {
+      jest.setSystemTime(new Date("2026-11-12T04:30:00Z"));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: DEEPSEEK_USAGE,
+        },
+      } as never);
+
+      await service.complete({
+        scene: "intent_classify",
+        messages: [{ role: "user", content: "Hi" }],
+      });
+      await flush();
+
+      expect(prismaMock.llmUsageLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          cacheHitInputTokens: 3456,
+          costMicroCny: 228,
+        }),
+      });
     });
   });
 });

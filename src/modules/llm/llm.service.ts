@@ -2,6 +2,11 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosError } from "axios";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import {
+  RawUsage,
+  costMicroCnyOf,
+  extractCacheHitTokens,
+} from "./llm-cost.util";
 
 /** LLM 场景枚举：模型监控的分场景口径，新增调用点必须从这里取值 */
 export const LLM_SCENES = [
@@ -141,6 +146,7 @@ export class LlmService {
         failureReason: "upstream_error",
         failureDetail: "LLM API key is not configured",
         latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
       });
       throw new Error("LLM API key is not configured");
     }
@@ -183,6 +189,7 @@ export class LlmService {
         failureDetail:
           text.length > 0 ? null : "response completed with empty text",
         latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
         usage,
       });
 
@@ -207,6 +214,7 @@ export class LlmService {
         failureReason: this.classifyFailure(axiosError),
         failureDetail: detail,
         latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
       });
       throw new Error(`LLM request failed: ${detail}`);
     }
@@ -226,13 +234,7 @@ export class LlmService {
 
     const startedAt = Date.now();
     let firstTokenMs: number | null = null;
-    let usage:
-      | {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          total_tokens?: number;
-        }
-      | undefined;
+    let usage: RawUsage | undefined;
     let contentChars = 0;
     let failureReason: LlmFailureReason | null = null;
     let failureDetail: string | null = null;
@@ -371,6 +373,7 @@ export class LlmService {
         failureReason,
         failureDetail,
         latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
         firstTokenMs,
         usage,
       });
@@ -428,15 +431,28 @@ export class LlmService {
     failureDetail?: string | null;
     latencyMs: number;
     firstTokenMs?: number | null;
-    usage?:
-      | {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          total_tokens?: number;
-        }
-      | undefined;
+    usage?: RawUsage;
+    /** 请求发起时刻：峰谷定价按调用发生时间判定，不用写库时间 */
+    at: Date;
   }): void {
     const isSmallModel = entry.model === this.smallModel;
+    // 成本快照：任何异常都吞掉并写 null，绝不让定价缺项或脏 usage 影响主链路
+    let cacheHitInputTokens: number | null = null;
+    let costMicroCny: number | null = null;
+    try {
+      cacheHitInputTokens = extractCacheHitTokens(entry.usage);
+    } catch {
+      // usage 形状异常：缓存命中数记 null（金额随之退化为上界或 null）
+    }
+    try {
+      costMicroCny = costMicroCnyOf({
+        model: entry.model,
+        usage: entry.usage,
+        at: entry.at,
+      });
+    } catch {
+      // 定价表缺项/脏数据：记 null，由成本接口统计为「未计价条数」
+    }
     this.prisma.llmUsageLog
       .create({
         data: {
@@ -451,6 +467,8 @@ export class LlmService {
           promptTokens: entry.usage?.prompt_tokens ?? null,
           completionTokens: entry.usage?.completion_tokens ?? null,
           totalTokens: entry.usage?.total_tokens ?? null,
+          cacheHitInputTokens,
+          costMicroCny,
           deviceId: entry.options.deviceId ?? null,
           turnId: entry.options.turnId ?? null,
         },

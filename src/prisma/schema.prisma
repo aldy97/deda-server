@@ -502,6 +502,10 @@ model LlmUsageLog {
   promptTokens     Int?
   completionTokens Int?
   totalTokens      Int?
+  cacheHitInputTokens Int?   // 上游回传的缓存命中输入 token；DeepSeek=prompt_cache_hit_tokens，
+                             // DashScope=prompt_tokens_details.cached_tokens；未回传=null（成本退化为上界）
+  costMicroCny     Int?      // 写库时按当时定价快照的估算成本，1 元 = 1_000_000；
+                             // token 缺失或模型未定价=null（聚合时不计入，接口另报未计价条数）
   deviceId         String?  // FK → devices.id，可空（后台任务无设备上下文）
   turnId           String?  @map("turn_id") // 对话轮次 ID；后台任务无轮次上下文时为空
   createdAt        DateTime @default(now())
@@ -512,6 +516,45 @@ model LlmUsageLog {
   @@index([scene, success, createdAt])
   @@index([turnId])
   @@map("llm_usage_logs")
+}
+
+/// 阿里云 BSS 真实账单按日落库：小模型（qwen-flash / 百炼）金额以此为真值，
+/// 主模型（deepseek-flash）金额由 llm_usage_logs 估算，两者在接口层合并。
+/// 金额统一 micro-CNY（1 元 = 1_000_000）：与 llm_usage_logs.costMicroCny 同单位，
+/// 聚合即 SUM(Int)，出参是 number，不引入 Decimal 的字符串序列化问题。
+model LlmCostDaily {
+  id                   String   @id @default(uuid())
+  billDate             String   // YYYY-MM-DD；取响应 Items[].BillingDate，不用请求参数
+                                // （BillingDate 与 BillingCycle 月份不一致时官方按 BillingCycle 返回整月数据）
+  billingCycle         String   // YYYY-MM；BSS 必填参数，由 billDate 推导
+  provider             String   @default("aliyun")
+  productCode          String
+  productName          String?
+  billingItem          String
+  billingItemCode      String   @default("")
+  instanceId           String   @default("")
+  model                String   @default("unknown") // 从 billingItem / instanceId 解析；解析不出为 unknown
+  tier                 String   @default("small")   // small / main / unknown，按 model 名映射而非埋点 tier
+  itemKind             String   // PayAsYouGoBill / Refund / Adjustment / SubscriptionOrder；退款调账金额为负
+  subscriptionType     String   @default("PayAsYouGo")
+  usage                Int?     // Items[].Usage（官方为 string，且是周期内累加语义，不可当 token 真值）
+  usageUnit            String?
+  grossMicroCny        Int      // PretaxGrossAmount 原价
+  payableMicroCny      Int      // PretaxAmount 应付（页面默认口径）
+  cashMicroCny         Int      @default(0) // PaymentAmount 现金支付
+  resourcePackMicroCny Int      @default(0) // DeductedByResourcePackage 资源包抵扣
+  couponMicroCny       Int      @default(0) // DeductedByCashCoupons 代金券抵扣
+  currency             String   @default("CNY")
+  settled              Boolean  @default(false) // 终账（次月 3 日 12 点后）；false 时页面标「暂估」
+  dedupeKey            String   @unique // 幂等键：全部可区分维度拼接，列非空故 upsert 的 ON CONFLICT 生效
+                                        // （可空列参与唯一键时 PG 视 NULL 互不相等，会每次同步插重复行）
+  fetchedAt            DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([billDate])
+  @@index([billDate, tier])
+  @@map("llm_cost_daily")
 }
 
 /// 小程序订阅消息额度池（路 B：一次性订阅 + 静默补额）。
