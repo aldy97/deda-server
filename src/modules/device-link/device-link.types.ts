@@ -47,8 +47,12 @@ export interface DeviceQueryData {
   battery?: number;
   volume?: number;
   version?: string;
-  /** 充电状态（2026-11-11 与机芯厂约定增补，固件待实现；未上报视为未知） */
-  charging?: boolean;
+  /**
+   * 充电状态（2026-11-11 与机芯厂约定增补）。
+   * 机芯厂 v1.1 契约类型为 boolean | null：显式 null 表示当前未知，
+   * 与 battery / volume / version 同口径保留上一次已知值。
+   */
+  charging?: boolean | null;
 }
 
 /** volume 指令/回执数据 */

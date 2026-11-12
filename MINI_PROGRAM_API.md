@@ -288,8 +288,9 @@ Content-Type: application/json
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
 | `status` | string | `online`／`offline`；超过 15 秒未收到设备心跳即判定 `offline` |
-| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null` |
-| `isCharging` | boolean \| null | 是否充电中；机芯厂协议暂无充电字段，当前固定为 `null`（待协议补充） |
+| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。当前固件为占位值，前端可展示但勿据此做业务判断 |
+| `volume` | number \| null | 音量 0–100；设备尚未上报时为 `null`。音量下发（见 3.6）后回读本字段即可确认设备是否已生效 |
+| `isCharging` | boolean \| null | 是否充电中；对应机芯厂 `query.data.charging`（契约类型 `boolean \| null`），`null` 表示未知。当前固件恒发 `null`，前端按未知处理 |
 | `lastActiveAt` | string \| null | 最近活跃时间，ISO 8601；设备从未上报时为 `null` |
 
 设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值。

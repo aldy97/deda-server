@@ -287,7 +287,8 @@ export class DevicesService {
 
     // 新 MQTT 协议（docs/vendor-mqtt-protocol.md）：状态来自 device-link 的
     // Redis 缓存，在线判定按协议 8.2 节 15 秒心跳窗口计算。
-    // isCharging 来自 query 上报的 charging 字段（协议增补，固件未上报时为 null）。
+    // volume / isCharging 来自 query 上报（charging 契约为 boolean | null，
+    // 固件未上报或上报 null 时为 null）；volume 同时用于音量下发后的回读确认。
     const link = await this.deviceLink.getStatus(
       device.macAddress ?? device.deviceId,
     );
@@ -295,6 +296,7 @@ export class DevicesService {
       deviceId: id,
       status: link.online ? ("online" as const) : ("offline" as const),
       battery: link.battery,
+      volume: link.volume,
       isCharging: link.charging,
       lastActiveAt: link.lastSeenAt
         ? new Date(link.lastSeenAt).toISOString()
