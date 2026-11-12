@@ -352,8 +352,54 @@ POST /analytics/devices/:deviceId/wipe
 - `deviceOnline=false` 表示下发时设备离线，`recover` 可能未送达，admin 需到手后手动复位设备。
 - 设备不存在 → 404。家长小程序解绑（DELETE /devices/:id）不触发本流程，仅删绑定关系。
 
+## Fleet（舰队管理）
+
+向运营/管理员提供全量设备舰队视图。详细规范见 `docs/fleet-analytics-spec.md`。
+
+```
+GET /analytics/fleet/summary?date=
+→ { date, totalDevices, activatedDevices, devicesPoweredOn, powerOnRate,
+    onlineNow, lowBatteryNow, lowBatteryThreshold, presenceSince }
+
+GET /analytics/fleet/presence-trend?startDate=&endDate=
+→ { startDate, endDate, presenceSince,
+    series: [{ date, devicesPoweredOn, powerOnRate, reportCount }] }
+   // 区间上限 62 天；每一天都出现
+
+GET /analytics/fleet/firmware-distribution
+→ { total, buckets: [{ firmwareVersion, devices }] }
+   // null/空字符串 → "unknown"；unknown 排最后
+
+GET /analytics/fleet/churn-risk?days=7
+→ { days, asOf, count, devices: [{ deviceId, characterKey, firmwareVersion,
+    lastActiveAt, daysInactive, basis }] }
+   // days 范围 1–90；basis: presence | message | createdAt
+
+GET /analytics/fleet/devices?keyword=&page=1&pageSize=20
+→ { page, pageSize, total,
+    items: [{ deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
+              macAddress, createdAt, boundUsers, realtime, presenceDays7d,
+              lastPresenceDate, turns7d }] }
+   // keyword ≤ 50 字符；pageSize 最大 100 静默 clamp；createdAt 降序
+
+GET /analytics/fleet/devices/:deviceId?days=30
+→ { deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
+    macAddress, wifiName, ipAddress, networkType, timezone, createdAt,
+    realtime, boundUsers: [{ userId, isOwner, boundAt }],
+    presence: [{ date, reportCount, firstSeenAt, lastSeenAt }],
+    dailyTurns: [{ date, turns }],
+    totals: { presenceDays, turns } }
+   // days 范围 1–90；404 on missing；boundUsers 不含 PII
+```
+
+全局口径：
+- **实时**：`onlineNow` / `realtime` — Redis 15s 窗口；失败 → null
+- **天级**：`devicesPoweredOn` / `presenceDays7d` — `device_presence_daily` 表
+- 低电量阈值固定 20（仅在线设备）
+- `null` ≠ `0`：前端 `null` 渲染 `-`
+
 ## 二期（进行中）
 
-- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`onlineNow` / `devicesPoweredOn` / `powerOnRate` 及 trend 的 `poweredOn` 均已接通；fleet 接口在下一个 PR。
+- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`onlineNow` / `devicesPoweredOn` / `powerOnRate` 及 trend 的 `poweredOn` 均已接通；fleet 接口已上线（见「Fleet」节）。
 - ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。
