@@ -30,19 +30,22 @@ GET /analytics/overview?date=            (缺省=昨天 T-1)
     totals: { devicesRegistered, devicesActivated, usersRegistered, activationRate },
     today:  { dau, dauDeltaPct, avgDurationSecondsPerActiveDevice,  // estimated
               avgTurnsPerActiveDevice,
-              devicesPoweredOn, powerOnRate, onlineNow },           // onlineNow = 实时在线台数（Redis lastSeenAt 落在 15s 窗口内）；devicesPoweredOn / powerOnRate 仍恒 null，待下个 PR 接通
+              devicesPoweredOn, powerOnRate, onlineNow },           // onlineNow=实时在线台数（Redis 15s 窗口）；devicesPoweredOn=当日开机台数、powerOnRate=开机数/已激活数（源自 device_presence_daily）
     retention: { d1, d7, d30 },          // 激活日为 date-N 的 cohort 在 date 的活跃率；分母为 0 时 null
     funnel: { shipped, activated, firstConversation, active7d }     // shipped 一期恒 null
   }
 ```
 - 激活率分母：无出货数据时退化为已入库设备数（devices 全量）。
+- `devicesPoweredOn` / `powerOnRate` 取自 `device_presence_daily`（**天级**）：早于该表落库首日的日期返回 **null（无数据）** 而非 0（零台开机），避免把功能未上线误读成设备全离线；`powerOnRate` 分母为已激活设备数，分母为 0 时为 null。
+- `onlineNow` 是**实时**口径（Redis `lastSeenAt` 落在 15 秒窗口内），与天级的 `devicesPoweredOn` 不是同一口径，二者不可互相校验。
 
 ```
 GET /analytics/overview/trend?startDate=&endDate=&granularity=day&metrics=dau,avgDuration,newActivated&characterKey=
 → { startDate, endDate, granularity, series: [{ date, dau, avgDurationSeconds, devicesPoweredOn, newActivatedDevices, newUsers }] }
 ```
 - metrics 可选值：`dau, avgDuration, poweredOn, newActivated, newUsers`，逗号分隔多选，缺省全量；非法值 400。
-- 无数据日期补零；week 粒度按 ISO 周（周一）聚合，month 按自然月；devicesPoweredOn 一期恒 null。
+- 无数据日期补零；week 粒度按 ISO 周（周一）聚合，month 按自然月。
+- `devicesPoweredOn` 取自 `device_presence_daily`，按桶内**去重设备数**聚合；早于落库首日的桶为 null（非 0），故跨上线时点的 week/month 桶数值会偏小。
 - characterKey 过滤按设备型号（elly/polly）。
 
 ## 留存与激活（P2）
@@ -351,6 +354,6 @@ POST /analytics/devices/:deviceId/wipe
 
 ## 二期（进行中）
 
-- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`devicesPoweredOn` / `powerOnRate` / fleet 接口将在下一个 PR 接通，本次仅落库、不改 overview 响应。
+- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`onlineNow` / `devicesPoweredOn` / `powerOnRate` 及 trend 的 `poweredOn` 均已接通；fleet 接口在下一个 PR。
 - ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。
