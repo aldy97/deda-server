@@ -211,12 +211,89 @@ GET /analytics/llm/by-turn?turnId=
    // 单轮调用链路：createdAt 升序；turnId 为 messages.turn_id（一轮问答一个 ID，
    // 安全/意图/filler/主回答/记忆提取共用）；无记录返回空 calls，不报错；
    // 后台任务（parent_report / sleep_*）无轮次上下文，turn_id 恒 null，本接口查不到
+
+GET /analytics/llm/cost-daily?startDate=&endDate=
+→ { currency: "CNY",
+    pricing: { version, peakNote,
+               lines: [{ model, band, kind, tierLabel, label, cnyPerMillionTokens }] },
+    range: { startDate, endDate, requestedStartDate, requestedEndDate, clamped, days },
+    sources: {
+      aliyun:   { status: "ok"|"no_data"|"unconfigured", kind: "bill",
+                  latestBillDate, latestFetchedAt, modelSplit, daysWithData, message },
+      deepseek: { status: "ok", kind: "estimated", pricingVersion,
+                  rows, pricedRows, cacheHitRows, upperBoundRows, cacheTokenAvailable } },
+    series: [{ date, smallCny, mainCny, otherCny, totalCny,
+               smallTokens, mainTokens,
+               smallCnyPerMillionTokens, mainCnyPerMillionTokens,
+               smallSource: "bill"|"none", mainSource: "estimated"|"none",
+               mainAccuracy: "exact"|"upper_bound"|"mixed"|null, settled }],
+    totals: { smallCny, mainCny, otherCny, totalCny, partial, days,
+              unpricedRows, noTokenRows, unpricedTokens },
+    month: { cycle, daysInCycle, daysWithData,
+             toDateCny|null, toDateSmallCny|null, toDateMainCny|null,
+             projectedEndCny|null, prevSamePeriodCny|null, deltaPct|null, partial },
+    unitEconomics: [{ model, tier, source: "bill"|"estimated", cny, tokens, pricedTokens,
+                      cnyPerMillionTokens, tokenActiveDevices, daysWithData,
+                      cnyPerDevicePerDay, unpricedRows, noTokenRows }],
+    reconciliation: { status: "ok"|"insufficient", days,
+                      smallEstimatedCny, smallBilledCny, deltaPct } }
+   // 金额单位元（库内为 micro-CNY 整数，1 元 = 1e6，出参保留 6 位小数）
+   // endDate 服务端强制钳到「昨日」（Asia/Shanghai），startDate 随之不超过 endDate，
+   //   clamped/range 回显实际区间；区间上限 366 天，超限或日期非法/倒置 400
+   // 拿不到数据 ≠ ¥0：账单缺日 smallCny=null（前端断点），主模型当天全未计价 mainCny=null，
+   //   缺源时 totals.partial=true，前端必须标注「合计不完整」
+   // mainAccuracy：exact=当天全部行有缓存命中数；upper_bound=全缺（金额是上界，实测可高估十几倍）；
+   //   mixed=部分缺；null=当天无已计价行
+   // sources.aliyun.status=unconfigured（未配凭证）/no_data（配了但区间内无账单行）时小模型金额全为 null
+   // modelSplit=false 表示账单解析不出模型名 → 小模型口径降级为「百炼账号合计」，message 说明
+   // month 块跟随「昨日所在账期」，与请求区间解耦：toDateCny 是本月至今，projectedEndCny 按
+   //   有数据天数 run-rate 外推，prevSamePeriodCny 为上月 1 日至同一日
+   // month 的拿不到数据 ≠ ¥0 是逐字段判定的：账期内无账单行 → toDateSmallCny=null；无已计价
+   //   主模型行 → toDateMainCny=null；两者都无 → toDateCny/prevSamePeriodCny/projectedEndCny=null。
+   //   反之「有数据源但金额为 0」（如全额被代金券抵扣）必须仍是 0，不得退化成 null
+   // month.partial 与 totals.partial 同一套口径（缺账单或缺主模型埋点即 true），但窗口是
+   //   「昨日所在账期」而非请求区间，两者可能不一致，各自描述自己的窗口
+   // sources.deepseek.cacheTokenAvailable = 「区间内是否有行拿到缓存命中数」（cacheHitRows>0）。
+   //   pricedRows=0 时它必然为 false，但那时一行都没计价、不存在估算，消费方不得据此判定「上界」；
+   //   判上界请用 pricedRows>0 && (mainAccuracy 含 upper_bound/mixed)
+   // reconciliation 只比已终账（settled=true）的账单日：小模型 token 估算 vs 账单真值；
+   //   无已终账日 → status=insufficient、deltaPct=null；账单为 0 时 deltaPct=null（不除零）
+   // unitEconomics.tokenActiveDevices 是「有 token 埋点的去重设备数」（llm_usage_logs.deviceId），
+   //   不等于活跃设备数；cnyPerDevicePerDay 的分母是该模型有调用的天数
+   // pricing.lines 是官网定价明细（唯一来源 llm-cost.util.ts，前端参考线不得另写价格常量）
+
+POST /analytics/llm/cost/sync
+→ { status: "ok"|"unconfigured"|"error", latestBillDate, syncedAt, message,
+    days: [{ billDate, status, upserted, message }] }
+   // 写操作例外（同「设备运维」节）：手工触发阿里云账单补拉 T-1..T-N，按 dedupeKey 幂等 upsert，
+   // 重复调用不会追加行、不会放大金额；未配置凭证返回 unconfigured 且不写库
 ```
 
 `llm_usage_logs.turn_id`（可空，带索引）：对话链路的 turnId 由 `VendorService.handleTextIn`
 在入口生成并贯穿同轮全部 LLM 调用与消息落库；冒险状态机超时推送等非对话场景不落 turnId。
 
 （原 `GET /analytics/quality/llm-usage` 501 占位接口已随本批下线。）
+
+### 费用口径（cost-daily 的数据来源）
+
+两条源，语义不同，页面上必须区分标注：
+
+| 口径       | 来源                                                          | 精度                                             |
+| ---------- | ------------------------------------------------------------- | ------------------------------------------------ |
+| 小模型金额 | 阿里云 BSS `DescribeInstanceBill` → `llm_cost_daily`（应付 PretaxAmount） | 账单真值；延迟 24h 出账，当月为暂估，次月 3 日 12 点后终账 |
+| 主模型金额 | `llm_usage_logs.costMicroCny`（写库时按当时定价快照）          | 估算；缺缓存命中数时是上界                       |
+
+- 埋点：`LlmService.logUsage()` 落 `cacheHitInputTokens` 与 `costMicroCny`。DeepSeek 实测
+  `prompt_cache_hit_tokens + prompt_cache_miss_tokens === prompt_tokens`（命中数已含在 prompt_tokens 内），
+  故计价按 miss × 未命中价 + hit × 命中价；对 prompt_tokens 整体套未命中价会重复计费，实测高估约 15.8 倍。
+- 计价常量在 `src/modules/llm/llm-cost.util.ts`（`PRICING_VERSION`），刻意不放 env：口径要可追溯。
+  调价即升版本并发版；已落库的历史金额不变，需要时用 `scripts/backfill-llm-cost.ts --force` 重算。
+- 峰谷按北京时间工作日 9:00-12:00 / 14:00-18:00 判定，法定节假日表未维护 → 节假日按高峰计（略微高估）。
+- 账单同步：`BillingSyncService`（`LLM_COST_SYNC_ENABLED=true` 开启，默认关），每 6h 补拉 T-1..T-3；
+  历史一次性灌入用 `scripts/backfill-aliyun-bill.ts`（`--probe` 可探测百炼 ProductCode）。
+  凭证：`ALIYUN_BSS_ACCESS_KEY_ID/SECRET`（本地/staging）或 `ALIYUN_BSS_USE_RAM_ROLE=true`（生产走 ECS 实例角色，密钥不落盘）。
+- `cacheHitInputTokens IS NULL` 即「上界估算」标记；回填脚本对历史行只能按未命中价算，
+  因此老数据的 `mainAccuracy` 多为 `upper_bound`，前端用虚线 + Tag 区分。
 
 ## 消息明细（P1.5）
 
@@ -275,5 +352,5 @@ POST /analytics/devices/:deviceId/wipe
 ## 二期预告（需 schema 审批）
 
 - `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
-- ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。注：DeepSeek 主网关流式是否返回 usage 待复验，拿不到则 token 字段为 null，不影响其他字段。
+- ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。

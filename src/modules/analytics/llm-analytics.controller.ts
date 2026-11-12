@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { Transform, Type } from "class-transformer";
 import {
@@ -15,6 +15,8 @@ import { LLM_SCENES } from "../llm/llm.service";
 import { AnalyticsDateRangeQueryDto } from "./dto/analytics-query.dto";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
 import { LlmAnalyticsService } from "./llm-analytics.service";
+import { BillingSyncService } from "./billing-sync.service";
+import { LlmCostService } from "./llm-cost.service";
 
 /** 空串 query（scene=）视为未提供 */
 function emptyToUndefined(value: unknown): unknown {
@@ -94,7 +96,11 @@ export class LlmSlowCallsQueryDto extends AnalyticsDateRangeQueryDto {
 @UseGuards(AnalyticsAuthGuard)
 @Controller("analytics/llm")
 export class LlmAnalyticsController {
-  constructor(private readonly llmAnalytics: LlmAnalyticsService) {}
+  constructor(
+    private readonly llmAnalytics: LlmAnalyticsService,
+    private readonly llmCost: LlmCostService,
+    private readonly billingSync: BillingSyncService,
+  ) {}
 
   @Get("summary")
   @ApiOperation({
@@ -138,6 +144,24 @@ export class LlmAnalyticsController {
   })
   getTurnHandoff(@Query() query: LlmTurnHandoffQueryDto) {
     return this.llmAnalytics.getTurnHandoff(query);
+  }
+
+  @Get("cost-daily")
+  @ApiOperation({
+    summary:
+      "LLM 费用（小模型＝阿里云账单真值，主模型＝按 token 估算）：endDate 服务端钳到昨日；账单缺日为 null 不补 0",
+  })
+  getCostDaily(@Query() query: AnalyticsDateRangeQueryDto) {
+    return this.llmCost.getCostDaily(query);
+  }
+
+  @Post("cost/sync")
+  @ApiOperation({
+    summary:
+      "手工触发阿里云账单补拉（T-1..T-N，幂等 upsert）；未配置凭证时返回 unconfigured，不写库",
+  })
+  syncCost() {
+    return this.billingSync.syncRecent();
   }
 
   @Get("slow-calls")

@@ -30,6 +30,9 @@ import { MemoriesAnalyticsController } from "./memories-analytics.controller";
 import { MemoriesAnalyticsService } from "./memories-analytics.service";
 import { LlmAnalyticsController } from "./llm-analytics.controller";
 import { LlmAnalyticsService } from "./llm-analytics.service";
+import { AliyunBillClient } from "./aliyun-bill.client";
+import { BillingSyncService } from "./billing-sync.service";
+import { LlmCostService } from "./llm-cost.service";
 import { ParentReportsAnalyticsController } from "./parent-reports-analytics.controller";
 import { ParentReportsAnalyticsService } from "./parent-reports-analytics.service";
 import { DevicesAdminController } from "./devices-admin.controller";
@@ -79,6 +82,9 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     MessagesAnalyticsService,
     MemoriesAnalyticsService,
     LlmAnalyticsService,
+    AliyunBillClient,
+    BillingSyncService,
+    LlmCostService,
     ParentReportsAnalyticsService,
   ],
 })
