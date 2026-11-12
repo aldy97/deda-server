@@ -196,10 +196,21 @@ export class DeviceLinkService implements OnModuleInit {
     });
 
     if (typeof data.version === "string" && data.version.length > 0) {
+      // mac 是 Redis 口径的大写归一化结果；Prisma 侧 deviceId / macAddress
+      // 一律小写（docs/integration.md「设备业务 ID 与 MAC 同值（十二位小写）」），
+      // 直接拿大写查库会匹配 0 行且 updateMany 不报错，故必须转换后再查。
+      const deviceId = mac.toLowerCase();
       this.prisma.device
         .updateMany({
-          where: { deviceId: mac },
+          where: { OR: [{ deviceId }, { macAddress: deviceId }] },
           data: { firmwareVersion: data.version },
+        })
+        .then(({ count }: { count: number }) => {
+          if (count === 0) {
+            this.logger.warn(
+              `firmwareVersion not persisted: no Device row matches ${deviceId}`,
+            );
+          }
         })
         .catch((err: Error) => {
           this.logger.error(`Failed to update firmwareVersion for ${mac}`, err);

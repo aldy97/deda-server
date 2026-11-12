@@ -575,9 +575,44 @@ describe("DevicesService", () => {
         deviceId: "dev-001",
         status: "online",
         battery: 80,
+        volume: 50,
         isCharging: true,
         lastActiveAt: new Date(lastSeenAt).toISOString(),
       });
+    });
+
+    it("should expose volume so the mini program renders the real device volume", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 75,
+        volume: 80,
+        version: "1.0.7",
+        charging: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.volume).toBe(80);
+    });
+
+    it("should return null volume when the device never reported one", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: null,
+        volume: null,
+        version: null,
+        charging: null,
+        lastSeenAt: null,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.volume).toBeNull();
     });
 
     it("should return offline when device exceeds heartbeat window", async () => {
@@ -617,6 +652,7 @@ describe("DevicesService", () => {
         deviceId: "dev-001",
         status: "offline",
         battery: null,
+        volume: null,
         isCharging: null,
         lastActiveAt: null,
       });

@@ -1,5 +1,5 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, Logger } from "@nestjs/common";
 import { DeviceLinkService } from "./device-link.service";
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
@@ -142,7 +142,9 @@ describe("DeviceLinkService", () => {
       expect(cached.version).toBe("1.2.3");
 
       expect(prisma.device.updateMany).toHaveBeenCalledWith({
-        where: { deviceId: "AABBCCDDEEFF" },
+        where: {
+          OR: [{ deviceId: "aabbccddeeff" }, { macAddress: "aabbccddeeff" }],
+        },
         data: { firmwareVersion: "1.2.3" },
       });
     });
@@ -274,6 +276,91 @@ describe("DeviceLinkService", () => {
         expect.any(String),
         3600,
       );
+    });
+
+    it("should persist firmwareVersion against the lowercase deviceId used by HTTP loginMac", async () => {
+      // 机芯厂真实报文（2026-11-12）：topic 用小写 MAC，Device.deviceId 亦为小写；
+      // Redis key 用大写口径，Prisma 查询必须用小写口径，两者不可混用。
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 75, volume: 80, version: "1.0.7", charging: null },
+        }),
+      );
+
+      service.handleMessage("device/up/9c230cb5d3d4", payload);
+      await flushPromises();
+
+      expect(redisService.setValue).toHaveBeenCalledWith(
+        "device:link:9C230CB5D3D4",
+        expect.any(String),
+        3600,
+      );
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.battery).toBe(75);
+      expect(cached.volume).toBe(80);
+      expect(cached.version).toBe("1.0.7");
+      expect(cached.charging).toBeNull();
+
+      expect(prisma.device.updateMany).toHaveBeenCalledWith({
+        where: {
+          OR: [{ deviceId: "9c230cb5d3d4" }, { macAddress: "9c230cb5d3d4" }],
+        },
+        data: { firmwareVersion: "1.0.7" },
+      });
+    });
+
+    it("should warn when firmwareVersion matches no Device row", async () => {
+      const warnSpy = jest
+        .spyOn(Logger.prototype, "warn")
+        .mockImplementation(() => undefined);
+      prisma.device.updateMany.mockResolvedValue({ count: 0 });
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { version: "1.0.7" },
+        }),
+      );
+
+      service.handleMessage("device/up/9c230cb5d3d4", payload);
+      await flushPromises();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("9c230cb5d3d4"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("should keep cached charging when the report sends explicit null", async () => {
+      // 机芯厂 v1.1 契约 charging 为 boolean | null；显式 null = 当前未知，
+      // 与 battery / volume / version 同口径保留上一次已知值。
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          charging: true,
+          lastSeenAt: Date.now(),
+        }),
+      );
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 75, volume: 80, version: "1.0.7", charging: null },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.charging).toBe(true);
+      expect(cached.volume).toBe(80);
+      expect(cached.battery).toBe(75);
     });
   });
 

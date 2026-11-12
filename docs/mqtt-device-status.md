@@ -20,7 +20,8 @@
 | `GET /devices/{id}/status` HTTP 接口 | ✅ 已实现 | `devices.service.status()`，读 Redis 惰性计算在线 |
 | 小程序展示层（列表/详情） | ✅ 已接好 | status/battery/isCharging 字段全部就位，零改动 |
 | MQTT broker | ✅ 已部署（staging） | `deda-mqtt-staging` 容器（eclipse-mosquitto:2），强制账密认证；公网 1883 待安全组放行 |
-| 充电状态（isCharging） | ✅ 服务端已支持 | device-link 合并 `charging`、status 接口透传；机芯厂固件待补上报字段（未上报时为 `null`） |
+| 充电状态（isCharging） | ✅ 服务端已支持 | device-link 合并 `charging`、status 接口透传；机芯厂 v1.1 契约为 `boolean \| null`，当前固件恒发 `null`，服务端保留上一次已知值 |
+| 音量（volume）读取 | ✅ 已暴露 | `status()` 返回 `volume`，取自 `query` 心跳；供音量控制页显示设备真实音量、并在下发后回读确认生效 |
 
 ## 3. 机芯厂协议约束（硬约束，不可违反）
 
@@ -48,8 +49,9 @@
 
 - 设备每 **5 秒**上报一次 `query` 心跳（即使无变化也必须报）
 - 服务端判定：**15 秒内**（3 倍心跳）有上报 = 在线，否则离线；恢复上报自动转在线
-- `query.data`：`{ battery: 0-100, volume: 0-100, version: "x.y.z", charging: boolean }`
-  （`charging` 为 2026-11-11 约定增补，机芯厂待实现；未上报时服务端按 `null` 处理）
+- `query.data`：`{ battery: 0-100, volume: 0-100, version: "x.y.z", charging: boolean | null }`
+  （`charging` 为 2026-11-11 约定增补，机芯厂 v1.1 已按 `boolean | null` 上报，当前固件恒发 `null`；
+  服务端对 `null` 与字段缺失同口径处理——保留上一次已知值）
 
 ## 4. 总体架构
 
@@ -72,6 +74,9 @@
 - Redis 状态 TTL 3600s：设备离线后仍保留最近一次已知电量/音量供展示，`status` 字段单独判定
 - 音量下发（`POST /devices/{id}/control` action=volume）已走 `device/down/{mac}`，本方案不影响
 - Redis key 中 MAC 为**大写**（`normalizeMac` 归一化）；HTTP loginMac 链路用小写——两套口径并存是有意设计，勿混用
+- **查 Prisma 一律用小写**：`Device.deviceId` / `macAddress` 均为十二位小写（`docs/integration.md`）。
+  从 `device/up/{mac}` 提取的 MAC 是大写口径，落库前必须 `toLowerCase()`，否则 `updateMany`
+  匹配 0 行且不报错（`firmwareVersion` 曾因此长期不落库，2026-11-12 修复，现 `count === 0` 会打 warn）
 
 ## 5. Broker 部署方案（mosquitto）
 
