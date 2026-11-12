@@ -10,6 +10,7 @@ const mockDel = jest.fn();
 const mockZadd = jest.fn();
 const mockZrangebyscore = jest.fn();
 const mockZremrangebyscore = jest.fn();
+const mockMget = jest.fn();
 
 jest.mock("ioredis", () => ({
   __esModule: true,
@@ -23,6 +24,7 @@ jest.mock("ioredis", () => ({
     zadd: mockZadd,
     zrangebyscore: mockZrangebyscore,
     zremrangebyscore: mockZremrangebyscore,
+    mget: mockMget,
   })),
 }));
 
@@ -150,5 +152,58 @@ describe("RedisService", () => {
       await service.zRangeByScoreWithScores("missing-key", 0, 300),
     ).toEqual([]);
     expect(mockZadd).not.toHaveBeenCalled();
+  });
+
+  describe("mGetValue", () => {
+    beforeEach(() => {
+      mockGet.mockReset();
+    });
+
+    it("returns empty array without touching Redis when keys is empty", async () => {
+      const service = createService();
+
+      const result = await service.mGetValue([]);
+
+      expect(result).toEqual([]);
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it("returns all values in key order via Redis MGET", async () => {
+      mockMget.mockResolvedValue(["val-a", "val-b", null, "val-d"]);
+      const service = createService();
+
+      const result = await service.mGetValue([
+        "key-a",
+        "key-b",
+        "key-c",
+        "key-d",
+      ]);
+
+      expect(result).toEqual(["val-a", "val-b", null, "val-d"]);
+    });
+
+    it("uses in-memory cache when Redis is not configured", async () => {
+      const service = createService("");
+
+      await service.setValue("k1", "v1");
+      await service.setValue("k2", "v2");
+
+      const result = await service.mGetValue(["k1", "k2", "k3"]);
+
+      expect(result).toEqual(["v1", "v2", null]);
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it("respects TTL expiry in in-memory mode", async () => {
+      const now = jest.spyOn(Date, "now").mockReturnValue(1_000);
+      const service = createService("");
+      await service.setValue("exp", "val", 1);
+      await service.setValue("perm", "val");
+
+      now.mockReturnValue(2_001);
+      const result = await service.mGetValue(["exp", "perm"]);
+
+      expect(result).toEqual([null, "val"]);
+    });
   });
 });
