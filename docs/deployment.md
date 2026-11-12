@@ -38,8 +38,8 @@ feature/xxx  ──PR──▶  staging  ──PR(发布)──▶  main
 | 分支 | 说明 | 触发 | 环境 |
 | --- | --- | --- | --- |
 | `feature/*` | 从 `staging` 切出；新 PR 默认 base 即 staging | PR → CI | — |
-| `staging` | 集成分支，merge 即部署 | push/merge → Deploy Staging | `http://ECS_IP:3001`（备案后 `staging.xxxx.com`） |
-| `main` | 发布分支，只接受来自 staging 的 PR | push/merge → Deploy Production | 备案后 `xxxx.com`（HTTPS） |
+| `staging` | 集成分支，merge 即部署 | push/merge → Deploy Staging | `https://staging.valleyletters.com` |
+| `main` | 发布分支，只接受来自 staging 的 PR | push/merge → Deploy Production | `https://valleyletters.com`（HTTPS） |
 
 - 两个分支的 push/PR 都会跑 CI（lint + tsc + build + 单测 + e2e）。
 - **hotfix 规则**：紧急修复可走 `hotfix/xxx → main` 的 PR，合并后必须把 main 回合（back-merge）到 staging，否则下次发布会把 hotfix 冲掉。
@@ -134,16 +134,16 @@ chmod +x /opt/deda/backup.sh
 
 恢复演练（建议每月一次）：`gunzip -c <备份> | docker exec -i deda-postgres-prod psql -U deda deda`。
 
-## 6. 备案后切换清单
+## 6. 备案后切换清单（已于 2026-11-12 全部完成）
 
-域名 ICP 备案完成后按顺序执行：
+域名 ICP 备案已完成（沪ICP备2026060466号-1，valleyletters.com），执行记录：
 
-1. DNS：把 `xxxx.com`、`staging.xxxx.com` A 记录指向 ECS 公网 IP。
-2. 编辑 `nginx/nginx.prod.conf`：把 `xxxx.com` 占位替换为真实域名（commit 后随下次部署同步到服务器，或直接在 `/opt/deda/nginx/` 改）。
-3. 签发证书：`certbot certonly --standalone -d xxxx.com -d staging.xxxx.com`（先临时停掉占用 80 的容器），证书挂进 nginx（`/etc/letsencrypt` 已在 prod compose 中挂载）。
-4. 安全组放行 `80`、`443`。
-5. 微信小程序后台：request 合法域名加入 `https://xxxx.com`；staging 联调用 `https://staging.xxxx.com`。
-6. 验证：`curl -I https://xxxx.com/api/docs`、`curl -I https://staging.xxxx.com/api/docs`。
+1. ~~DNS~~：已把 `valleyletters.com`、`www`、`staging` A 记录指向 ECS 公网 IP（2026-11-12）。
+2. ~~nginx.prod.conf~~：已替换为真实域名，随本 commit 同步到服务器。
+3. ~~证书~~：Let's Encrypt 已签发（standalone 模式），证书在 ECS `/etc/letsencrypt/live/`，自动续期 `/opt/deda/certbot/renew.sh`（每周一 03:17 cron）。
+4. ~~安全组~~：`80`、`443` 已放行（系统规则）。
+5. 微信小程序后台：request 合法域名加入 `https://valleyletters.com`；staging 联调用 `https://staging.valleyletters.com`。
+6. 验证：`curl -I https://valleyletters.com/api/docs`、`curl -I https://staging.valleyletters.com/api/docs`。
 7. 可选：安全组收回 `3001`（staging 此后走域名）。
 
 ## 6.1 deda-dashboard 静态托管
@@ -153,7 +153,7 @@ dashboard SPA（deda-dashboard 仓库）由两条通道承载，共用同一份�
 | 通道 | 适用期 | 入口 |
 | --- | --- | --- |
 | Nest 内嵌托管（ServeStaticModule，`serveRoot=/dashboard`） | 备案期间 staging 直连 | `http://<ECS_IP>:3001/dashboard/` |
-| nginx `location /dashboard/`（alias + SPA 回退） | 备案后正式形态，Nest 保留为兜底 | `https://xxxx.com/dashboard/`、`https://staging.xxxx.com/dashboard/` |
+| nginx `location /dashboard/`（alias + SPA 回退） | 备案后正式形态，Nest 保留为兜底 | `https://valleyletters.com/dashboard/`、`https://staging.valleyletters.com/dashboard/` |
 
 产物目录约定（**由 deda-dashboard 仓库流水线负责 build 并投递**，本仓库 CI 只 `mkdir -p`）：
 
