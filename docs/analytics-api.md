@@ -35,12 +35,14 @@ GET /analytics/overview?date=            (缺省=昨天 T-1)
     funnel: { shipped, activated, firstConversation, active7d }     // shipped 一期恒 null
   }
 ```
+
 - 激活率分母：无出货数据时退化为已入库设备数（devices 全量）。
 
 ```
 GET /analytics/overview/trend?startDate=&endDate=&granularity=day&metrics=dau,avgDuration,newActivated&characterKey=
 → { startDate, endDate, granularity, series: [{ date, dau, avgDurationSeconds, devicesPoweredOn, newActivatedDevices, newUsers }] }
 ```
+
 - metrics 可选值：`dau, avgDuration, poweredOn, newActivated, newUsers`，逗号分隔多选，缺省全量；非法值 400。
 - 无数据日期补零；week 粒度按 ISO 周（周一）聚合，month 按自然月；devicesPoweredOn 一期恒 null。
 - characterKey 过滤按设备型号（elly/polly）。
@@ -51,6 +53,7 @@ GET /analytics/overview/trend?startDate=&endDate=&granularity=day&metrics=dau,av
 GET /analytics/retention/cohorts?startDate=&endDate=&granularity=week&basis=activation
 → { basis, granularity, cohorts: [{ cohort: "2026-W41", size, retention: [{ n, rate }] }] }
 ```
+
 - basis：`activation`=首次绑定；`firstUse`=首次 user 消息（解绑后仍可追溯）。
 - n=0 恒为 1；n 为激活后第 n 天/周仍有 user 消息。
 - 注意：activation 口径基于当前绑定记录，设备解绑后会从 cohort 消失（二期落 activation 快照表后冻结）。
@@ -59,12 +62,14 @@ GET /analytics/retention/cohorts?startDate=&endDate=&granularity=week&basis=acti
 GET /analytics/retention/curve?cohortStartDate=&cohortEndDate=
 → { points: [{ day: 1|3|7|14|30|60|90, rate }], cohortSize }
 ```
+
 - 仅激活满 N 天的设备计入该点分母；无合格设备时 rate=null。
 
 ```
 GET /analytics/activation/funnel?startDate=&endDate=
 → { steps: [{ key, label, value }], conversionRates: [{ from, to, rate }] }
 ```
+
 - steps：shipped(null) → activated → first_conversation → active_d7 → active_d30。
 
 ## 使用行为（P3）
@@ -91,6 +96,7 @@ GET /analytics/engagement/feature-adoption?date=
     { key: "habit_plan",  label: "习惯打卡", activeDevices, penetrationRate, avgCompletionRate },
     { key: "english",     label: "英语对话", activeDevices, penetrationRate } ] }
 ```
+
 - 渗透率分母 = 已激活设备（有绑定关系去重）；english/adventure 按近 30 天活跃口径。
 
 ## 用户画像（P5）
@@ -105,6 +111,7 @@ GET /analytics/users/demographics
     characterKeySplit: [{ characterKey, devices }],
     bindingsPerDevice: [{ count: 1|2|"3+", devices }] }
 ```
+
 - PII 红线：只出年龄段与计数，不出姓名、生日、openid。
 
 ## 内容与质量（P6）
@@ -278,10 +285,10 @@ POST /analytics/llm/cost/sync
 
 两条源，语义不同，页面上必须区分标注：
 
-| 口径       | 来源                                                          | 精度                                             |
-| ---------- | ------------------------------------------------------------- | ------------------------------------------------ |
+| 口径       | 来源                                                                      | 精度                                                       |
+| ---------- | ------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | 小模型金额 | 阿里云 BSS `DescribeInstanceBill` → `llm_cost_daily`（应付 PretaxAmount） | 账单真值；延迟 24h 出账，当月为暂估，次月 3 日 12 点后终账 |
-| 主模型金额 | `llm_usage_logs.costMicroCny`（写库时按当时定价快照）          | 估算；缺缓存命中数时是上界                       |
+| 主模型金额 | `llm_usage_logs.costMicroCny`（写库时按当时定价快照）                     | 估算；缺缓存命中数时是上界                                 |
 
 - 埋点：`LlmService.logUsage()` 落 `cacheHitInputTokens` 与 `costMicroCny`。DeepSeek 实测
   `prompt_cache_hit_tokens + prompt_cache_miss_tokens === prompt_tokens`（命中数已含在 prompt_tokens 内），
@@ -294,6 +301,90 @@ POST /analytics/llm/cost/sync
   凭证：`ALIYUN_BSS_ACCESS_KEY_ID/SECRET`（本地/staging）或 `ALIYUN_BSS_USE_RAM_ROLE=true`（生产走 ECS 实例角色，密钥不落盘）。
 - `cacheHitInputTokens IS NULL` 即「上界估算」标记；回填脚本对历史行只能按未命中价算，
   因此老数据的 `mainAccuracy` 多为 `upper_bound`，前端用虚线 + Tag 区分。
+
+## 判定质量监控（decisions）
+
+数据源 `turn_decision_logs`：`LlmAdapterService.streamReply()` 在每个编排出口埋点
+（fire-and-forget upsert on `turnId`，写库失败只记日志不影响对话）。
+
+与「模型监控（LLM）」的分工：`llm_usage_logs` 回答**模型调用健康吗**（成功率/延迟/token/费用），
+本组接口回答**模型的判定可信吗**（拦了多少、放行里有多少其实没审、意图有多少是关键词兜底兜出来的）。
+两者按 `turnId` 可互查。
+
+`safetySource` 枚举（**看板必须按它分桶，不能按 safetyCategory**，否则 safe 与 fail-open 混成一桶）：
+
+| 值                 | 含义                                              | 是否放行 | 处置                           |
+| ------------------ | ------------------------------------------------- | -------- | ------------------------------ |
+| `l1_regex`         | L1 正则闸命中                                     | 否       | 看 `safetyMatched` 查误伤      |
+| `l2_model`         | 小模型给出合法标签（含 `safe`）                   | 视类别   | 正常                           |
+| `l2_invalid_label` | 小模型有响应但标签不在契约内 → 放行               | 是       | **静默降级**，升高=prompt 退化 |
+| `l2_fail_open`     | 小模型调用异常 → 放行，靠 L3 大模型 prompt 兜底   | 是       | **静默降级**，升高=模型不可用  |
+| `not_evaluated`    | 本轮根本没做 L2（冒险状态机在编排上早于 L2 接管） | 是       | **已知盲区**，见下方警示       |
+
+> ⚠️ 盲区警示：编排顺序是 L1 → 冒险接管 → `Promise.all([L2, intent])`，
+> 所以**冒险互动轮次完全绕过 L2**，只有 L1 正则兜着，而 L1 刻意不收「杀/打/揍/枪/刀/去死」
+> 这类孩子的气话（见 `child-safety.service.ts` 头部校准原则）。本期按熊总决定**只监控不改行为**：
+> `not_evaluated` + `adventure_takeover` 的占比就是这块盲区的暴露面。
+
+> 口径警示：埋点在每个 `return` 之前而非 `finally`——`streamReply` 是 async generator，
+> 消费方直接丢弃迭代器时 `finally` 不保证执行。代价是未捕获异常中断的轮次没有判定记录，
+> 因此**判定记录数 ≤ 对话轮次数**，页面文案必须写明，不能把差值解读成「漏审」。
+
+```
+GET /analytics/decisions/safety-summary?startDate=&endDate=
+→ { total, blockedCount, blockRate,
+    byCategory: [{ category, count, blockedCount }],   // category 可为 null（未能判定），按严重度排序不按计数
+    byLayer:    [{ layer, count }],                    // L1 / L2 / null
+    bySource:   [{ source, count }],
+    failOpenCount, invalidLabelCount, notEvaluatedCount,
+    emotionalHarmCount,                                // 不拦截但注入共情引导，是行为改变点，单独可见
+    reviewableCount }                                  // 留有原文、可进复核队列的条数
+   // 分母 0 时 blockRate=null；emotional_harm 计入 total 但不计入 blockedCount
+
+GET /analytics/decisions/safety-trend?startDate=&endDate=&granularity=day
+→ { granularity, series: [{ date, total, blockedCount, blockRate,
+                            failOpenCount, invalidLabelCount, notEvaluatedCount,
+                            emotionalHarmCount }] }
+   // granularity: day/week/month（week 周一起始）；无数据日期补零且比率为 null；
+   // 日期边界按 Asia/Shanghai 切日，与其余 analytics 接口同口径
+
+GET /analytics/decisions/intent-summary?startDate=&endDate=
+→ { total,
+    byIntent: [{ intent, count }],          // intent 为 null = 本轮没走到意图路由，按计数倒序
+    bySource: [{ source, count }],
+    modelInvokedCount, modelInvokedRate,    // source=model 的占比，跌了说明小模型在失效
+    fallbackCount, fallbackRate,            // fallback_invalid_label + fallback_error
+    notRoutedCount,                         // 被 L1/L2 拦截，未分类
+    adventureTakeoverCount,                 // 冒险接管，未分类（与 not_evaluated 同一批轮次）
+    matrix: [{ intent, source, count }] }   // intent × source 交叉，排查「说要听故事却在闲聊」用这张表
+   // intentSource 枚举：model / fallback_invalid_label / fallback_error / pre_filter_skip /
+   //   continuation / session_sticky / explicit_exit / adventure_takeover / not_routed / no_device
+   // 分母 0 时两个 rate 均为 null；no_device = 匿名链路，无会话状态可依赖，恒定 free_chat
+
+GET /analytics/decisions/intent-trend?startDate=&endDate=&granularity=day
+→ { granularity, series: [{ date, total, modelInvoked, fallbackCount,
+                            byIntent: [{ intent, count }] }] }
+
+GET /analytics/decisions/review-queue?startDate=&endDate=&category=&deviceId=&page=1&pageSize=20&sort=createdAt_desc
+→ { total, page, pageSize,
+    items: [{ turnId, deviceId, channel, createdAt, safetyLayer, safetyCategory,
+              safetySource, safetyMatched, asrText, intent, intentSource }] }
+   // 人工复核队列。恒定附加 asrText IS NOT NULL（服务端强制，调用方无法绕过）：
+   //   只有「拦了」或「判成非 safe 类别」的轮次才留原文，正常轮次不积累儿童语料。
+   // category 走白名单（sexual/self_harm/violence/emotional_harm/safe），拼错 400 而非静默返回空；
+   // deviceId 是内部 UUID；sort 只允许 createdAt_desc/createdAt_asc；pageSize ≤ 100。
+   // 本期只读：reviewLabel / reviewedAt 两列已建，写接口留待二期（见「二期预告」）。
+   // asrText 是儿童语音转写 → 前端默认打码、点击展开，禁止直接投屏。
+```
+
+### 判定记录的留存策略
+
+- **明细永久保留**，不设 TTL、不做预聚合表（安全审计与申诉回溯需要原始逐轮记录）。
+- `asrText` 列宽 `VARCHAR(200)`，超长截断；任何日志（含落库失败的 warn）都不得携带。
+- `deviceId` **刻意不设外键**：安全审计要保留设备标识，不随设备 wipe 级联删除。
+- summary 走 Prisma `groupBy`（DB 侧聚合）；trend 走 `findMany` + 内存分桶，但 `select` 只取
+  聚合必需的四列。不用 `$queryRaw` 做 DB 侧日期分桶：时区截断的正确性只有 e2e 能验证，
+  而本期不为 analytics 增加 e2e，内存分桶可以纯单测覆盖。放开长区间前应先补 e2e。
 
 ## 消息明细（P1.5）
 
@@ -354,3 +445,6 @@ POST /analytics/devices/:deviceId/wipe
 - `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
 - ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。
+- `turn_decision_logs.reviewLabel / reviewedAt` 写接口（人工复核闭环）：两列本期已建、看板只读，
+  二期补 `POST /analytics/decisions/review`（复核结论 correct / false_positive / missed），
+  才能算出小模型的**真实漏放率与误伤率**——目前只有模型自报的判定，没有人工真值做对照。

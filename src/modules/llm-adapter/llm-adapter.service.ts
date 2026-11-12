@@ -29,6 +29,8 @@ import {
   BlockedSafetyCategory,
   ChildSafetyService,
 } from "@/modules/vendor/child-safety.service";
+import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
+import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 
 /** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默。
@@ -102,6 +104,7 @@ export class LlmAdapterService {
     private readonly sleepConfigs: SleepConfigsService,
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
+    private readonly turnDecisions: TurnDecisionRecorder,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -192,6 +195,16 @@ export class LlmAdapterService {
           turnId,
         );
       }
+      // 判定审计：L1 拦截轮不走意图路由，intent 记 null + not_routed，
+      // 不能落成 free_chat——那会把拦截轮混进闲聊分母，意图分布就成了假数据
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device?.id ?? null,
+        safety: verdict,
+        intent: null,
+        intentSource: "not_routed",
+        asrText,
+      });
       yield canned;
       return;
     }
@@ -203,6 +216,19 @@ export class LlmAdapterService {
         asrText,
       );
       if (adventureReply) {
+        // 编排顺序上冒险状态机早于 L2：本轮既没做语义安全审查、也没做意图分类，
+        // 只有上面的 L1 正则兜着（L1 刻意不收「杀/打/去死」这类气话）。
+        // 如实记 not_evaluated / adventure_takeover 让看板暴露这块盲区，
+        // 而不是伪装成「L2 判 safe」。
+        this.turnDecisions.record({
+          turnId,
+          deviceId: device.id,
+          safety: null,
+          safetySource: "not_evaluated",
+          intent: null,
+          intentSource: "adventure_takeover",
+          asrText,
+        });
         yield* this.emitAdventureReply(device, adventureReply, asrText);
         return;
       }
@@ -211,12 +237,21 @@ export class LlmAdapterService {
     // L2 语义安全分类与意图路由并行（同老链路 Promise.all）：
     // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
     // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
-    const [l2, intent] = await Promise.all([
+    const [l2, intentDecision] = await Promise.all([
       this.safeClassifyL2(asrText, device?.id, turnId),
       device
         ? this.safeResolveIntent(device.id, asrText, turnId)
-        : Promise.resolve<ConversationIntent>("free_chat"),
+        : // 匿名链路没有会话状态可依赖，恒定 free_chat；来源单独标记，
+          // 不能与「小模型判出的 free_chat」混成一桶
+          Promise.resolve<TurnIntentDecision>({
+            intent: "free_chat",
+            source: "no_device",
+          }),
     ]);
+    const intent = intentDecision.intent;
+    // safeClassifyL2 的外层 catch 连 verdict 都拿不到，此时记 l2_fail_open，
+    // 与「本轮根本没做 L2」的 not_evaluated 严格区分
+    const l2SourceOverride = l2 ? undefined : ("l2_fail_open" as const);
 
     if (
       l2?.blocked &&
@@ -242,6 +277,15 @@ export class LlmAdapterService {
           turnId,
         );
       }
+      // 判定审计：L2 拦截轮同样没走到意图路由
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device?.id ?? null,
+        safety: l2,
+        intent: null,
+        intentSource: "not_routed",
+        asrText,
+      });
       yield canned;
       return;
     }
@@ -269,6 +313,16 @@ export class LlmAdapterService {
         },
       );
       yield result.replyText;
+      // 判定审计：短链路也是一轮完整判定，intentSource 透传会话服务的成因
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device.id,
+        safety: l2,
+        safetySource: l2SourceOverride,
+        intent,
+        intentSource: intentDecision.source,
+        asrText,
+      });
       return;
     }
 
@@ -288,6 +342,16 @@ export class LlmAdapterService {
         );
         if (startedAdventure) {
           await this.conversationSession.reset(device.id);
+          // 判定审计：本轮 L2 已评估（与冒险接管不同），intent 来自路由结果
+          this.turnDecisions.record({
+            turnId,
+            deviceId: device.id,
+            safety: l2,
+            safetySource: l2SourceOverride,
+            intent,
+            intentSource: intentDecision.source,
+            asrText,
+          });
           yield* this.emitAdventureReply(device, startedAdventure, asrText);
           return;
         }
@@ -570,6 +634,21 @@ export class LlmAdapterService {
         }
       }
     }
+
+    // 判定审计：主链路唯一正常出口（含 llmFailed 兜底）。成功与失败都要记——
+    // 判定质量与主模型成败是两件事，不能因为主模型挂了就把这轮判定丢掉。
+    // 放在这里而不是 finally：streamReply 是 async generator，消费方直接丢弃
+    // 迭代器时 finally 不保证执行；代价是未捕获异常中断的轮次没有判定记录，
+    // 所以看板文案必须写明「判定记录数 ≤ 对话轮次数」。
+    this.turnDecisions.record({
+      turnId,
+      deviceId: device?.id ?? null,
+      safety: l2,
+      safetySource: l2SourceOverride,
+      intent,
+      intentSource: intentDecision.source,
+      asrText,
+    });
   }
 
   /** 非流式：聚合全部 chunk 为整段文本 */
@@ -707,14 +786,15 @@ export class LlmAdapterService {
     }
   }
 
-  /** 意图路由包装：会话服务异常时降级 free_chat，不让孩子面对沉默 */
+  /** 意图路由包装：会话服务异常时降级 free_chat，不让孩子面对沉默。
+   *  取 resolveWithSource 而非 resolve，好把「模型判的」和「兜底兜出来的」分开落库。 */
   private async safeResolveIntent(
     deviceInternalId: string,
     asrText: string,
     turnId?: string,
-  ): Promise<ConversationIntent> {
+  ): Promise<TurnIntentDecision> {
     try {
-      return await this.conversationSession.resolve(
+      return await this.conversationSession.resolveWithSource(
         deviceInternalId,
         asrText,
         turnId,
@@ -724,7 +804,7 @@ export class LlmAdapterService {
       this.logger.warn(
         `Intent resolution failed, fallback free_chat: ${message}`,
       );
-      return "free_chat";
+      return { intent: "free_chat", source: "fallback_error" };
     }
   }
 

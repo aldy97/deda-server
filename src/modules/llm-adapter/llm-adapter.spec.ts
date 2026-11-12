@@ -14,6 +14,7 @@ import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-con
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 
 const VALID_TOKEN = "test-adapter-key";
@@ -53,7 +54,8 @@ describe("LlmAdapterModule", () => {
     extractAndStore: jest.Mock;
     markInjected: jest.Mock;
   };
-  let session: { resolve: jest.Mock; reset: jest.Mock };
+  let session: { resolveWithSource: jest.Mock; reset: jest.Mock };
+  let turnDecisions: { record: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let adventure: {
@@ -99,11 +101,13 @@ describe("LlmAdapterModule", () => {
         blocked: false,
         category: null,
         layer: null,
+        source: "l1_regex",
       }),
       classifyL2: jest.fn().mockResolvedValue({
         blocked: false,
-        category: null,
-        layer: null,
+        category: "safe",
+        layer: "L2",
+        source: "l2_model",
       }),
       cannedReply: jest.fn().mockReturnValue("这个话题不适合小朋友聊哦。"),
     };
@@ -135,9 +139,12 @@ describe("LlmAdapterModule", () => {
       markInjected: jest.fn().mockResolvedValue(undefined),
     };
     session = {
-      resolve: jest.fn().mockResolvedValue("free_chat"),
+      resolveWithSource: jest
+        .fn()
+        .mockResolvedValue({ intent: "free_chat", source: "model" }),
       reset: jest.fn().mockResolvedValue(undefined),
     };
+    turnDecisions = { record: jest.fn() };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -171,6 +178,7 @@ describe("LlmAdapterModule", () => {
         { provide: SleepConfigsService, useValue: sleepConfigs },
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
+        { provide: TurnDecisionRecorder, useValue: turnDecisions },
         {
           provide: ConfigService,
           useValue: { get: configGet },
@@ -199,10 +207,13 @@ describe("LlmAdapterModule", () => {
 
     it("resolves intent per turn and snapshots the resolved mode on messages", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("english_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "english_story",
+        source: "model",
+      });
       llm.completeStream.mockReturnValue(makeStream(["Once upon..."])());
       await collect(service.streamReply(boundRequest));
-      expect(session.resolve).toHaveBeenCalledWith(
+      expect(session.resolveWithSource).toHaveBeenCalledWith(
         "dev-internal-1",
         "讲一个英语故事",
         expect.any(String),
@@ -233,7 +244,10 @@ describe("LlmAdapterModule", () => {
 
     it("故事话术按 favorite_story_type 主动选题", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("idiom_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "idiom_story",
+        source: "model",
+      });
       memories.buildPreferenceBlock.mockResolvedValue({
         text: "PREFS",
         memoryIds: ["m9"],
@@ -260,7 +274,10 @@ describe("LlmAdapterModule", () => {
 
     it("short-circuits sleep_config to a deterministic reply without the main LLM", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("sleep_config");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_config",
+        source: "model",
+      });
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "哄睡改成二十分钟" }],
@@ -280,7 +297,10 @@ describe("LlmAdapterModule", () => {
 
     it("persists voice content preference on sleep_story with 儿歌 keyword", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("sleep_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "我要听睡前儿歌" }],
@@ -305,7 +325,10 @@ describe("LlmAdapterModule", () => {
 
     it("routes free_story to free_chat mode with a no-adventure-promise prompt", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("free_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_story",
+        source: "model",
+      });
       llm.completeStream.mockReturnValue(makeStream(["故事来了"])());
       await collect(service.streamReply(boundRequest));
       const assistantCall = prisma.message.create.mock.calls[1][0];
@@ -325,7 +348,10 @@ describe("LlmAdapterModule", () => {
         mode: "english_chat",
         conversationModeKey: null,
       });
-      session.resolve.mockResolvedValue("free_chat");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+      });
       llm.completeStream.mockReturnValue(makeStream(["ok"])());
       await collect(service.streamReply(boundRequest));
       expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
@@ -346,7 +372,10 @@ describe("LlmAdapterModule", () => {
       prisma.conversationMode.findFirst.mockResolvedValue({
         promptTemplate: "SUBMODE-TPL",
       });
-      session.resolve.mockResolvedValue("free_chat");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+      });
       llm.completeStream.mockReturnValue(makeStream(["ok"])());
       await collect(service.streamReply(boundRequest));
       expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
@@ -362,7 +391,7 @@ describe("LlmAdapterModule", () => {
 
     it("degrades to free_chat when intent resolution throws", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockRejectedValue(new Error("session db down"));
+      session.resolveWithSource.mockRejectedValue(new Error("session db down"));
       llm.completeStream.mockReturnValue(makeStream(["ok"])());
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["ok"]);
@@ -379,7 +408,7 @@ describe("LlmAdapterModule", () => {
           messages: [{ role: "user", content: "讲一个英语故事" }],
         }),
       );
-      expect(session.resolve).not.toHaveBeenCalled();
+      expect(session.resolveWithSource).not.toHaveBeenCalled();
       expect(sleepVoice.handle).not.toHaveBeenCalled();
     });
   });
@@ -408,7 +437,7 @@ describe("LlmAdapterModule", () => {
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["段落一", "段落二"]);
       // 接管后不再做意图分类、不进主模型
-      expect(session.resolve).not.toHaveBeenCalled();
+      expect(session.resolveWithSource).not.toHaveBeenCalled();
       expect(llm.completeStream).not.toHaveBeenCalled();
       // user/assistant 成对落库，mode=adventure_story
       expect(prisma.message.create).toHaveBeenCalledTimes(2);
@@ -434,7 +463,10 @@ describe("LlmAdapterModule", () => {
 
     it("enters adventure on adventure_story intent when today is not completed", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("adventure_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "adventure_story",
+        source: "model",
+      });
       adventure.startToday.mockResolvedValue({
         texts: ["冒险开场"],
         action: "narrate",
@@ -448,7 +480,10 @@ describe("LlmAdapterModule", () => {
 
     it("blocks entry and records it when today's adventure is completed", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("adventure_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "adventure_story",
+        source: "model",
+      });
       adventure.isCompletedToday.mockResolvedValue(true);
       llm.completeStream.mockReturnValue(makeStream(["自由故事"])());
       const chunks = await collect(service.streamReply(boundRequest));
@@ -470,7 +505,10 @@ describe("LlmAdapterModule", () => {
 
     it("falls back to free-story prompt when no episode is available", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("adventure_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "adventure_story",
+        source: "model",
+      });
       adventure.startToday.mockResolvedValue(null);
       llm.completeStream.mockReturnValue(makeStream(["自由故事"])());
       const chunks = await collect(service.streamReply(boundRequest));
@@ -1402,7 +1440,10 @@ describe("LlmAdapterModule", () => {
         key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
       );
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("adventure_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "adventure_story",
+        source: "model",
+      });
       adventure.isCompletedToday.mockResolvedValue(true);
       llm.completeStream.mockImplementation((opts: { scene: string }) =>
         opts.scene === "filler"
@@ -1498,7 +1539,10 @@ describe("LlmAdapterModule", () => {
 
     it("raises main-stream maxTokens to 800 for story turns", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolve.mockResolvedValue("idiom_story");
+      session.resolveWithSource.mockResolvedValue({
+        intent: "idiom_story",
+        source: "model",
+      });
       llm.completeStream.mockReturnValue(makeStream(["从前有只小青蛙"])());
       const req: ChatCompletionRequest = {
         ...boundRequest,
@@ -1593,7 +1637,7 @@ describe("LlmAdapterModule", () => {
         "dev-internal-1",
         turnId,
       );
-      expect(session.resolve).toHaveBeenCalledWith(
+      expect(session.resolveWithSource).toHaveBeenCalledWith(
         "dev-internal-1",
         expect.any(String),
         turnId,
@@ -1690,6 +1734,7 @@ describe("LlmAdapterModule", () => {
           { provide: SleepConfigsService, useValue: sleepConfigs },
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
+          { provide: TurnDecisionRecorder, useValue: turnDecisions },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
       }).compile();
@@ -1898,6 +1943,220 @@ describe("LlmAdapterModule", () => {
       expect(contentChunks).toBe("Hi!");
       const lastChunk = parseFrame(frames[frames.length - 2]);
       expect(lastChunk.choices[0].finish_reason).toBe("stop");
+    });
+  });
+
+  /**
+   * 判定审计埋点：每个编排出口都必须恰好落一条 turn_decision_logs，
+   * 且「未评估 / 未路由 / 无设备」不能被伪装成「模型判 safe」或「free_chat」。
+   * 这是安全看板可信度的地基——分母错了，拦截率和漏放率都是假数字。
+   */
+  describe("判定审计埋点（turn_decision_logs）", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundReq = (content: string): ChatCompletionRequest => ({
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content }],
+    });
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    /** 硬断言：一轮恰好一条判定记录，多写会让重试灌水，少写会漏掉盲区 */
+    const recorded = () => {
+      expect(turnDecisions.record).toHaveBeenCalledTimes(1);
+      return turnDecisions.record.mock.calls[0][0];
+    };
+
+    it("L1 拦截：记 l1_regex + 命中词，intent 记 not_routed 而非 free_chat", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.checkL1.mockReturnValue({
+        blocked: true,
+        category: "sexual",
+        layer: "L1",
+        source: "l1_regex",
+        matched: "色情",
+      });
+
+      await collect(service.streamReply(boundReq("假数据-敏感表达")));
+
+      const entry = recorded();
+      expect(entry.safety).toMatchObject({
+        blocked: true,
+        category: "sexual",
+        layer: "L1",
+        source: "l1_regex",
+        matched: "色情",
+      });
+      expect(entry).toMatchObject({
+        deviceId: "dev-internal-1",
+        intent: null,
+        intentSource: "not_routed",
+        asrText: "假数据-敏感表达",
+      });
+      expect(llm.completeStream).not.toHaveBeenCalled();
+    });
+
+    it("冒险接管：safety 记 not_evaluated、intent 记 adventure_takeover（盲区如实暴露）", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["段落一"],
+        action: "await_reply",
+      });
+
+      await collect(service.streamReply(boundReq("我选第一个")));
+
+      expect(recorded()).toMatchObject({
+        deviceId: "dev-internal-1",
+        safety: null,
+        safetySource: "not_evaluated",
+        intent: null,
+        intentSource: "adventure_takeover",
+      });
+      expect(childSafety.classifyL2).not.toHaveBeenCalled();
+    });
+
+    it("L2 拦截：记 l2_model 与类别，intent 记 not_routed，原话交给 recorder 判定是否留存", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      await collect(service.streamReply(boundReq("假数据-暴力表达")));
+
+      const entry = recorded();
+      expect(entry.safety).toMatchObject({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      expect(entry.intent).toBeNull();
+      expect(entry.intentSource).toBe("not_routed");
+      expect(entry.asrText).toBe("假数据-暴力表达");
+    });
+
+    it("L2 包装层异常（连 verdict 都没拿到）：记 l2_fail_open 而非 not_evaluated", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockRejectedValue(new Error("small model down"));
+      llm.completeStream.mockReturnValue(makeStream(["嗯，我在听"])());
+
+      await collect(service.streamReply(boundReq("今天想聊什么")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "l2_fail_open",
+        intent: "free_chat",
+        intentSource: "model",
+      });
+    });
+
+    it("哄睡设置短链路：intent 记 sleep_config 并透传会话服务给出的 source", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_config",
+        source: "fallback_invalid_label",
+      });
+
+      await collect(service.streamReply(boundReq("以后睡前都听儿歌")));
+
+      expect(recorded()).toMatchObject({
+        intent: "sleep_config",
+        intentSource: "fallback_invalid_label",
+      });
+      expect(llm.completeStream).not.toHaveBeenCalled();
+    });
+
+    it("意图路由后进入冒险：本轮 L2 已评估，判定照落", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "adventure_story",
+        source: "model",
+      });
+      adventure.startToday.mockResolvedValue({
+        texts: ["冒险开场"],
+        action: "narrate",
+      });
+
+      await collect(service.streamReply(boundReq("我想玩每日冒险")));
+
+      const entry = recorded();
+      expect(entry).toMatchObject({
+        intent: "adventure_story",
+        intentSource: "model",
+      });
+      expect(entry.safety).toMatchObject({ layer: "L2", source: "l2_model" });
+    });
+
+    it("主链路正常完成：turnId 与 assistant 消息同轮，可按轮次串起判定与用量", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["你好呀"])());
+
+      await collect(service.streamReply(boundReq("你好")));
+
+      const entry = recorded();
+      expect(entry).toMatchObject({
+        intent: "free_chat",
+        intentSource: "model",
+        asrText: "你好",
+      });
+      const assistantCall = prisma.message.create.mock.calls.at(-1)![0];
+      expect(assistantCall.data.role).toBe("assistant");
+      expect(entry.turnId).toBe(assistantCall.data.turnId);
+      expect(typeof entry.turnId).toBe("string");
+    });
+
+    it("主模型失败走兜底话术：判定照落（判定质量与主模型成败无关）", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockImplementation(() => {
+        throw new LlmUpstreamError("upstream_error", "HTTP 500", false);
+      });
+
+      const chunks = await collect(service.streamReply(boundReq("你好")));
+
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(recorded()).toMatchObject({
+        intent: "free_chat",
+        intentSource: "model",
+      });
+    });
+
+    it("意图解析异常降级：intentSource 记 fallback_error，不伪装成模型判定", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockRejectedValue(new Error("session db down"));
+      llm.completeStream.mockReturnValue(makeStream(["嗯"])());
+
+      await collect(service.streamReply(boundReq("我想听英语故事")));
+
+      expect(recorded()).toMatchObject({
+        intent: "free_chat",
+        intentSource: "fallback_error",
+      });
+    });
+
+    it("匿名链路（请求不带设备标识）：deviceId 落 null，intentSource 记 no_device", async () => {
+      llm.completeStream.mockReturnValue(makeStream(["你好呀"])());
+
+      await collect(
+        service.streamReply({
+          model: "deda-english-tutor",
+          stream: true,
+          messages: [{ role: "user", content: "你好" }],
+        }),
+      );
+
+      expect(recorded()).toMatchObject({
+        deviceId: null,
+        intent: "free_chat",
+        intentSource: "no_device",
+      });
     });
   });
 });

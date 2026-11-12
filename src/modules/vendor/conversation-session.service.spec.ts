@@ -321,4 +321,185 @@ describe("ConversationSessionService", () => {
       }),
     );
   });
+
+  /**
+   * resolveWithSource：暴露「intent 是怎么来的」。
+   * 7 条决策出口里有 4 条根本不调小模型，排查「孩子说要听故事却在闲聊」时
+   * 必须能区分：预筛没命中 / 模型分错 / 标签非法走兜底 / 会话粘住没退出。
+   */
+  describe("resolveWithSource 决策路径可观测", () => {
+    const mockModel = (text: string) =>
+      llmService.complete.mockResolvedValue({
+        text,
+      } as Awaited<ReturnType<LlmService["complete"]>>);
+
+    it("model：预筛命中且模型给出合法标签", async () => {
+      mockModel("idiom_story");
+
+      await expect(
+        service.resolveWithSource("device-1", "我想听故事"),
+      ).resolves.toEqual({ intent: "idiom_story", source: "model" });
+    });
+
+    it("model：活跃会话中的显式模式切换也走模型", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story"),
+      );
+      mockModel("sleep_story");
+
+      await expect(
+        service.resolveWithSource("device-1", "我想听睡前故事"),
+      ).resolves.toEqual({ intent: "sleep_story", source: "model" });
+    });
+
+    it("fallback_invalid_label：模型有响应但标签非法", async () => {
+      mockModel("not_story");
+
+      await expect(
+        service.resolveWithSource("device-1", "我想听英语故事"),
+      ).resolves.toEqual({
+        intent: "english_story",
+        source: "fallback_invalid_label",
+      });
+    });
+
+    it("fallback_error：模型调用异常后关键词兜底", async () => {
+      llmService.complete.mockRejectedValue(
+        new Error("classifier unavailable"),
+      );
+
+      await expect(
+        service.resolveWithSource("device-1", "讲一个成语故事"),
+      ).resolves.toEqual({
+        intent: "idiom_story",
+        source: "fallback_error",
+      });
+    });
+
+    it("pre_filter_skip：非路由候选词直接 free_chat，不调模型", async () => {
+      const decision = await service.resolveWithSource(
+        "device-1",
+        "今天天气怎么样",
+      );
+
+      expect(decision).toEqual({
+        intent: "free_chat",
+        source: "pre_filter_skip",
+      });
+      expect(llmService.complete).not.toHaveBeenCalled();
+    });
+
+    it("continuation：活跃会话中的「继续」不调模型", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story"),
+      );
+
+      const decision = await service.resolveWithSource("device-1", "继续");
+
+      expect(decision).toEqual({
+        intent: "english_story",
+        source: "continuation",
+      });
+      expect(llmService.complete).not.toHaveBeenCalled();
+    });
+
+    it("session_sticky：活跃会话中的普通接话不调模型", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+
+      const decision = await service.resolveWithSource(
+        "device-1",
+        "我喜欢这个故事",
+      );
+
+      expect(decision).toEqual({
+        intent: "sleep_story",
+        source: "session_sticky",
+      });
+      expect(llmService.complete).not.toHaveBeenCalled();
+    });
+
+    it("explicit_exit：显式退出重置会话且不调模型", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story"),
+      );
+
+      const decision = await service.resolveWithSource("device-1", "不想听了");
+
+      expect(decision).toEqual({
+        intent: "free_chat",
+        source: "explicit_exit",
+      });
+      expect(llmService.complete).not.toHaveBeenCalled();
+    });
+
+    it("过期会话不参与粘滞：按预筛/模型重新判定", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story", new Date("2026-10-31T04:00:00.000Z")),
+      );
+      mockModel("free_chat");
+
+      const decision = await service.resolveWithSource(
+        "device-1",
+        "今天天气怎么样",
+      );
+
+      expect(decision).toEqual({
+        intent: "free_chat",
+        source: "pre_filter_skip",
+      });
+    });
+
+    it("resolve() 委托 resolveWithSource()：intent 完全一致（老链路契约不变）", async () => {
+      mockModel("sleep_config");
+
+      const [plain, withSource] = await Promise.all([
+        service.resolve("device-1", "以后睡前都听儿歌"),
+        service.resolveWithSource("device-1", "以后睡前都听儿歌"),
+      ]);
+
+      expect(plain).toBe(withSource.intent);
+      expect(plain).toBe("sleep_config");
+    });
+
+    it("七种 source 互不相同，可在看板上分桶", async () => {
+      const sources = new Set<string>();
+
+      mockModel("free_chat");
+      sources.add((await service.resolveWithSource("d", "我想听故事")).source);
+
+      mockModel("garbage_label");
+      sources.add((await service.resolveWithSource("d", "我想听故事")).source);
+
+      llmService.complete.mockRejectedValue(new Error("boom"));
+      sources.add((await service.resolveWithSource("d", "我想听故事")).source);
+
+      llmService.complete.mockReset();
+      sources.add(
+        (await service.resolveWithSource("d", "今天天气怎么样")).source,
+      );
+
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story"),
+      );
+      sources.add((await service.resolveWithSource("d", "继续")).source);
+      sources.add(
+        (await service.resolveWithSource("d", "我喜欢这个故事")).source,
+      );
+      sources.add((await service.resolveWithSource("d", "不想听了")).source);
+
+      expect(sources).toEqual(
+        new Set([
+          "model",
+          "fallback_invalid_label",
+          "fallback_error",
+          "pre_filter_skip",
+          "continuation",
+          "session_sticky",
+          "explicit_exit",
+        ]),
+      );
+    });
+  });
 });

@@ -73,6 +73,24 @@ describe("ChildSafetyService", () => {
     });
   });
 
+  describe("L1 verdict source", () => {
+    it("marks an explicit hit as l1_regex", () => {
+      const verdict = service.checkL1("什么是做爱呀？");
+
+      expect(verdict.source).toBe("l1_regex");
+      expect(verdict.blocked).toBe(true);
+    });
+
+    it("marks a non-hit as l1_regex too (evaluated, nothing matched)", () => {
+      // L1 未命中时该 verdict 不落库：编排会继续走 L2，最终 source 由 L2 决定
+      const verdict = service.checkL1("今天幼儿园老师表扬我了");
+
+      expect(verdict.source).toBe("l1_regex");
+      expect(verdict.blocked).toBe(false);
+      expect(verdict.category).toBeNull();
+    });
+  });
+
   describe("L2 small-model classifier", () => {
     it("returns safe when the model says safe", async () => {
       llmService.complete.mockResolvedValue({ text: "safe" });
@@ -81,8 +99,9 @@ describe("ChildSafetyService", () => {
 
       expect(verdict).toEqual({
         blocked: false,
-        category: null,
-        layer: null,
+        category: "safe",
+        layer: "L2",
+        source: "l2_model",
       });
       expect(llmService.complete).toHaveBeenCalledWith(
         expect.objectContaining({ model: "small-llm", temperature: 0 }),
@@ -107,6 +126,7 @@ describe("ChildSafetyService", () => {
       expect(verdict.blocked).toBe(true);
       expect(verdict.category).toBe("sexual");
       expect(verdict.layer).toBe("L2");
+      expect(verdict.source).toBe("l2_model");
     });
 
     it("blocks self-harm signals paraphrased around L1 words", async () => {
@@ -127,24 +147,106 @@ describe("ChildSafetyService", () => {
       expect(verdict.blocked).toBe(false);
       expect(verdict.category).toBe("emotional_harm");
       expect(verdict.layer).toBe("L2");
+      expect(verdict.source).toBe("l2_model");
     });
 
-    it("falls back to safe when the model outputs garbage", async () => {
+    it("tolerates a danger label wrapped in extra wording", async () => {
+      llmService.complete.mockResolvedValue({ text: "标签：sexual。" });
+
+      const verdict = await service.classifyL2("大人关门以后在干什么呀");
+
+      expect(verdict.blocked).toBe(true);
+      expect(verdict.category).toBe("sexual");
+      expect(verdict.source).toBe("l2_model");
+    });
+
+    it("tolerates upper-case labels", async () => {
+      llmService.complete.mockResolvedValue({ text: " SAFE " });
+
+      const verdict = await service.classifyL2("今天天气真好");
+
+      expect(verdict.category).toBe("safe");
+      expect(verdict.source).toBe("l2_model");
+    });
+
+    it("flags garbage output as l2_invalid_label instead of silently passing as safe", async () => {
       llmService.complete.mockResolvedValue({ text: "我不知道" });
 
       const verdict = await service.classifyL2("你好");
 
       expect(verdict.blocked).toBe(false);
       expect(verdict.category).toBeNull();
+      expect(verdict.layer).toBe("L2");
+      expect(verdict.source).toBe("l2_invalid_label");
     });
 
-    it("fails open to safe when the small model errors (L3 prompt is the backstop)", async () => {
+    it("never reads a negation as safe: 'unsafe' is l2_invalid_label", async () => {
+      // includes("safe") 会把 "unsafe" / "not safe" 误判成放行——方向恰好错反，
+      // 故 safe 只接受精确匹配，否定式一律归为非法标签（放行但可观测）
+      llmService.complete.mockResolvedValue({ text: "unsafe" });
+
+      const verdict = await service.classifyL2("你好");
+
+      expect(verdict.category).not.toBe("safe");
+      expect(verdict.source).toBe("l2_invalid_label");
+      expect(verdict.blocked).toBe(false);
+    });
+
+    it("never reads a negation as safe: 'not safe' is l2_invalid_label", async () => {
+      llmService.complete.mockResolvedValue({ text: "not safe" });
+
+      const verdict = await service.classifyL2("你好");
+
+      expect(verdict.source).toBe("l2_invalid_label");
+    });
+
+    it("fails open when the small model errors, distinguishably from a real safe verdict", async () => {
       llmService.complete.mockRejectedValue(new Error("timeout"));
 
       const verdict = await service.classifyL2("你好");
 
       expect(verdict.blocked).toBe(false);
       expect(verdict.category).toBeNull();
+      expect(verdict.layer).toBeNull();
+      expect(verdict.source).toBe("l2_fail_open");
+    });
+
+    it("keeps safe / invalid_label / fail_open mutually distinguishable", async () => {
+      // 三者曾经返回完全相同的 { blocked:false, category:null, layer:null }，
+      // 导致「模型判定安全」与「小模型挂了裸奔」在看板上是同一个数字
+      llmService.complete.mockResolvedValue({ text: "safe" });
+      const safe = await service.classifyL2("你好");
+
+      llmService.complete.mockResolvedValue({ text: "???" });
+      const invalid = await service.classifyL2("你好");
+
+      llmService.complete.mockRejectedValue(new Error("rate_limit"));
+      const failed = await service.classifyL2("你好");
+
+      const signatures = new Set(
+        [safe, invalid, failed].map((v) => `${v.category}|${v.source}`),
+      );
+      expect(signatures.size).toBe(3);
+      expect(safe.category).toBe("safe");
+      expect(invalid.source).toBe("l2_invalid_label");
+      expect(failed.source).toBe("l2_fail_open");
+    });
+  });
+
+  describe("blocked 判定不因 source 引入而改变", () => {
+    it.each([
+      ["sexual", true],
+      ["violence", true],
+      ["self_harm", true],
+      ["emotional_harm", false],
+      ["safe", false],
+    ])("category=%s → blocked=%s", async (label, blocked) => {
+      llmService.complete.mockResolvedValue({ text: label });
+
+      const verdict = await service.classifyL2("任意输入");
+
+      expect(verdict.blocked).toBe(blocked);
+      expect(verdict.category).toBe(label);
     });
   });
 

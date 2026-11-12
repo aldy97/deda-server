@@ -575,3 +575,33 @@ model PushSubscription {
   @@unique([userId, templateId])
   @@map("push_subscriptions")
 }
+
+/// 对话轮次的「判定质量」审计表：安全拦截（L1/L2）与意图路由的决策来源逐轮落库。
+/// 与 llm_usage_logs 的分工：那张表记「模型调用是否健康」，本表记「模型的判定是否可信」——
+/// 判为 safe、标签非法、模型失败开放放行三者必须可区分，否则拦截率与漏放率都算不出来。
+/// 明细永久保留（安全审计与申诉回溯需要），不设 TTL、不做预聚合表。
+model TurnDecisionLog {
+  id             String    @id @default(uuid())
+  turnId         String    @unique // 一轮一行；upsert 幂等，防主模型重试写重复行
+  deviceId       String?   // 刻意不设 FK：安全审计要保留设备标识，不随设备 wipe 级联删除
+  channel        String    @default("baidu-rtc") // 本期恒为 baidu-rtc；老 WS 链路不埋点，留列以备接入
+  safetyLayer    String?   // L1 / L2 / null（未评估或模型异常）
+  safetyCategory String?   // safe / sexual / violence / self_harm / emotional_harm / null
+  safetyBlocked  Boolean   @default(false)
+  safetySource   String    @default("none") // l1_regex / l2_model / l2_invalid_label / l2_fail_open / not_evaluated
+  safetyMatched  String?   @db.VarChar(64) // L1 命中的规则关键词，便于复核规则误伤
+  intent         String?   // 七标签之一；被安全拦截时未走到路由为 null
+  intentSource   String?   // model / fallback_invalid_label / fallback_error / pre_filter_skip
+                           // / continuation / session_sticky / explicit_exit
+                           // / adventure_takeover（冒险接管，L2 未评估）/ not_routed（被拦截）
+  asrText        String?   @db.VarChar(200) // 仅 blocked 或类别非 safe 时写；儿童语音转写，禁入日志
+  reviewLabel    String?   // TODO(二期·人工复核闭环)：复核结论 correct / false_positive / missed；
+                           // 本期只建列、不提供写接口，看板复核队列为只读
+  reviewedAt     DateTime? // TODO(二期·人工复核闭环)：与 reviewLabel 同步写入
+  createdAt      DateTime  @default(now())
+
+  @@index([createdAt, safetyCategory])
+  @@index([createdAt, intent, intentSource])
+  @@index([createdAt, safetySource])
+  @@map("turn_decision_logs")
+}

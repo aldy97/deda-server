@@ -26,6 +26,33 @@
 5. 非法模型输出或分类异常使用关键词兜底，最终可回落到 `free_chat`。
 6. 今日冒险未完成时，`adventure_story` 和泛化 `free_story` 优先尝试进入每日冒险；完成后按既有每日门禁处理。成功进入冒险后重置普通会话，冒险进度仍由 `AdventureProgress` 和 `AdventureDailyRecord` 管理。
 
+### 决策来源（intentSource）
+
+上面 7 条出口里有 4 条**根本不调小模型**。排查「孩子说要听故事却在闲聊」时，
+只看 intent 结果无法区分成因，因此 `resolveWithSource()` 在每个出口都带出来源，
+逐轮落 `turn_decision_logs.intentSource`：
+
+| 来源                     | 对应出口 | 调模型 | 含义                                                                                |
+| ------------------------ | -------- | ------ | ----------------------------------------------------------------------------------- |
+| `model`                  | 3 / 4    | 是     | 小模型输出合法标签                                                                  |
+| `fallback_invalid_label` | 5        | 是     | 模型有响应但标签不在七标签契约内 → 关键词兜底（**prompt 退化信号**）                |
+| `fallback_error`         | 5        | 是     | 模型调用异常 → 关键词兜底（按 turnId 拼 `llm_usage_logs.failureReason` 可定位原因） |
+| `pre_filter_skip`        | 4        | 否     | `isRoutingCandidate` 未命中，直接 `free_chat`（**词表覆盖不足信号**）               |
+| `continuation`           | 3        | 否     | 活跃会话中的续听表达                                                                |
+| `session_sticky`         | 3        | 否     | 活跃会话中的普通接话，滑动续期                                                      |
+| `explicit_exit`          | 3        | 否     | 明确退出，重置为 `free_chat`                                                        |
+
+编排层（`LlmAdapterService`）另有三种「本轮没走到路由」的来源，同样落库但**不属于** `IntentSource`：
+
+| 来源                 | 含义                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `not_routed`         | 被 L1/L2 拦截，直接播兜底话术，`intent` 为 null                                                                                       |
+| `adventure_takeover` | 冒险状态机在编排顺序上早于 L2，命中即返回；本轮 `safetySource=not_evaluated`（**已知盲区**，见 `docs/analytics-api.md` 判定质量监控） |
+| `no_device`          | 请求未带设备标识（匿名链路），无会话状态可依赖，恒定 `free_chat`                                                                      |
+
+> `resolve()` 保留原签名（返回裸 intent）并委托 `resolveWithSource()`，
+> 因此老 WS 链路 `vendor.service.ts` 零改动；新链路一律用 `resolveWithSource()`。
+
 ## 持久会话
 
 每台设备最多一条 `ConversationSession`，通过唯一 `deviceId` 执行 upsert：
