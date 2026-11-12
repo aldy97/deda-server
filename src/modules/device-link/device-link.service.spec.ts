@@ -1,6 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { BadRequestException, Logger } from "@nestjs/common";
 import { DeviceLinkService } from "./device-link.service";
+import { DevicePresenceService } from "./device-presence.service";
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -16,9 +17,10 @@ describe("DeviceLinkService", () => {
   let mqttService: any;
   let redisService: any;
   let prisma: any;
+  let module: TestingModule;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
+    module = await Test.createTestingModule({
       providers: [
         DeviceLinkService,
         {
@@ -44,6 +46,13 @@ describe("DeviceLinkService", () => {
               upsert: jest.fn().mockResolvedValue({}),
               updateMany: jest.fn().mockResolvedValue({ count: 1 }),
             },
+          },
+        },
+        {
+          provide: DevicePresenceService,
+          useValue: {
+            record: jest.fn().mockResolvedValue(undefined),
+            flush: jest.fn().mockResolvedValue(undefined),
           },
         },
       ],
@@ -565,6 +574,66 @@ describe("DeviceLinkService", () => {
 
       expect(result.size).toBe(0);
       expect(redisService.mGetValue).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("device presence recording", () => {
+    let presenceService: { record: jest.Mock };
+
+    beforeEach(() => {
+      presenceService = module.get(DevicePresenceService);
+    });
+
+    it("should call presence.record with uppercase MAC on valid device/up message", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 80 },
+        }),
+      );
+
+      service.handleMessage("device/up/aa-bb-cc-dd-ee-ff", payload);
+      await flushPromises();
+
+      expect(presenceService.record).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        expect.any(Date),
+      );
+    });
+
+    it("should NOT call presence.record when payload has no cmd", async () => {
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        Buffer.from(JSON.stringify({ flag: "success" })),
+      );
+      await flushPromises();
+
+      expect(presenceService.record).not.toHaveBeenCalled();
+    });
+
+    it("should still complete the main flow when presence.record throws", async () => {
+      presenceService.record.mockRejectedValue(new Error("presence down"));
+
+      const payload = Buffer.from(
+        JSON.stringify({
+          cmd: "query",
+          flag: "success",
+          data: { battery: 80 },
+        }),
+      );
+
+      service.handleMessage("device/up/AABBCCDDEEFF", payload);
+      await flushPromises();
+
+      // Main flow should still work: Redis status written
+      expect(redisService.setValue).toHaveBeenCalledWith(
+        "device:link:AABBCCDDEEFF",
+        expect.any(String),
+        3600,
+      );
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.battery).toBe(80);
     });
   });
 });

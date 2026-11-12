@@ -7,6 +7,7 @@ import {
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { DevicePresenceService } from "./device-presence.service";
 import {
   LOGIN_MAC_TOPIC,
   DEVICE_UP_TOPIC_PATTERN,
@@ -44,6 +45,7 @@ export class DeviceLinkService implements OnModuleInit {
     private readonly mqttService: MqttService,
     private readonly redisService: RedisService,
     private readonly prisma: PrismaService,
+    private readonly presence: DevicePresenceService,
   ) {}
 
   onModuleInit(): void {
@@ -210,6 +212,10 @@ export class DeviceLinkService implements OnModuleInit {
       this.logger.warn(`device/up message from ${mac} missing cmd`);
       return;
     }
+
+    void this.presence.record(mac, new Date()).catch((err: Error) => {
+      this.logger.error(`Failed to record presence for ${mac}`, err);
+    });
 
     switch (message.cmd) {
       case DeviceLinkCommand.Query:

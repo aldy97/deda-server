@@ -30,7 +30,7 @@ GET /analytics/overview?date=            (缺省=昨天 T-1)
     totals: { devicesRegistered, devicesActivated, usersRegistered, activationRate },
     today:  { dau, dauDeltaPct, avgDurationSecondsPerActiveDevice,  // estimated
               avgTurnsPerActiveDevice,
-              devicesPoweredOn, powerOnRate, onlineNow },           // 一期恒 null（二期落库）
+              devicesPoweredOn, powerOnRate, onlineNow },           // onlineNow = 实时在线台数（Redis lastSeenAt 落在 15s 窗口内）；devicesPoweredOn / powerOnRate 仍恒 null，待下个 PR 接通
     retention: { d1, d7, d30 },          // 激活日为 date-N 的 cohort 在 date 的活跃率；分母为 0 时 null
     funnel: { shipped, activated, firstConversation, active7d }     // shipped 一期恒 null
   }
@@ -349,8 +349,8 @@ POST /analytics/devices/:deviceId/wipe
 - `deviceOnline=false` 表示下发时设备离线，`recover` 可能未送达，admin 需到手后手动复位设备。
 - 设备不存在 → 404。家长小程序解绑（DELETE /devices/:id）不触发本流程，仅删绑定关系。
 
-## 二期预告（需 schema 审批）
+## 二期（进行中）
 
-- `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
+- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`devicesPoweredOn` / `powerOnRate` / fleet 接口将在下一个 PR 接通，本次仅落库、不改 overview 响应。
 - ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。
