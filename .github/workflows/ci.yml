@@ -54,3 +54,13 @@ jobs:
 
       # e2e 使用独立 PostgreSQL；LLM 与外部服务保持 mock，禁止 forceExit 掩盖泄漏
       - run: npm run test:e2e
+
+  # 部署必须在 ci 全绿后才执行；PR 与 push main 的运行中该 job 直接跳过
+  deploy:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    uses: ./.github/workflows/deploy-staging.yml
+    secrets: inherit
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
