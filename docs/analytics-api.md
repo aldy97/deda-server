@@ -576,9 +576,12 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 错误码：
 
 - 400 参数校验失败（正文为空/超长、缺 `expectedRevision`、缺 `changeNote` 或 `confirmCode`、白名单外字段）
+  / **确认码不正确**。确认码刻意用 400 而不是 403：dashboard 的 axios 响应拦截器把
+  401/403 一律当「凭据失效」处理（清 token 跳登录页），打错一个字母就把管理员踢下线、
+  连带丢掉编辑器里的草稿与 diff。403 只留给下面那种环境级策略拒绝。
 - 401 未登录 / token 无效 / token 非 analytics scope（策略层 `validate` 先拒，
   守卫里那条 403 分支在真实 HTTP 链路上不可达）
-- 403 确认码不正确 / `PROMPT_WRITE_ENABLED=false`
+- 403 `PROMPT_WRITE_ENABLED=false`（环境级策略拒绝，与单次请求的参数无关）
 - 404 未知 prompt key / 回滚目标版本不存在
 - 409 乐观锁冲突 / 没有待发布的草稿 / `revision` 与当前草稿号不符
 

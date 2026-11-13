@@ -202,18 +202,21 @@ describe("Analytics prompts (e2e)", () => {
         .expect(409);
     });
 
-    it("缺确认码 → 400；确认码错误 → 403，发布均未生效", async () => {
+    it("缺确认码 → 400；确认码错误 → 400，发布均未生效", async () => {
       await auth(
         request(app.getHttpServer()).post(`/analytics/prompts/${KEY}/publish`),
       )
         .send({ revision: 1, changeNote: "上线" })
         .expect(400);
 
-      await auth(
+      // 与「缺字段」那种 400 区分开：确认码错误必须给出可辨识文案，
+      // 否则 dashboard 无法把「打错确认码」和「参数不合法」分开提示
+      const wrongCodeRes = await auth(
         request(app.getHttpServer()).post(`/analytics/prompts/${KEY}/publish`),
       )
         .send({ revision: 1, changeNote: "上线", confirmCode: WRONG_CODE })
-        .expect(403);
+        .expect(400);
+      expect(wrongCodeRes.body.message).toContain("确认码");
 
       const detail = await auth(
         request(app.getHttpServer()).get(`/analytics/prompts/${KEY}`),

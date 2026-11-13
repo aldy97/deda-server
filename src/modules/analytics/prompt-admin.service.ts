@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -412,13 +413,20 @@ export class PromptAdminService {
     }
   }
 
-  /** 定长比较，避免确认码被时序侧信道逐字符猜出 */
+  /**
+   * 定长比较，避免确认码被时序侧信道逐字符猜出。
+   *
+   * 错误码是 400 而不是 403：dashboard 的 axios 响应拦截器把 401/403 一律
+   * 当「凭据失效」处理（清 token 跳登录页），而确认码打错只是这一次请求的
+   * 参数不对，不该把管理员踢下线、连带丢掉编辑器里的草稿。
+   * 403 只留给 assertWritable 那种「这个环境根本不允许写」的策略拒绝。
+   */
   private assertConfirmCode(confirmCode: string): void {
     const expected = this.getWritePolicy().publishConfirmCode;
     const given = Buffer.from(confirmCode ?? "", "utf8");
     const want = Buffer.from(expected, "utf8");
     if (given.length !== want.length || !timingSafeEqual(given, want)) {
-      throw new ForbiddenException("确认码不正确，操作已取消");
+      throw new BadRequestException("确认码不正确，操作已取消");
     }
   }
 
