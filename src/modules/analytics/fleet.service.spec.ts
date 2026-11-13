@@ -928,19 +928,43 @@ describe("FleetService.getFirmwareDistribution", () => {
 
     expect(result.total).toBe(5);
     expect(result.buckets).toHaveLength(3);
-    // "unknown" 桶 2 台 (null + "")
+    // "unknown" 桶 2 台 (null + "")，恒定排最后
     expect(result.buckets[0]).toEqual({
       firmwareVersion: "1.2.3",
       devices: 2,
     });
     expect(result.buckets[1]).toEqual({
-      firmwareVersion: "unknown",
-      devices: 2,
-    });
-    expect(result.buckets[2]).toEqual({
       firmwareVersion: "2.0.0",
       devices: 1,
     });
+    expect(result.buckets[2]).toEqual({
+      firmwareVersion: "unknown",
+      devices: 2,
+    });
+  });
+
+  it("unknown 桶计数最大时仍排最后，其余按计数降序", async () => {
+    const prisma = buildPrisma({
+      devices: [
+        d("aa0000000001", { firmwareVersion: null }),
+        d("aa0000000002", { firmwareVersion: null }),
+        d("aa0000000003", { firmwareVersion: "" }),
+        d("aa0000000004", { firmwareVersion: "1.2.3" }),
+        d("aa0000000005", { firmwareVersion: "1.2.3" }),
+        d("aa0000000006", { firmwareVersion: "2.0.0" }),
+      ],
+      bindings: [],
+      messages: [],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getFirmwareDistribution();
+
+    expect(result.buckets).toEqual([
+      { firmwareVersion: "1.2.3", devices: 2 },
+      { firmwareVersion: "2.0.0", devices: 1 },
+      { firmwareVersion: "unknown", devices: 3 },
+    ]);
   });
 
   it("空库返回 total=0 且 buckets=[]", async () => {
@@ -969,9 +993,9 @@ describe("FleetService.getFirmwareDistribution", () => {
 
     expect(result.total).toBe(4);
     expect(result.buckets).toEqual([
-      { firmwareVersion: "unknown", devices: 2 },
       { firmwareVersion: "1.0.0", devices: 1 },
       { firmwareVersion: "2.0.0", devices: 1 },
+      { firmwareVersion: "unknown", devices: 2 },
     ]);
   });
 

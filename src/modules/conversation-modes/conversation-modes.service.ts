@@ -131,33 +131,31 @@ export class ConversationModesService implements OnModuleInit {
    * 初始化默认分类和子模式（幂等）
    */
   async seedDefaults(): Promise<void> {
-    for (const category of DEFAULT_CATEGORIES) {
-      await this.prisma.conversationModeCategory.upsert({
-        where: { key: category.key },
-        update: {},
-        create: category,
-      });
-    }
+    // createMany + skipDuplicates 为单条 ON CONFLICT DO NOTHING，多实例并发启动时
+    // 不会像逐行 upsert 那样在唯一键上竞争（P2002）
+    await this.prisma.conversationModeCategory.createMany({
+      data: DEFAULT_CATEGORIES,
+      skipDuplicates: true,
+    });
 
-    for (const mode of DEFAULT_MODES) {
-      const category = await this.prisma.conversationModeCategory.findUnique({
-        where: { key: mode.categoryKey },
-        select: { id: true },
-      });
-      if (!category) {
-        continue;
+    const categories = await this.prisma.conversationModeCategory.findMany({
+      where: { key: { in: DEFAULT_MODES.map((mode) => mode.categoryKey) } },
+      select: { id: true, key: true },
+    });
+    const categoryIds = new Map(categories.map((c) => [c.key, c.id]));
+
+    const modes = DEFAULT_MODES.flatMap((mode) => {
+      const categoryId = categoryIds.get(mode.categoryKey);
+      if (!categoryId) {
+        return [];
       }
-
       const { categoryKey, ...modeData } = mode;
-      await this.prisma.conversationMode.upsert({
-        where: {
-          categoryId_key: {
-            categoryId: category.id,
-            key: modeData.key,
-          },
-        },
-        update: {},
-        create: { ...modeData, categoryId: category.id },
+      return [{ ...modeData, categoryId }];
+    });
+    if (modes.length > 0) {
+      await this.prisma.conversationMode.createMany({
+        data: modes,
+        skipDuplicates: true,
       });
     }
   }

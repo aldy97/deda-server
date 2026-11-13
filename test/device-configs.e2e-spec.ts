@@ -34,9 +34,11 @@ describe("DeviceConfigs validation (e2e)", () => {
       upsert: jest.fn().mockResolvedValue({}),
       findUnique: jest.fn().mockResolvedValue({ id: "cat-uuid-001" }),
       findMany: jest.fn().mockResolvedValue([]),
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     conversationMode: {
       upsert: jest.fn().mockResolvedValue({}),
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
       findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn(({ where }: any) => {
         if (where.key === "free_chat_casual") {
