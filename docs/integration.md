@@ -241,6 +241,13 @@
 - 失败处理：errcode 43101（额度耗尽）→ 清零并标记 `exhausted`；40001/42001（token 失效）→ 强制刷新 access_token 重试一次；其他错误仅 warn 日志、不抛出、不影响哄睡内容下发。
 - 开关与配置：`PUSH_NOTIFICATIONS_ENABLED=true` 开启（默认关）；`WECHAT_TMPL_SLEEP_REMINDER` 为模板 ID 白名单（未配置时上报接口 400、推送不发送）；access_token 走 Redis 缓存（TTL 7000s）+ 进程内 single-flight。
 
+## Prompt 管理（dashboard 后台编辑）
+
+- 机制：全部系统 prompt / 规则段 / 话术模板集中在 prompt registry（17 个 key），运行时按「DB published → 代码默认值 → 抛错」回落；首次上线行为零变化。详见 `docs/prompt-registry.md`。
+- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）与写策略；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
+- 边界：子模式模板仍归 `conversation_modes.promptTemplate`（本次不迁移）；儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。
