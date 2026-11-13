@@ -36,6 +36,8 @@ import { LlmCostService } from "./llm-cost.service";
 import { ParentReportsAnalyticsController } from "./parent-reports-analytics.controller";
 import { ParentReportsAnalyticsService } from "./parent-reports-analytics.service";
 import { DevicesAdminController } from "./devices-admin.controller";
+import { TurnDecisionAnalyticsController } from "./turn-decision-analytics.controller";
+import { TurnDecisionAnalyticsService } from "./turn-decision-analytics.service";
 import { FleetController } from "./fleet.controller";
 import { FleetService } from "./fleet.service";
 import { DeviceLinkModule } from "../device-link/device-link.module";
@@ -56,6 +58,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     MemoriesAnalyticsController,
     LlmAnalyticsController,
     ParentReportsAnalyticsController,
+    TurnDecisionAnalyticsController,
     FleetController,
   ],
   providers: [
@@ -90,6 +93,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     BillingSyncService,
     LlmCostService,
     ParentReportsAnalyticsService,
+    TurnDecisionAnalyticsService,
   ],
 })
 export class AnalyticsModule {}

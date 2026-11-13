@@ -33,6 +33,7 @@ import { PushNotificationsModule } from "./modules/push-notifications/push-notif
 import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
 import { ClientApiModule } from "./modules/client-api/client-api.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
+import { TurnDecisionModule } from "./modules/turn-decision/turn-decision.module";
 
 /**
  * deda-dashboard SPA 静态托管（备案期间 staging 直连 :3001/dashboard 的承载方式；
@@ -95,6 +96,7 @@ const staticImports = existsSync(dashboardDistPath)
     LlmAdapterModule,
     ClientApiModule,
     AnalyticsModule,
+    TurnDecisionModule,
     ...staticImports,
   ],
 })

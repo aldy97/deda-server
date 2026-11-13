@@ -32,6 +32,29 @@ const CONVERSATION_INTENTS: ConversationIntent[] = [
   "free_story",
 ];
 
+/**
+ * intent 的来源。7 条决策出口里有 4 条**根本不调小模型**，
+ * 排查「孩子说要听故事却在闲聊」时必须能区分成因：
+ * - model：小模型输出合法标签
+ * - fallback_invalid_label：模型有响应但标签非法 → 关键词兜底（prompt 退化信号）
+ * - fallback_error：模型调用异常 → 关键词兜底（与 llm_usage_logs.failureReason 按 turnId 拼接可定位原因）
+ * - pre_filter_skip：isRoutingCandidate 正则未命中，直接 free_chat（词表覆盖不足信号）
+ * - continuation / session_sticky / explicit_exit：会话状态机接管，未调模型
+ */
+export type IntentSource =
+  | "model"
+  | "fallback_invalid_label"
+  | "fallback_error"
+  | "pre_filter_skip"
+  | "continuation"
+  | "session_sticky"
+  | "explicit_exit";
+
+export interface IntentDecision {
+  intent: ConversationIntent;
+  source: IntentSource;
+}
+
 @Injectable()
 export class ConversationSessionService {
   private readonly logger = new Logger(ConversationSessionService.name);
@@ -41,11 +64,28 @@ export class ConversationSessionService {
     private readonly llmService: LlmService,
   ) {}
 
+  /**
+   * 兼容签名：只返回 intent。老 WS 链路（vendor.service.ts）继续用这个，
+   * 行为与埋点都不变；新链路（llm-adapter）用 resolveWithSource 记录决策路径。
+   */
   async resolve(
     deviceId: string,
     asrText: string,
     turnId?: string,
   ): Promise<ConversationIntent> {
+    const { intent } = await this.resolveWithSource(deviceId, asrText, turnId);
+    return intent;
+  }
+
+  /**
+   * 意图路由 + 决策来源。7 条出口中只有 2 条真的调小模型，
+   * 其余由会话状态机或正则预筛决定——source 让「为什么是这个意图」可查。
+   */
+  async resolveWithSource(
+    deviceId: string,
+    asrText: string,
+    turnId?: string,
+  ): Promise<IntentDecision> {
     const session = await this.prisma.conversationSession.findUnique({
       where: { deviceId },
     });
@@ -57,24 +97,24 @@ export class ConversationSessionService {
       } else {
         if (this.isContinuation(asrText)) {
           await this.activate(deviceId, activeMode);
-          return activeMode;
+          return { intent: activeMode, source: "continuation" };
         }
         if (this.isExplicitModeSwitch(asrText)) {
           return this.classifyAndActivate(deviceId, asrText, true, turnId);
         }
         if (this.isExplicitExit(asrText)) {
           await this.reset(deviceId);
-          return "free_chat";
+          return { intent: "free_chat", source: "explicit_exit" };
         }
 
         // 故事作答、二选一和普通接话默认留在当前模式，并滑动续期。
         await this.activate(deviceId, activeMode);
-        return activeMode;
+        return { intent: activeMode, source: "session_sticky" };
       }
     }
 
     if (!this.isRoutingCandidate(asrText)) {
-      return "free_chat";
+      return { intent: "free_chat", source: "pre_filter_skip" };
     }
     return this.classifyAndActivate(deviceId, asrText, false, turnId);
   }
@@ -97,23 +137,22 @@ export class ConversationSessionService {
     asrText: string,
     hadActiveSession: boolean,
     turnId?: string,
-  ): Promise<ConversationIntent> {
-    const intent = await this.classify(asrText, deviceId, turnId);
-    const persistentIntent = this.persistentMode(intent);
+  ): Promise<IntentDecision> {
+    const decision = await this.classify(asrText, deviceId, turnId);
+    const persistentIntent = this.persistentMode(decision.intent);
     if (persistentIntent) {
       await this.activate(deviceId, persistentIntent);
     } else if (hadActiveSession) {
       await this.reset(deviceId);
     }
-    return intent;
+    return decision;
   }
 
   private async classify(
     asrText: string,
     deviceId?: string,
     turnId?: string,
-  ): Promise<ConversationIntent> {
-    // TODO(可用性)：灰度补充分类模型超时、限流与非法输出的真实指标。
+  ): Promise<IntentDecision> {
     try {
       const result = await this.llmService.complete({
         scene: "intent_classify",
@@ -141,17 +180,32 @@ export class ConversationSessionService {
         ],
       });
       const text = result.text.trim().toLowerCase();
-      return (
-        CONVERSATION_INTENTS.find((intent) => text.includes(intent)) ||
-        this.fallbackIntent(asrText)
+      const matched = CONVERSATION_INTENTS.find((intent) =>
+        text.includes(intent),
       );
+      if (matched) {
+        return { intent: matched, source: "model" };
+      }
+      // 模型有响应但标签不在七标签契约内：走关键词兜底并单独标记，
+      // 这样「模型判错」和「模型没响应」在看板上不会混成同一种 fallback。
+      // 只记模型输出的标签片段，不记 asrText（PII 纪律）。
+      this.logger.warn(
+        `Conversation intent label not in contract, keyword fallback used: ${text.slice(0, 40)}`,
+      );
+      return {
+        intent: this.fallbackIntent(asrText),
+        source: "fallback_invalid_label",
+      };
     } catch (error) {
       this.logger.warn(
         `Conversation intent classification failed, keyword fallback used: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return this.fallbackIntent(asrText);
+      return {
+        intent: this.fallbackIntent(asrText),
+        source: "fallback_error",
+      };
     }
   }
 

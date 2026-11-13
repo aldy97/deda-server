@@ -14,19 +14,54 @@ import { LlmService } from "@/modules/llm/llm.service";
  *   攻击性气话识别为 emotional_harm（不拦截，走共情引导）。
  * - L3（在 llm.service）：大模型 system prompt 常驻儿童安全硬约束，
  *   作为 L1/L2 失效时的兜底。
+ *
+ * 可观测性：verdict 带 source 字段，把「放行」拆成三种可区分的结论——
+ * 模型明确判 safe（l2_model）、模型响应但标签不合契约（l2_invalid_label）、
+ * 模型调用异常（l2_fail_open）。后两者都是静默降级，必须在看板上单独计数，
+ * 否则「安全放行」与「小模型挂了裸奔」会是同一个数字。
  */
 
 export type BlockedSafetyCategory = "sexual" | "violence" | "self_harm";
-export type SafetyCategory = BlockedSafetyCategory | "emotional_harm";
+/**
+ * safe = L2 明确判定安全，与 null（未能判定）严格区分。
+ * 曾经 safe 被折叠成 null，导致「模型判定安全」与「模型挂了裸奔」不可分辨。
+ */
+export type SafetyCategory = BlockedSafetyCategory | "emotional_harm" | "safe";
+
+/**
+ * verdict 的来源，决定看板上如何解读 category：
+ * - l1_regex：L1 正则闸。命中即拦截；未命中时该 verdict 不落库
+ *   （编排会继续走 L2，最终 source 由 L2 决定）。
+ * - l2_model：小模型给出合法标签（含 safe）。
+ * - l2_invalid_label：小模型有响应但标签无法解析 → 放行。属**需要盯的静默降级**，
+ *   计数升高说明 prompt 退化或模型漂移。
+ * - l2_fail_open：小模型调用异常 → 放行，由 L3 大模型 prompt 兜底。
+ * - not_evaluated：本轮未做 L2（如冒险状态机在编排上早于 L2 接管）。
+ */
+export type SafetySource =
+  | "l1_regex"
+  | "l2_model"
+  | "l2_invalid_label"
+  | "l2_fail_open"
+  | "not_evaluated";
 
 export interface SafetyVerdict {
   /** true = 不走大模型，直接用兜底话术 */
   blocked: boolean;
   category: SafetyCategory | null;
   layer: "L1" | "L2" | null;
+  source: SafetySource;
   /** L1 命中词，仅用于日志与排查 */
   matched?: string;
 }
+
+/** L2 的危险标签：允许子串容错匹配（模型可能带解释文字） */
+const DANGER_LABELS = [
+  "self_harm",
+  "emotional_harm",
+  "sexual",
+  "violence",
+] as const;
 
 const CN_SEXUAL = [
   "做爱",
@@ -228,11 +263,19 @@ export class ChildSafetyService {
           blocked: true,
           category: rule.category,
           layer: "L1",
+          source: "l1_regex",
           matched: match[0],
         };
       }
     }
-    return { blocked: false, category: null, layer: null };
+    // 未命中：source 仍标 l1_regex（本层已评估）。该 verdict 不落库——
+    // 编排会继续走 L2，最终入库的 source 由 L2 决定。
+    return {
+      blocked: false,
+      category: null,
+      layer: null,
+      source: "l1_regex",
+    };
   }
 
   /**
@@ -271,24 +314,49 @@ export class ChildSafetyService {
         ],
       });
       const text = result.text.trim().toLowerCase();
-      const category =
-        (["self_harm", "emotional_harm", "sexual", "violence"] as const).find(
-          (label) => text.includes(label),
-        ) ?? null;
-      if (!category) {
-        return { blocked: false, category: null, layer: null };
+      // safe 只接受精确匹配：子串匹配会把 "unsafe" / "not safe" 读成放行，
+      // 方向恰好错反。prompt 要求「只输出一个标签」且 temperature=0，
+      // 精确匹配是主流形态。
+      if (text === "safe") {
+        return {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+        };
       }
+      // 危险标签允许子串容错（模型可能带「标签：」前缀或句号）
+      const danger = DANGER_LABELS.find((label) => text.includes(label));
+      if (danger) {
+        return {
+          blocked: (BLOCKED_CATEGORIES as readonly string[]).includes(danger),
+          category: danger,
+          layer: "L2",
+          source: "l2_model",
+        };
+      }
+      // 有响应但标签不合契约（含否定式、乱码）：放行但标记为可观测的静默降级。
+      // 只记标签不记 asrText——孩子的话属 PII，不得进日志。
+      this.logger.warn(
+        `Child safety L2 returned unparsable label, passing through: ${text.slice(0, 40)}`,
+      );
       return {
-        blocked: BLOCKED_CATEGORIES.includes(category as BlockedSafetyCategory),
-        category,
+        blocked: false,
+        category: null,
         layer: "L2",
+        source: "l2_invalid_label",
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(
         `Child safety L2 classification failed, fail-open to safe: ${message}`,
       );
-      return { blocked: false, category: null, layer: null };
+      return {
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      };
     }
   }
 
