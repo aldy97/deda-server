@@ -360,9 +360,18 @@ GET /analytics/decisions/intent-summary?startDate=&endDate=
     notRoutedCount,                         // 被 L1/L2 拦截，未分类
     adventureTakeoverCount,                 // 冒险接管，未分类（与 not_evaluated 同一批轮次）
     matrix: [{ intent, source, count }] }   // intent × source 交叉，排查「说要听故事却在闲聊」用这张表
-   // intentSource 枚举：model / fallback_invalid_label / fallback_error / pre_filter_skip /
-   //   continuation / session_sticky / explicit_exit / adventure_takeover / not_routed / no_device
+   // intentSource 枚举：model / fallback_invalid_label / fallback_error / pre_filter_skip（已停用，仅历史数据）/
+   //   continuation / session_sticky / explicit_exit / force_sleep / sleep_window_closed /
+   //   adventure_takeover / not_routed / no_device
    // 分母 0 时两个 rate 均为 null；no_device = 匿名链路，无会话状态可依赖，恒定 free_chat
+   //
+   // ⚠ modelInvokedCount 口径 = 「模型判定被直接采纳的轮次」（只数 source=model），
+   //   不是「调用过模型的轮次」：session_sticky（模型判 free_chat 后维持原会话）与
+   //   sleep_window_closed（模型判 sleep_story 后被哄睡时段门禁降级）都调过模型却不计入。
+   //   小模型真实调用量与费用请看 intent_classify 场景的 LLM 成本指标，不要用本漏斗反推。
+   // force_sleep / sleep_window_closed 属哄睡时段治理：前者未调模型直接覆写，
+   //   后者是规则推翻模型判定；看板做「规则 vs 模型」分桶时两者都归规则侧，
+   //   否则 routed = model + rule + fallback 的恒等式会破。详见 docs/conversation-routing.md。
 
 GET /analytics/decisions/intent-trend?startDate=&endDate=&granularity=day
 → { granularity, series: [{ date, total, modelInvoked, fallbackCount,
