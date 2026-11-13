@@ -1,5 +1,6 @@
-import { Controller, Post, Body, Param, Headers } from "@nestjs/common";
+import { Controller, Logger, Post, Body, Param, Headers } from "@nestjs/common";
 import { ApiTags, ApiOperation } from "@nestjs/swagger";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { VendorService } from "./vendor.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorStatusDto } from "./dto/vendor-status.dto";
@@ -21,6 +22,8 @@ import {
  * 不再新增功能。
  */
 export class VendorController {
+  private readonly logger = new Logger(VendorController.name);
+
   constructor(private readonly vendorService: VendorService) {}
 
   @Post("health")
@@ -33,7 +36,35 @@ export class VendorController {
   @Post("text")
   @ApiOperation({ summary: "WebSocket 备用：机芯厂提交 ASR 文字并获取回复" })
   async textExchange(@Body() dto: VendorTextInDto) {
-    return this.vendorService.handleTextIn(dto);
+    try {
+      return await this.vendorService.handleTextIn(dto);
+    } catch (error) {
+      // 抛 500 对设备端等于静音：这里必须交出与正常回复同形状的信封。
+      this.logger.error(
+        `Vendor text exchange failed for ${dto.deviceId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      try {
+        return await this.vendorService.sendDegradedReply(dto.deviceId);
+      } catch (degradedError) {
+        // 连兜底话术都发不出去（上行 WS 与 DB 同时挂）：至少让 HTTP 响应
+        // 带着话术回去，设备端还能自己 TTS 播一遍。
+        this.logger.error(
+          `Degraded reply failed for ${dto.deviceId}: ${
+            degradedError instanceof Error
+              ? degradedError.message
+              : String(degradedError)
+          }`,
+        );
+        return {
+          deviceId: dto.deviceId,
+          responseText: ADVENTURE_DEGRADED_REPLIES.lastResort,
+          context: { degraded: true },
+          ttsOptions: {},
+        };
+      }
+    }
   }
 
   @Post("devices/:deviceId/status")
