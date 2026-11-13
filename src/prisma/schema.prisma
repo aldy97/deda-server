@@ -332,9 +332,11 @@ model AdventureEpisode {
   characterKey  String   @default("elly") // 专属 IP：elly / polly
   season        Int      @default(1) // 季号，MVP=1
   episodeNumber Int      // 集号
-  title         String   // 集标题
-  recap         String?  // 前情回顾（每集开头）
+  title         String   // 集标题：当前发布版本的物化副本，真相在 version.payload
+  recap         String?  // 前情回顾：当前发布版本的物化副本，真相在 version.payload
   published     Boolean  @default(false) // 是否可播
+  retiredAt     DateTime? // 墓碑：retire 后不再分配给新设备；已分配设备的当日播放不受影响
+  currentVersionId String? // 当前发布版本的 id；发布事务写入
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -342,9 +344,59 @@ model AdventureEpisode {
   progresses AdventureProgress[]
   dailyRecords AdventureDailyRecord[]
   events AdventureEvent[]
+  versions AdventureEpisodeVersion[]
 
   @@unique([characterKey, season, episodeNumber])
+  @@index([characterKey, season, retiredAt])
   @@map("adventure_episodes")
+}
+
+// 冒险故事：整集内容快照。已发布版本不可变，改动只能派生新版本；孩子进度按 episodeVersionId 锁定版本。
+model AdventureEpisodeVersion {
+  id          String   @id @default(uuid())
+  episodeId   String
+  version     Int      // 集内单调递增，从 1 开始
+  status      String   // draft / published / superseded / discarded
+  payload     Json     // 整集快照：{ title, recap, segments: [...] }
+  contentHash String?  // payload 的 canonical sha256；迁移回填的历史版本无法复现，故可空
+  changeNote  String?
+  createdBy   String
+  createdByName String
+  publishedAt DateTime?
+  publishedBy String?
+  supersededById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Restrict)
+
+  @@unique([episodeId, version])
+  @@index([episodeId, status])
+  @@index([contentHash])
+  @@map("adventure_episode_versions")
+}
+
+// 冒险内容操作审计：append-only，只有 create/find，无任何更新或删除入口；
+// 故意不建外键，审计记录必须在被引用实体消失后仍可追溯。
+model AdventureContentAuditLog {
+  id              String   @id @default(uuid())
+  action          String   // create / update_draft / publish / revert / retire / restore / discard / import / export / self_check_failed ...
+  entityType      String   // episode / episode_version / bundle
+  episodeId       String?
+  episodeVersionId String?
+  businessKey     String   // {characterKey}/{season}/{episodeNumber}
+  actorUsername   String
+  actorDisplayName String
+  profile         String   // authoring / readonly（来自 CONTENT_ADMIN_PROFILE）
+  reason          String?
+  detail          Json?
+  sourceBundleHash String? // 导入时记录来源 bundle 的 hash
+  createdAt       DateTime @default(now())
+
+  @@index([episodeId, createdAt])
+  @@index([actorUsername, createdAt])
+  @@index([action, createdAt])
+  @@map("adventure_content_audit_logs")
 }
 
 // 冒险故事：段落/交互点切片
@@ -374,7 +426,8 @@ model AdventureProgress {
   deviceId         String
   episodeId        String
   nextSegmentOrder Int       @default(0) // 下一段待播 order
-  status           String    // in_progress / awaiting_reply / completed / exited
+  episodeVersionId String?   // 锁定的版本快照；为空或等于 episode.currentVersionId 时走 segments 表
+  status           String    // in_progress / awaiting_reply / completed / exited / failed_over（故障自愈收走，内容修好后可重新分配）/ abandoned（admin retire 收走，永不重新分配）
   waitingSince     DateTime? // 引导词最后一个 chunk ack 的服务器时间（10s 超时起点）
   stars            Int       @default(0) // 本集已收集星光
   offTopicCount    Int       @default(0) // 当前交互点连续跑题次数（引回一次后兜底）
@@ -397,7 +450,7 @@ model AdventureDailyRecord {
   deviceId      String
   episodeId     String
   assignedDate  String    // 首次分配日（服务器本地时区）
-  status        String    // in_progress / completed
+  status        String    // in_progress / completed / failed_over（当日行被复用改指向下一集）/ abandoned
   assignedAt    DateTime  @default(now())
   completedAt   DateTime?
   completedDate String?   // 实际完集日；每日完成门禁以此字段判断
