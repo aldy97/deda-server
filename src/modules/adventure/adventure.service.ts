@@ -7,6 +7,12 @@ import {
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import {
+  ADVENTURE_ENGINE_FAILURE_MARKER,
+  AdventureFailurePhase,
+  AdventureFailureReport,
+} from "./adventure.constants";
+import { adventureDateKey } from "./adventure-date.util";
+import {
   AdventureDailyRecord,
   AdventureEpisode,
   AdventureProgress,
@@ -32,7 +38,7 @@ interface InteractionChoice {
  * 或孩子被锁定的 AdventureEpisodeVersion.payload 快照。两者结构一致，
  * 引擎只认这个最小形状，不依赖行 id 与时间戳。
  */
-interface PlayableSegment {
+export interface PlayableSegment {
   order: number;
   kind: string;
   text: string;
@@ -43,7 +49,7 @@ interface PlayableSegment {
   rewardStar?: boolean;
 }
 
-interface EpisodeContent {
+export interface EpisodeContent {
   recap: string | null;
   segments: PlayableSegment[];
 }
@@ -67,7 +73,7 @@ const VERSION_CACHE_LIMIT = 200;
  * 把版本 payload 解析成可播段落。任何字段缺失或类型不符都降级为安全默认值，
  * 形状彻底不可用时返回 null，由调用方回落 segments 表。
  */
-function parseEpisodePayload(payload: unknown): EpisodeContent | null {
+export function parseEpisodePayload(payload: unknown): EpisodeContent | null {
   if (!payload || typeof payload !== "object") {
     return null;
   }
@@ -130,6 +136,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         reply: AdventureReply,
       ) => void | Promise<void>)
     | null = null;
+  private failureListener:
+    ((report: AdventureFailureReport) => void | Promise<void>) | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -171,10 +179,21 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.timeoutListener = listener;
   }
 
+  /** 日期口径与自愈巡检共用同一个实现，见 adventure-date.util.ts */
+  /**
+   * 自愈巡检注册：引擎兜底（换集）被触发时的上报回调。
+   * 用监听器而不是直接注入 RecoveryService，是为了避免
+   * 「RecoveryService → AdventureService → RecoveryService」的 DI 环，
+   * 与既有 registerTimeoutListener 同一个惯用法。
+   */
+  registerFailureListener(
+    listener: (report: AdventureFailureReport) => void | Promise<void>,
+  ) {
+    this.failureListener = listener;
+  }
+
   private dateKey(date = new Date()): string {
-    const mm = String(date.getMonth() + 1).padStart(2, "0");
-    const dd = String(date.getDate()).padStart(2, "0");
-    return `${date.getFullYear()}-${mm}-${dd}`;
+    return adventureDateKey(date);
   }
 
   /** 今日是否已经完成任意一集；这是所有冒险入口的确定性门禁。 */
@@ -398,6 +417,54 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * 取今天这一行 daily：有则复用改指，无则新建。
+   *
+   * @@unique([deviceId, assignedDate]) 决定一个设备一天只能有一行，而
+   * findCurrentDaily 只看 status=in_progress。于是当今天那行已经被收走
+   * （retire → abandoned、故障 → failed_over）或进度行丢失时，
+   * 「查不到在飞的 daily」+「无条件 create」会直接撞唯一约束抛错，
+   * 而且这是永久卡死：那行 daily 不会自己消失，孩子从此再也进不去冒险。
+   * 复用语义与 recoverToNextEpisode 的 reuseDaily 一致。
+   */
+  private async openOrReuseTodayDaily(
+    tx: Prisma.TransactionClient,
+    deviceInternalId: string,
+    episodeId: string,
+  ): Promise<AdventureDailyRecord> {
+    const today = this.dateKey();
+    const existing = await tx.adventureDailyRecord.findUnique({
+      where: {
+        deviceId_assignedDate: {
+          deviceId: deviceInternalId,
+          assignedDate: today,
+        },
+      },
+    });
+    if (!existing) {
+      return tx.adventureDailyRecord.create({
+        data: {
+          deviceId: deviceInternalId,
+          episodeId,
+          assignedDate: today,
+          status: "in_progress",
+        },
+      });
+    }
+    if (existing.status === "completed") {
+      // 不可达：isCompletedToday 已在上游拦住。真到了这里说明每日额度判定
+      // 出了意外，此时宁可本轮不写库，也不能把孩子的完集记录改成 in_progress。
+      this.logger.warn(
+        `Refusing to overwrite completed daily record: deviceId=${deviceInternalId} dailyId=${existing.id} assignedDate=${today}`,
+      );
+      return existing;
+    }
+    return tx.adventureDailyRecord.update({
+      where: { id: existing.id },
+      data: { episodeId, status: "in_progress" },
+    });
+  }
+
   private async getCharacterKey(deviceInternalId: string): Promise<string> {
     const device = await this.prisma.device.findUnique({
       where: { id: deviceInternalId },
@@ -410,7 +477,26 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
    * 开集/续玩。每天只能完成一集；未完成集跨天仍保留，完集日计入当天额度。
    * 集顺序只用于个人进度，不要求剧情连续，也不因其他孩子进度而改变。
    */
+  /**
+   * 开集/续玩入口。任何内部异常都在这里被兜住：先尝试平移到下一集，
+   * 平移失败则返回 null 让上层继续降级。异常绝不允许冒到对话入口——
+   * 对孩子来说，一个 500 和一段沉默是同一件事。
+   */
   async startToday(
+    deviceInternalId: string,
+    explicitlyRequested = false,
+  ): Promise<AdventureReply | null> {
+    try {
+      return await this.startTodayInternal(
+        deviceInternalId,
+        explicitlyRequested,
+      );
+    } catch (error) {
+      return this.handleEngineFailure(deviceInternalId, "start_today", error);
+    }
+  }
+
+  private async startTodayInternal(
     deviceInternalId: string,
     explicitlyRequested = false,
   ): Promise<AdventureReply | null> {
@@ -459,14 +545,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
 
     const { daily, progress } = await this.prisma.$transaction(async (tx) => {
-      const daily = await tx.adventureDailyRecord.create({
-        data: {
-          deviceId: deviceInternalId,
-          episodeId: episode.id,
-          assignedDate: this.dateKey(),
-          status: "in_progress",
-        },
-      });
+      const daily = await this.openOrReuseTodayDaily(
+        tx,
+        deviceInternalId,
+        episode.id,
+      );
       const progress = await this.assignProgress(tx, deviceInternalId, episode);
       await tx.adventureEvent.create({
         data: {
@@ -619,7 +702,19 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
    * 孩子在交互等待中的回答：五类处置。
    * 非等待态返回 null（不接管上行）。
    */
+  /** 孩子回话入口。兜底口径同 startToday。 */
   async handleChildReply(
+    deviceInternalId: string,
+    asrText: string,
+  ): Promise<AdventureReply | null> {
+    try {
+      return await this.handleChildReplyInternal(deviceInternalId, asrText);
+    } catch (error) {
+      return this.handleEngineFailure(deviceInternalId, "handle_reply", error);
+    }
+  }
+
+  private async handleChildReplyInternal(
     deviceInternalId: string,
     asrText: string,
   ): Promise<AdventureReply | null> {
@@ -771,7 +866,18 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
    * 10s 沉默超时检查：到点未收到该设备上行则兜底续播。
    * 终点判定 = 我方收到 vendor:text:in 的时间（由调用方先取消等待）。
    */
+  /** 沉默超时入口。兜底口径同 startToday。 */
   async checkTimeout(deviceInternalId: string): Promise<AdventureReply | null> {
+    try {
+      return await this.checkTimeoutInternal(deviceInternalId);
+    } catch (error) {
+      return this.handleEngineFailure(deviceInternalId, "check_timeout", error);
+    }
+  }
+
+  private async checkTimeoutInternal(
+    deviceInternalId: string,
+  ): Promise<AdventureReply | null> {
     const current = await this.findCurrentAdventure(deviceInternalId);
     if (
       !current ||
@@ -791,6 +897,60 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.clearTimer(deviceInternalId);
     const reply = await this.playFrom(progress, segments, [fallback], daily);
     return { ...reply, result: "timeout" };
+  }
+
+  /**
+   * 引擎异常的统一兜底：记日志 → 尝试平移到下一集 → 上报（无论成败）。
+   *
+   * 平移自身也失败时返回 null，上层据此继续降级（自由创作 → L0 兜底话术）。
+   * 这条链路自己绝不再抛错：兜底代码抛错等于把最后一道防线也拆了。
+   */
+  private async handleEngineFailure(
+    deviceInternalId: string,
+    phase: AdventureFailurePhase,
+    error: unknown,
+  ): Promise<AdventureReply | null> {
+    const reason = error instanceof Error ? error.message : String(error);
+    this.logger.error(
+      `${ADVENTURE_ENGINE_FAILURE_MARKER} phase=${phase} deviceId=${deviceInternalId}: ${reason}`,
+    );
+    let reply: AdventureReply | null = null;
+    try {
+      reply = await this.recoverToNextEpisode(deviceInternalId, reason);
+    } catch (recoverError) {
+      this.logger.error(
+        `${ADVENTURE_ENGINE_FAILURE_MARKER} recovery also failed phase=${phase} ` +
+          `deviceId=${deviceInternalId}: ${
+            recoverError instanceof Error
+              ? recoverError.message
+              : String(recoverError)
+          }`,
+      );
+    }
+    await this.emitFailure({
+      deviceInternalId,
+      phase,
+      reason,
+      recovered: !!reply,
+      at: new Date().toISOString(),
+    });
+    return reply;
+  }
+
+  /** 上报给自愈巡检（熔断计数 + 面板）。尽力而为，绝不影响本轮回复。 */
+  private async emitFailure(report: AdventureFailureReport): Promise<void> {
+    if (!this.failureListener) {
+      return;
+    }
+    try {
+      await this.failureListener(report);
+    } catch (error) {
+      this.logger.warn(
+        `Adventure failure listener threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
