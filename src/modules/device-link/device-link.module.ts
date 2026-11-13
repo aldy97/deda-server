@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { MqttModule } from "@/common/mqtt/mqtt.module";
 import { RedisModule } from "@/common/redis/redis.module";
 import { DeviceLinkService } from "./device-link.service";
+import { DevicePresenceService } from "./device-presence.service";
 
 /**
  * 设备链路模块（机芯厂新 MQTT 三主题协议）
@@ -11,7 +12,7 @@ import { DeviceLinkService } from "./device-link.service";
  */
 @Module({
   imports: [MqttModule, RedisModule],
-  providers: [DeviceLinkService],
+  providers: [DeviceLinkService, DevicePresenceService],
   exports: [DeviceLinkService],
 })
 export class DeviceLinkModule {}

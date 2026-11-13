@@ -8,9 +8,16 @@ import {
 } from "class-validator";
 
 /**
- * 智能体实例登记（机芯厂《设备端接口文档》4.1 节）。
- * authorization 为设备为本轮百度实例准备的控制鉴权信息，
- * 服务端保存后用于调用百度控制接口；不回显、不落日志。
+ * 智能体实例登记（机芯厂《设备端接口文档》4.1 节 v1.2）。
+ *
+ * v1.2 起设备必须同时上报两份用途不同的 BCE 签名：
+ * - authorization_Role: 切换角色、人设或音色
+ *   （PUT /api/v1/aiagent/instances/operation?switchSceneRole=）
+ * - authorization_TTS: interrupt 打断播报
+ *   （POST /api/v1/aiagent/interrupt）
+ *
+ * v1.1 的单 authorization 作为可选字段保留以兼容老固件；
+ * 服务端不将任一签名写入日志、不回显到 HTTP 响应体。
  */
 export class BotStartDto {
   /** 设备 MAC，与上线登记一致 */
@@ -30,10 +37,24 @@ export class BotStartDto {
   })
   instanceid: string;
 
-  /** 本轮百度实例控制鉴权信息（ASCII，最多 8192 字节） */
+  /**
+   * v1.1 兼容：本轮百度实例控制鉴权信息（ASCII，最多 8192 字节）。
+   * v1.2 固件不再发送此字段，仅老固件使用。
+   */
+  @IsOptional()
   @IsString()
   @MaxLength(8192)
-  authorization: string;
+  authorization?: string;
+
+  /** 切换角色、人设或音色的 BCE 签名（ASCII，最多 8192 字节） */
+  @IsString()
+  @MaxLength(8192)
+  authorization_Role: string;
+
+  /** interrupt 打断播报的 BCE 签名（ASCII，最多 8192 字节） */
+  @IsString()
+  @MaxLength(8192)
+  authorization_TTS: string;
 
   /** 云节点：cn（默认）/ overseas / euUs */
   @IsOptional()

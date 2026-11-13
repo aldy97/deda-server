@@ -1,15 +1,15 @@
 # deda-server 设备侧 HTTP 接口对接说明（供机芯厂固件配置）
 
-版本：1.0（2026-11-10）。本文档是机芯厂《设备端接口文档》v1.1 的**我方实现回执**：
+版本：1.1（2026-11-12）。本文档是机芯厂《设备端接口文档》v1.2 的**我方实现回执**：
 三个 HTTP 接口已在 deda-server 实现并与公版协议逐项对齐，供固件烧录与联调使用。
 协议语义（调用时机、错误码、重试规则）以公版文档为准，本文只写我方实现的具体事实。
 
 ## 1. 基础地址（由我方提供，请配置进固件）
 
-| 环境 | 基础地址 | 说明 |
-| --- | --- | --- |
-| staging（联调） | `http://8.133.236.127:3001` | 联调期为 HTTP；设备直连，无需经过机芯厂云中转 |
-| production（量产） | `https://<生产域名>` | HTTPS；证书由我方运维配置，固件侧 TLS 能力待确认 |
+| 环境               | 基础地址                    | 说明                                             |
+| ------------------ | --------------------------- | ------------------------------------------------ |
+| staging（联调）    | `http://8.133.236.127:3001` | 联调期为 HTTP；设备直连，无需经过机芯厂云中转    |
+| production（量产） | `https://<生产域名>`        | HTTPS；证书由我方运维配置，固件侧 TLS 能力待确认 |
 
 - 三条路径原样拼接在基础地址后，无任何额外前缀：
   - `POST /client/user/user/loginMac`
@@ -35,25 +35,34 @@
 
 联调黄金值（供固件核对密码算法）：
 
-| mac（归一化后） | password |
-| --- | --- |
-| `aabbccddeeff` | `eec1ea82480a6a30fdf47227af0652b7` |
-| `90fe1de7a1ca` | `cf471119880560a0f8715d347bd8fa70` |
+| mac（归一化后） | password                           |
+| --------------- | ---------------------------------- |
+| `aabbccddeeff`  | `eec1ea82480a6a30fdf47227af0652b7` |
+| `90fe1de7a1ca`  | `cf471119880560a0f8715d347bd8fa70` |
 
 ### 2.2 `POST /client/bot/bot/start`
 
+请求体 v1.2 起必须同时携带两份用途不同的 BCE 签名：
+
+- `authorization_Role`：用于切换角色、人设或音色（PUT `/api/v1/aiagent/instances/operation?switchSceneRole=`）；
+- `authorization_TTS`：用于 interrupt 打断播报（POST `/api/v1/aiagent/interrupt`）。
+
+v1.1 的单 `authorization` 字段仍作为**可选字段**被接受，兼容尚未升级的老固件；
+v1.2 固件应发送上述两个必填字段，不再发送单 `authorization`。
+
 - 设备未上线（未成功 loginMac）时返回 401；请先 loginMac 再以**原实例 ID**重试。
-- 同设备同实例重复 start：幂等返回 `{"code":200}`，并刷新本轮控制鉴权信息（`authorization`）。
+- 同设备同实例重复 start：幂等返回 `{"code":200}`，并刷新 authorization_Role 与 authorization_TTS（及各自的签名时间）。
 - 同设备新实例：登记为当前实例，旧实例记录不再作为当前实例（不自动停止旧云端实例）。
 - 已结束（stop 过）的实例被延迟 start 复活：返回 409。
-- 成功响应：`{"code":200}`（无响应体详情，鉴权信息不回显）。
+- 成功响应：`{"code":200}`（无响应体详情，任一签名均不回显）。
+- 缺少 authorization_Role 或 authorization_TTS 时返回 400；设备不可省略任一个。
 
 ### 2.3 `POST /client/bot/bot/stop`
 
 - 按 `mac` + `instanceid` 精确结束；重复 stop 幂等返回 `{"code":200}`。
 - 旧实例的延迟 stop 不会清理该设备的新实例。
 - 未知实例或 MAC 不匹配返回 404；设备未上线返回 401。
-- stop 处理后我方清除该实例的控制鉴权信息。
+- stop 处理后我方清除该实例的 authorization_Role、authorization_TTS 及 v1.1 兼容的 authorization。
 
 ### 2.4 通用
 
@@ -68,4 +77,6 @@
 2. 设备配网连上 WiFi → 调 loginMac → 核对响应头 `Authorization` 已保存。
 3. 发起一轮对话 → 确认 start/stop 各返回 `{"code":200}`。
 4. 配网窗口内（上线后 120 秒）小程序可看到该设备并完成绑定。
-5. 异常路径抽查：错误密码（401）、未上线先 start（401）、stop 未知实例（404）、stop 后再 start 同实例（409）。
+5. 异常路径抽查：错误密码（401）、未上线先 start（401）、start 缺少
+   `authorization_Role` 或 `authorization_TTS`（400）、stop 未知实例（404）、
+   stop 后再 start 同实例（409）。

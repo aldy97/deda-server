@@ -76,6 +76,7 @@ model Device {
   conversationSession ConversationSession?
   sleepConfig     SleepConfig?
   llmUsageLogs    LlmUsageLog[]
+  presenceDaily   DevicePresenceDaily[]
 
   @@map("devices")
 }
@@ -604,4 +605,22 @@ model TurnDecisionLog {
   @@index([createdAt, intent, intentSource])
   @@index([createdAt, safetySource])
   @@map("turn_decision_logs")
+}
+
+// 设备在线上报日落库：MQTT 心跳旁路，内存聚合 5 分钟批量 flush
+model DevicePresenceDaily {
+  id          String   @id @default(uuid())
+  deviceId    String // Device.id（内部 UUID），非业务 MAC
+  date        String // YYYY-MM-DD，Asia/Shanghai 自然日
+  reportCount Int      @default(0) // 当日心跳次数（5 分钟粒度聚合累加）
+  firstSeenAt DateTime // 当日首次上报
+  lastSeenAt  DateTime // 当日最后上报
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, date])
+  @@index([date])
+  @@map("device_presence_daily")
 }

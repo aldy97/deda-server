@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { DeviceLinkService } from "../device-link/device-link.service";
 import {
   DEFAULT_REPORT_TIMEZONE,
   isValidReportDate,
@@ -29,9 +30,12 @@ type TrendMetricKey = (typeof TREND_METRIC_KEYS)[number];
 
 @Injectable()
 export class OverviewService {
+  private readonly logger = new Logger(OverviewService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly retentionService: RetentionService,
+    private readonly deviceLink: DeviceLinkService,
   ) {}
 
   /** 解析 date 参数：缺省=昨天（Asia/Shanghai 完整自然日 T-1） */
@@ -105,6 +109,9 @@ export class OverviewService {
       firstConversationIds,
       active7dIds,
       retention,
+      devices,
+      poweredOnCount,
+      firstPresenceDate,
     ] = await Promise.all([
       this.prisma.device.count({ where: { createdAt: { lt: end } } }),
       this.prisma.user.count({ where: { createdAt: { lt: end } } }),
@@ -122,12 +129,52 @@ export class OverviewService {
         distinct: ["deviceId"],
       }),
       this.retentionService.getLatestRetention(date),
+      this.prisma.device.findMany({
+        where: { createdAt: { lt: end } },
+        select: { deviceId: true, macAddress: true },
+      }),
+      // @@unique([deviceId, date]) 保证一台设备一天最多一行，故 count 即去重台数
+      this.prisma.devicePresenceDaily.count({ where: { date } }),
+      this.getFirstPresenceDate(),
     ]);
 
     const dayBucket = daily.get(date);
     const dau = dayBucket?.devices.size ?? 0;
     const turns = dayBucket?.turns ?? 0;
     const prevDau = prevDaily.get(shiftReportDate(date, -1))?.devices.size ?? 0;
+
+    let onlineNow: number | null = null;
+    try {
+      const macs = devices.map(
+        (d: { deviceId: string; macAddress: string | null }) =>
+          d.macAddress ?? d.deviceId,
+      );
+      const statuses = await this.deviceLink.getStatusBatch(macs);
+      let count = 0;
+      for (const [, s] of statuses) {
+        if (s.online) count++;
+      }
+      onlineNow = count;
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Failed to query device online status: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    // device_presence_daily 自上线日才有数据；早于该日的日期返回 null（「无数据」）
+    // 而非 0（「零台开机」），避免把功能未上线误读成设备全离线。
+    const hasPresenceData =
+      firstPresenceDate !== null && date >= firstPresenceDate;
+    const devicesPoweredOn: number | null = hasPresenceData
+      ? poweredOnCount
+      : null;
+    // 开机率分母 = 已激活设备数；分母为 0 时 null
+    const powerOnRate: number | null =
+      devicesPoweredOn !== null && activatedIds.size > 0
+        ? Math.round((devicesPoweredOn / activatedIds.size) * 10000) / 10000
+        : null;
 
     return {
       date,
@@ -154,11 +201,9 @@ export class OverviewService {
             : 0,
         avgTurnsPerActiveDevice:
           dau > 0 ? Math.round((turns / dau) * 100) / 100 : 0,
-        // 开机率依赖 device_presence_daily（二期落库），一期恒 null
-        devicesPoweredOn: null,
-        powerOnRate: null,
-        // onlineNow 依赖 Redis 在线集合（二期），一期恒 null
-        onlineNow: null,
+        devicesPoweredOn,
+        powerOnRate,
+        onlineNow,
       },
       retention,
       funnel: {
@@ -208,18 +253,28 @@ export class OverviewService {
     const { start } = reportDayRange(query.startDate, DEFAULT_REPORT_TIMEZONE);
     const { end } = reportDayRange(query.endDate, DEFAULT_REPORT_TIMEZONE);
 
-    const [daily, bindings, users] = await Promise.all([
-      this.getDailyActivity(deviceIds, start, end),
-      this.prisma.userDeviceBinding.findMany({
-        where: { createdAt: { gte: start, lt: end } },
-        select: { deviceId: true, createdAt: true },
-        distinct: ["deviceId"],
-      }),
-      this.prisma.user.findMany({
-        where: { createdAt: { gte: start, lt: end } },
-        select: { createdAt: true },
-      }),
-    ]);
+    const [daily, bindings, users, presenceRows, firstPresenceDate] =
+      await Promise.all([
+        this.getDailyActivity(deviceIds, start, end),
+        this.prisma.userDeviceBinding.findMany({
+          where: { createdAt: { gte: start, lt: end } },
+          select: { deviceId: true, createdAt: true },
+          distinct: ["deviceId"],
+        }),
+        this.prisma.user.findMany({
+          where: { createdAt: { gte: start, lt: end } },
+          select: { createdAt: true },
+        }),
+        // @@unique([deviceId, date])：一行 = 一台设备当天开过机
+        this.prisma.devicePresenceDaily.findMany({
+          where: {
+            date: { gte: query.startDate, lte: query.endDate },
+            ...(deviceIds ? { deviceId: { in: deviceIds } } : {}),
+          },
+          select: { deviceId: true, date: true },
+        }),
+        this.getFirstPresenceDate(),
+      ]);
 
     const newActivatedByDay = new Map<string, number>();
     for (const binding of bindings) {
@@ -236,6 +291,16 @@ export class OverviewService {
         DEFAULT_REPORT_TIMEZONE,
       );
       newUsersByDay.set(dateKey, (newUsersByDay.get(dateKey) ?? 0) + 1);
+    }
+
+    const poweredByDay = new Map<string, Set<string>>();
+    for (const row of presenceRows) {
+      let powered = poweredByDay.get(row.date);
+      if (!powered) {
+        powered = new Set<string>();
+        poweredByDay.set(row.date, powered);
+      }
+      powered.add(row.deviceId);
     }
 
     // 日级数据先展开，再按粒度聚合（week/month 桶内：dau/时长按桶内去重与合计）
@@ -255,6 +320,7 @@ export class OverviewService {
         turns: number;
         newActivated: number;
         newUsers: number;
+        poweredDevices: Set<string>;
       }
     >();
     const bucketKeyOf = (dateKey: string): string => {
@@ -276,6 +342,7 @@ export class OverviewService {
           turns: 0,
           newActivated: 0,
           newUsers: 0,
+          poweredDevices: new Set<string>(),
         };
         buckets.set(key, bucket);
       }
@@ -288,6 +355,12 @@ export class OverviewService {
       }
       bucket.newActivated += newActivatedByDay.get(dateKey) ?? 0;
       bucket.newUsers += newUsersByDay.get(dateKey) ?? 0;
+      const poweredOnDay = poweredByDay.get(dateKey);
+      if (poweredOnDay) {
+        for (const deviceId of poweredOnDay) {
+          bucket.poweredDevices.add(deviceId);
+        }
+      }
     }
 
     const series = Array.from(buckets.entries()).map(([bucketKey, bucket]) => {
@@ -304,7 +377,13 @@ export class OverviewService {
               )
             : 0;
       }
-      if (metricKeys.includes("poweredOn")) point.devicesPoweredOn = null;
+      if (metricKeys.includes("poweredOn")) {
+        // 早于 device_presence_daily 落库首日的桶为 null（无数据），不是 0（零台开机）
+        point.devicesPoweredOn =
+          firstPresenceDate !== null && bucketKey >= firstPresenceDate
+            ? bucket.poweredDevices.size
+            : null;
+      }
       if (metricKeys.includes("newActivated")) {
         point.newActivatedDevices = bucket.newActivated;
       }
@@ -318,5 +397,14 @@ export class OverviewService {
       granularity,
       series,
     };
+  }
+
+  /** device_presence_daily 中最早的日期；表为空（功能未上线）时返回 null */
+  private async getFirstPresenceDate(): Promise<string | null> {
+    const row = await this.prisma.devicePresenceDaily.findFirst({
+      orderBy: { date: "asc" },
+      select: { date: true },
+    });
+    return row?.date ?? null;
   }
 }

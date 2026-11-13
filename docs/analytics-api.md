@@ -30,13 +30,15 @@ GET /analytics/overview?date=            (缺省=昨天 T-1)
     totals: { devicesRegistered, devicesActivated, usersRegistered, activationRate },
     today:  { dau, dauDeltaPct, avgDurationSecondsPerActiveDevice,  // estimated
               avgTurnsPerActiveDevice,
-              devicesPoweredOn, powerOnRate, onlineNow },           // 一期恒 null（二期落库）
+              devicesPoweredOn, powerOnRate, onlineNow },           // onlineNow=实时在线台数（Redis 15s 窗口）；devicesPoweredOn=当日开机台数、powerOnRate=开机数/已激活数（源自 device_presence_daily）
     retention: { d1, d7, d30 },          // 激活日为 date-N 的 cohort 在 date 的活跃率；分母为 0 时 null
     funnel: { shipped, activated, firstConversation, active7d }     // shipped 一期恒 null
   }
 ```
 
 - 激活率分母：无出货数据时退化为已入库设备数（devices 全量）。
+- `devicesPoweredOn` / `powerOnRate` 取自 `device_presence_daily`（**天级**）：早于该表落库首日的日期返回 **null（无数据）** 而非 0（零台开机），避免把功能未上线误读成设备全离线；`powerOnRate` 分母为已激活设备数，分母为 0 时为 null。
+- `onlineNow` 是**实时**口径（Redis `lastSeenAt` 落在 15 秒窗口内），与天级的 `devicesPoweredOn` 不是同一口径，二者不可互相校验。
 
 ```
 GET /analytics/overview/trend?startDate=&endDate=&granularity=day&metrics=dau,avgDuration,newActivated&characterKey=
@@ -44,7 +46,8 @@ GET /analytics/overview/trend?startDate=&endDate=&granularity=day&metrics=dau,av
 ```
 
 - metrics 可选值：`dau, avgDuration, poweredOn, newActivated, newUsers`，逗号分隔多选，缺省全量；非法值 400。
-- 无数据日期补零；week 粒度按 ISO 周（周一）聚合，month 按自然月；devicesPoweredOn 一期恒 null。
+- 无数据日期补零；week 粒度按 ISO 周（周一）聚合，month 按自然月。
+- `devicesPoweredOn` 取自 `device_presence_daily`，按桶内**去重设备数**聚合；早于落库首日的桶为 null（非 0），故跨上线时点的 week/month 桶数值会偏小。
 - characterKey 过滤按设备型号（elly/polly）。
 
 ## 留存与激活（P2）
@@ -440,9 +443,55 @@ POST /analytics/devices/:deviceId/wipe
 - `deviceOnline=false` 表示下发时设备离线，`recover` 可能未送达，admin 需到手后手动复位设备。
 - 设备不存在 → 404。家长小程序解绑（DELETE /devices/:id）不触发本流程，仅删绑定关系。
 
-## 二期预告（需 schema 审批）
+## Fleet（舰队管理）
 
-- `device_presence_daily`：MQTT DEVICE_STATUS 旁路落库 → 开机率 / onlineNow / fleet 接口。
+向运营/管理员提供全量设备舰队视图。详细规范见 `docs/fleet-analytics-spec.md`。
+
+```
+GET /analytics/fleet/summary?date=
+→ { date, totalDevices, activatedDevices, devicesPoweredOn, powerOnRate,
+    onlineNow, lowBatteryNow, lowBatteryThreshold, presenceSince }
+
+GET /analytics/fleet/presence-trend?startDate=&endDate=
+→ { startDate, endDate, presenceSince,
+    series: [{ date, devicesPoweredOn, powerOnRate, reportCount }] }
+   // 区间上限 62 天；每一天都出现
+
+GET /analytics/fleet/firmware-distribution
+→ { total, buckets: [{ firmwareVersion, devices }] }
+   // null/空字符串 → "unknown"；unknown 排最后
+
+GET /analytics/fleet/churn-risk?days=7
+→ { days, asOf, count, devices: [{ deviceId, characterKey, firmwareVersion,
+    lastActiveAt, daysInactive, basis }] }
+   // days 范围 1–90；basis: presence | message | createdAt
+
+GET /analytics/fleet/devices?keyword=&page=1&pageSize=20
+→ { page, pageSize, total,
+    items: [{ deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
+              macAddress, createdAt, boundUsers, realtime, presenceDays7d,
+              lastPresenceDate, turns7d }] }
+   // keyword ≤ 50 字符；pageSize 最大 100 静默 clamp；createdAt 降序
+
+GET /analytics/fleet/devices/:deviceId?days=30
+→ { deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
+    macAddress, wifiName, ipAddress, networkType, timezone, createdAt,
+    realtime, boundUsers: [{ userId, isOwner, boundAt }],
+    presence: [{ date, reportCount, firstSeenAt, lastSeenAt }],
+    dailyTurns: [{ date, turns }],
+    totals: { presenceDays, turns } }
+   // days 范围 1–90；404 on missing；boundUsers 不含 PII
+```
+
+全局口径：
+- **实时**：`onlineNow` / `realtime` — Redis 15s 窗口；失败 → null
+- **天级**：`devicesPoweredOn` / `presenceDays7d` — `device_presence_daily` 表
+- 低电量阈值固定 20（仅在线设备）
+- `null` ≠ `0`：前端 `null` 渲染 `-`
+
+## 二期（进行中）
+
+- `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`onlineNow` / `devicesPoweredOn` / `powerOnRate` 及 trend 的 `poweredOn` 均已接通；fleet 接口已上线（见「Fleet」节）。
 - ~~`llm_usage_logs`：token 落库~~ 已上线（见「模型监控」）。~~DeepSeek 主网关流式是否返回 usage 待复验~~ 已复验（2026-11-12）：主模型 87/87 行均有 token，且回传 `prompt_cache_hit_tokens`，费用口径见「模型监控 → 费用口径」。
 - `admin_users` 表替换 env 白名单；activation 快照表冻结历史 cohort。
 - `turn_decision_logs.reviewLabel / reviewedAt` 写接口（人工复核闭环）：两列本期已建、看板只读，

@@ -29,8 +29,16 @@ const NORMALIZED_MAC_PATTERN = /^[0-9a-f]{12}$/;
 interface BotInstanceRecord {
   instanceid: string;
   appid: string;
-  /** 百度实例控制鉴权信息；stop 时清除，不落日志、不回显 */
+  /** v1.1 兼容：百度实例控制鉴权信息；stop 时清除，不落日志、不回显 */
   authorization?: string;
+  /** 切换角色/人设/音色 BCE 签名；stop 时清除，不落日志、不回显 */
+  authorization_Role?: string;
+  /** interrupt 打断播报 BCE 签名；stop 时清除，不落日志、不回显 */
+  authorization_TTS?: string;
+  /** authorization_Role 签名时间（ISO 8601），协议要求记录有效期 1800s */
+  roleSignedAt?: string;
+  /** authorization_TTS 签名时间（ISO 8601），协议要求记录有效期 1800s */
+  ttsSignedAt?: string;
   cloudNode: string;
   lang: string;
   status: "active" | "ended";
@@ -39,7 +47,7 @@ interface BotInstanceRecord {
 }
 
 /**
- * 机芯厂设备侧 HTTP 接口（《设备端接口文档》v1.1）。
+ * 机芯厂设备侧 HTTP 接口（《设备端接口文档》v1.2）。
  *
  * - loginMac：设备联网后上报 MAC + 校验密码，服务端建档并在响应头返回
  *   三方 LLM API KEY；成功上线写入认领窗口（Redis sorted set），
@@ -128,6 +136,7 @@ export class ClientApiService {
     const mac = this.normalizeMac(dto.mac);
     await this.assertDeviceRegistered(mac);
 
+    const now = new Date().toISOString();
     const key = botInstanceKey(mac, dto.instanceid);
     const existing = await this.readInstance(key);
     if (existing) {
@@ -138,6 +147,10 @@ export class ClientApiService {
         ...existing,
         appid: dto.appid,
         authorization: dto.authorization,
+        authorization_Role: dto.authorization_Role,
+        authorization_TTS: dto.authorization_TTS,
+        roleSignedAt: now,
+        ttsSignedAt: now,
         cloudNode: dto.cloud_node ?? "cn",
         lang: dto.lang ?? "zh",
       };
@@ -153,10 +166,14 @@ export class ClientApiService {
       instanceid: dto.instanceid,
       appid: dto.appid,
       authorization: dto.authorization,
+      authorization_Role: dto.authorization_Role,
+      authorization_TTS: dto.authorization_TTS,
+      roleSignedAt: now,
+      ttsSignedAt: now,
       cloudNode: dto.cloud_node ?? "cn",
       lang: dto.lang ?? "zh",
       status: "active",
-      startedAt: new Date().toISOString(),
+      startedAt: now,
     };
     await this.redis.setValue(
       key,
@@ -192,6 +209,8 @@ export class ClientApiService {
       endedAt: new Date().toISOString(),
     };
     delete ended.authorization;
+    delete ended.authorization_Role;
+    delete ended.authorization_TTS;
     await this.redis.setValue(
       key,
       JSON.stringify(ended),

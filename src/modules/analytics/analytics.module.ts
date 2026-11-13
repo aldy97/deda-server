@@ -38,6 +38,8 @@ import { ParentReportsAnalyticsService } from "./parent-reports-analytics.servic
 import { DevicesAdminController } from "./devices-admin.controller";
 import { TurnDecisionAnalyticsController } from "./turn-decision-analytics.controller";
 import { TurnDecisionAnalyticsService } from "./turn-decision-analytics.service";
+import { FleetController } from "./fleet.controller";
+import { FleetService } from "./fleet.service";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 
 @Module({
@@ -57,8 +59,10 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     LlmAnalyticsController,
     ParentReportsAnalyticsController,
     TurnDecisionAnalyticsController,
+    FleetController,
   ],
   providers: [
+    FleetService,
     {
       provide: ANALYTICS_JWT_SERVICE,
       inject: [ConfigService],
