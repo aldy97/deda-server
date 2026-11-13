@@ -26,6 +26,7 @@ import { DeviceStatusModule } from "./modules/device-status/device-status.module
 import { DeviceLinkModule } from "./modules/device-link/device-link.module";
 import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
 import { AdventureModule } from "./modules/adventure/adventure.module";
+import { AdventureAdminModule } from "./modules/adventure-admin/adventure-admin.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
@@ -89,6 +90,7 @@ const staticImports = existsSync(dashboardDistPath)
     MusicModule,
     LlmModule,
     AdventureModule,
+    AdventureAdminModule,
     FeedbacksModule,
     SleepConfigsModule,
     SleepSchedulerModule,
