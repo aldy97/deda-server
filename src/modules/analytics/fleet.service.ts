@@ -320,9 +320,9 @@ export class FleetService {
     );
 
     buckets.sort((a, b) => {
-      if (b.devices !== a.devices) return b.devices - a.devices;
       if (a.firmwareVersion === "unknown") return 1;
       if (b.firmwareVersion === "unknown") return -1;
+      if (b.devices !== a.devices) return b.devices - a.devices;
       return a.firmwareVersion.localeCompare(b.firmwareVersion);
     });
 

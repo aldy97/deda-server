@@ -17,10 +17,12 @@ describe("ConversationModesService", () => {
               findMany: jest.fn(),
               findUnique: jest.fn(),
               upsert: jest.fn(),
+              createMany: jest.fn(),
             },
             conversationMode: {
               findMany: jest.fn(),
               upsert: jest.fn(),
+              createMany: jest.fn(),
             },
           },
         },
@@ -170,24 +172,47 @@ describe("ConversationModesService", () => {
   });
 
   describe("seedDefaults", () => {
-    it("should upsert two categories and three free-chat modes", async () => {
-      prisma.conversationModeCategory.upsert
-        .mockResolvedValueOnce({ id: "cat-free-chat" })
-        .mockResolvedValueOnce({ id: "cat-english-chat" });
-      prisma.conversationModeCategory.findUnique.mockResolvedValue({
-        id: "cat-free-chat",
+    it("should bulk-insert categories and modes with skipDuplicates", async () => {
+      prisma.conversationModeCategory.createMany.mockResolvedValue({
+        count: 2,
       });
-      prisma.conversationMode.upsert.mockResolvedValue({ id: "mode-1" });
+      prisma.conversationModeCategory.findMany.mockResolvedValue([
+        { id: "cat-free-chat", key: "free_chat" },
+        { id: "cat-english-chat", key: "english_chat" },
+      ]);
+      prisma.conversationMode.createMany.mockResolvedValue({ count: 3 });
 
       await service.seedDefaults();
 
-      expect(prisma.conversationModeCategory.upsert).toHaveBeenCalledTimes(2);
-      expect(prisma.conversationMode.upsert).toHaveBeenCalledTimes(3);
-      expect(prisma.conversationModeCategory.upsert).toHaveBeenCalledWith(
+      expect(prisma.conversationModeCategory.createMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { key: "english_chat" },
+          skipDuplicates: true,
+          data: expect.arrayContaining([
+            expect.objectContaining({ key: "free_chat" }),
+            expect.objectContaining({ key: "english_chat" }),
+          ]),
         }),
       );
+      const modesCall = prisma.conversationMode.createMany.mock.calls[0][0];
+      expect(modesCall.skipDuplicates).toBe(true);
+      expect(modesCall.data).toHaveLength(3);
+      expect(
+        modesCall.data.every(
+          (m: { categoryId: string; categoryKey?: string }) =>
+            m.categoryId === "cat-free-chat" && !("categoryKey" in m),
+        ),
+      ).toBe(true);
+    });
+
+    it("should not insert modes when no category exists", async () => {
+      prisma.conversationModeCategory.createMany.mockResolvedValue({
+        count: 0,
+      });
+      prisma.conversationModeCategory.findMany.mockResolvedValue([]);
+
+      await service.seedDefaults();
+
+      expect(prisma.conversationMode.createMany).not.toHaveBeenCalled();
     });
   });
 });
