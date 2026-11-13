@@ -7,6 +7,7 @@ import { AdventureContentService } from "./adventure-content.service";
 import { AdventureContentQueryService } from "./adventure-content-query.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
+import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
   ContentAdminGuard,
@@ -164,6 +165,24 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     path: "import",
     readOnlyExempt: false,
   },
+  {
+    handler: "recoveryHealth",
+    method: RequestMethod.GET,
+    path: "recovery",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "recoverySweep",
+    method: RequestMethod.POST,
+    path: "recovery/sweep",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "recoveryReset",
+    method: RequestMethod.POST,
+    path: "recovery/reset",
+    readOnlyExempt: false,
+  },
 ];
 
 function normalizePath(value: unknown): string {
@@ -217,6 +236,7 @@ describe("AdventureAdminController", () => {
   let content: Record<string, jest.Mock>;
   let transfer: Record<string, jest.Mock>;
   let audit: Record<string, jest.Mock>;
+  let recovery: Record<string, jest.Mock>;
   let profile: string;
 
   beforeEach(async () => {
@@ -247,7 +267,12 @@ describe("AdventureAdminController", () => {
       planImport: jest.fn(),
       applyImport: jest.fn(),
     };
-    audit = { list: jest.fn() };
+    audit = { list: jest.fn(), record: jest.fn() };
+    recovery = {
+      getHealthSnapshot: jest.fn(),
+      sweepBrokenProgress: jest.fn(),
+      resetBreaker: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -256,6 +281,7 @@ describe("AdventureAdminController", () => {
         { provide: AdventureContentService, useValue: content },
         { provide: AdventureTransferService, useValue: transfer },
         { provide: AdventureAuditService, useValue: audit },
+        { provide: AdventureRecoveryService, useValue: recovery },
         {
           provide: ConfigService,
           useValue: {
@@ -747,6 +773,138 @@ describe("AdventureAdminController", () => {
         ),
       ).rejects.toThrow();
       expect(transfer.applyImport).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * 自愈面板的三条路由。
+   *
+   * 要钉住的事实：GET 快照只读、不写审计；两个 POST 是**会改数据**的运维动作
+   * （巡检会把病态进度判成 exited/abandoned，重置熔断器等于解除降级），
+   * 所以它们既不豁免只读闸，也必须留一条「谁在什么时候、为什么」的审计。
+   * 审计写失败不能吞掉动作结果——故障期间运维更需要看见自己刚做了什么。
+   */
+  describe("recovery routes", () => {
+    const emptyReport = {
+      startedAt: "2026-11-13T00:00:00.000Z",
+      finishedAt: "2026-11-13T00:00:00.050Z",
+      durationMs: 50,
+      skipped: false,
+      scanned: { progresses: 0, dailyRecords: 0, episodes: 0 },
+      repairs: [],
+      alerts: [],
+      errors: [],
+    } as const;
+
+    it("serves the health snapshot read-only, without an actor or an audit row", async () => {
+      const snapshot = { breaker: { tripped: false }, sweeps: [] };
+      recovery.getHealthSnapshot.mockResolvedValue(snapshot);
+
+      await expect(controller.recoveryHealth()).resolves.toBe(snapshot);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("refuses a manual sweep without a reason, before touching the recovery service", async () => {
+      await expect(
+        controller.recoverySweep({ reason: "短" } as never, adminRequest()),
+      ).rejects.toThrow();
+      expect(recovery.sweepBrokenProgress).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("refuses a manual sweep from an anonymous actor", async () => {
+      await expect(
+        controller.recoverySweep(
+          { reason: "巡检一下卡住的进度" } as never,
+          { user: {} } as never,
+        ),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(recovery.sweepBrokenProgress).not.toHaveBeenCalled();
+    });
+
+    it("runs the sweep and leaves an audit row naming who and why", async () => {
+      recovery.sweepBrokenProgress.mockResolvedValue({
+        ...emptyReport,
+        repairs: [{ code: "AWAITING_NON_INTERACTION", deviceId: "d1" }],
+      });
+
+      const result = await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      expect(recovery.sweepBrokenProgress).toHaveBeenCalledTimes(1);
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ username: "alice", profile: "authoring" }),
+        expect.objectContaining({
+          action: "recovery_sweep",
+          entityType: "recovery",
+          reason: "巡检一下卡住的进度",
+        }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({ audited: true, report: expect.any(Object) }),
+      );
+    });
+
+    it("keeps the sweep result even when the audit write fails", async () => {
+      recovery.sweepBrokenProgress.mockResolvedValue(emptyReport);
+      audit.record.mockRejectedValue(new Error("database busy"));
+
+      const result = await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      expect(result.audited).toBe(false);
+      expect(result.report).toBeDefined();
+    });
+
+    it("caps the audit detail so one sweep cannot write an unbounded Json blob", async () => {
+      const repairs = Array.from({ length: 120 }, (_, index) => ({
+        code: "AWAITING_NON_INTERACTION",
+        deviceId: `d${index}`,
+      }));
+      recovery.sweepBrokenProgress.mockResolvedValue({
+        ...emptyReport,
+        repairs,
+      });
+
+      await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      const entry = audit.record.mock.calls[0][1] as {
+        detail: { repairs: unknown[]; repairCount: number };
+      };
+      expect(entry.detail.repairs).toHaveLength(50);
+      expect(entry.detail.repairCount).toBe(120);
+    });
+
+    it("treats a breaker reset as a deliberate audited human action, never an automatic one", async () => {
+      recovery.resetBreaker.mockResolvedValue(undefined);
+
+      const result = await controller.recoveryReset(
+        { reason: "上游已恢复，解除降级" } as never,
+        adminRequest(),
+      );
+
+      expect(recovery.resetBreaker).toHaveBeenCalledTimes(1);
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ username: "alice" }),
+        expect.objectContaining({ action: "recovery_breaker_reset" }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({ ok: true, audited: true }),
+      );
+    });
+
+    it("refuses a breaker reset without a reason", async () => {
+      await expect(
+        controller.recoveryReset({} as never, adminRequest()),
+      ).rejects.toThrow();
+      expect(recovery.resetBreaker).not.toHaveBeenCalled();
     });
   });
 

@@ -735,6 +735,87 @@ body { bundle, reason, confirmText /* = confirmToken */, expectedBundleHash? }
 导入**只落草稿，永不自动发布**。prod 上的最后一步「让内容面对孩子」必须是人手动点发布，
 搬运工具不该有能力悄悄改变线上播放内容。
 
+### 自愈与兜底（recovery）
+
+孩子那一侧的兜底分五层，越往后越「不依赖前一层还活着」：
+
+| 层 | 触发点 | 行为 |
+| --- | --- | --- |
+| L0 | vendor gateway / controller 的任一异常 | 先发一句降级话术再发错误帧，孩子永远听得到一句话 |
+| L1 | 引擎 `startToday` / `handleChildReply` / `checkTimeout` 抛错 | 记引擎失败 → `recoverToNextEpisode` → 返回下一集或最后一道兜底话术 |
+| L2 | LLM 主链路（流式 / 非流式）抛错 | 零 chunk 才补兜底话术；已播半句只优雅收尾，绝不插话 |
+| L3 | 恢复熔断器 | 10 分钟内 5 次兜底失败 → 标记 tripped + 告警，**不自动改任何内容** |
+| L4 | 定时巡检（默认 60s） | 找出「连孩子开口那一刻都走不通」的静默病态并修成可自愈状态 |
+
+```
+GET  /analytics/adventure-admin/recovery              // 只读，只读环境同样可用
+→ { breaker: { enabled, tripped, failureCount, degraded, trippedAt, windowMs,
+               threshold, recentReasons, error },
+    config: { enabled, sweepIntervalMs, staleAwaitMs, staleAwaitAction,
+              breakerWindowMs, breakerThreshold, breakerTrippedTtlSeconds },
+    sweeps: [SweepReport] /* 最近 20 份，新在前 */,
+    engineFailures: [{ deviceId, phase, reason, recovered, at }] /* 最近 50 条 */ }
+
+POST /analytics/adventure-admin/recovery/sweep        // 写操作：只读环境 403
+body { reason }
+→ { report: SweepReport, audited: boolean }
+
+POST /analytics/adventure-admin/recovery/reset        // 写操作：只读环境 403
+body { reason }
+→ { ok: true, audited: boolean }
+```
+
+`SweepReport`：`{ startedAt, finishedAt, durationMs, skipped, reason, scanned:
+{ progresses, dailyRecords, episodes }, repairs: [{ code, deviceId, ... }],
+alerts: [{ code, detail, ... }], errors: [string] }`。
+
+两个 POST 都会写一条审计（`action` = `recovery_sweep` / `recovery_breaker_reset`，
+`entityType` = `recovery`，`businessKey` = `adventure/recovery`，`episodeId` 为空——
+它们不针对某一集）。`reason` 与内容变更共用同一条规则：至少 8 字，否则 400
+`REASON_REQUIRED`。`detail` 里的 `repairs` / `alerts` 各截断到 50 条，同时带
+`repairCount` / `alertCount` 真实总数。审计写入是尽力而为：动作已经生效时不会因为
+审计失败而把结果丢掉，改为回 `audited: false` 并记 error 日志，由前端显式提示「这次没留痕」。
+
+熔断器是**授权回滚**：它只标记与告警，绝不自动改内容、绝不自动切版本。
+`reset` 是人的动作——确认上游已恢复之后手动解除降级。`degraded: true` 表示
+Redis 不可用，此时熔断器**故意不工作**（宁可漏报，也不能因为读不到计数就把
+所有设备判成故障）。
+
+巡检的安全边界（比「修得全」更重要）：**绝不改写内容**，**绝不调用
+`recoverToNextEpisode`**（那会在孩子不在场时烧掉当日额度），只把病态标成
+`exited` / `abandoned` / `failed_over` 这类「下次孩子开口就能自然恢复」的状态。
+kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + 原因）——
+能被 API 绕过的开关不是开关。
+
+八个 detector：
+
+| code | 动作 |
+| --- | --- |
+| `STALE_AWAITING_REPLY` | 默认 **off**（`ADVENTURE_RECOVERY_STALE_AWAIT_ACTION=off/alert/exit`）。主链路上孩子停在互动点时 `waitingSince` 刻意保持 null，可能一停几小时，改判 exited 会让「我选第二个」掉进意图分类变闲聊 |
+| `AWAITING_NON_INTERACTION` | progress → `exited` + 告警 |
+| `VERSION_ROW_MISSING` / `VERSION_PAYLOAD_UNUSABLE` | **仅告警**：引擎已回落 segments 表，改 pin 等于让孩子中途换版本 |
+| `SEGMENT_ORDER_OVERFLOW` | 等待态 → `exited`；在播态仅告警（`playFrom` 的 isDone 会自然收口） |
+| `DAILY_PROGRESS_STATE_CONFLICT` | daily 镜像 progress 终态；completed 时补 `completedAt`，且 `completedDate` 取进度里的完成日期而不是今天 |
+| `RETIRED_STALE_DAILY` | `assignedDate < today` 且该集已 retire → daily 与 progress 双双 `abandoned` |
+| `SEGMENT_TABLE_DRIFT` | 仅告警（比对 `currentVersionId` 快照与 segments 表的 order/kind/text） |
+| `DAILY_WITHOUT_PLAYABLE_PROGRESS` | 仅告警（下次 `startToday` 自愈） |
+
+环境变量（全部可选，留空用代码内默认值）：
+
+```
+#ADVENTURE_RECOVERY_ENABLED=true
+#ADVENTURE_RECOVERY_SWEEP_INTERVAL_MS=60000
+#ADVENTURE_RECOVERY_STALE_AWAIT_MS=120000
+#ADVENTURE_RECOVERY_STALE_AWAIT_ACTION=off
+#ADVENTURE_BREAKER_WINDOW_MS=600000
+#ADVENTURE_BREAKER_THRESHOLD=5
+#ADVENTURE_BREAKER_TRIPPED_TTL_SECONDS=3600
+```
+
+告警走日志固定标记，便于在 ARMS / 日志系统上直接建规则：
+`ADVENTURE_RECOVERY_BREAKER_TRIPPED`（熔断）、`ADVENTURE_RECOVERY_ALERT`（巡检告警，
+按 code 聚合成一行）、`ADVENTURE_ENGINE_FAILURE`（引擎兜底）。
+
 ### 错误码约定
 
 除 HTTP 状态码外，body 里带 `code` 字段供前端做精确文案与跳转：

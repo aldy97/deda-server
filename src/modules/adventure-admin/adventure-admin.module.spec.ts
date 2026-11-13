@@ -4,6 +4,9 @@ import { ConfigModule } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { RedisService } from "@/common/redis/redis.service";
+import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAdminModule } from "./adventure-admin.module";
 import { AdventureAuditService } from "./adventure-audit.service";
@@ -20,10 +23,19 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
  * 本地就被拦住。
  */
 
+/**
+ * RedisService 也在假基建里：AdventureModule 现在被管理台导入，
+ * 而 AdventureCircuitBreaker 依赖 RedisService（真身由 @Global 的 RedisModule 提供，
+ * 这里不加载它，所以必须自己塞一个空壳，否则依赖图不完整、compile 直接失败）。
+ */
 @Global()
 @Module({
-  providers: [{ provide: PrismaService, useValue: {} }, Reflector],
-  exports: [PrismaService, Reflector],
+  providers: [
+    { provide: PrismaService, useValue: {} },
+    { provide: RedisService, useValue: {} },
+    Reflector,
+  ],
+  exports: [PrismaService, RedisService, Reflector],
 })
 class FakeInfrastructureModule {}
 
@@ -41,6 +53,9 @@ describe("AdventureAdminModule", () => {
       AdventureAdminController,
     );
     expect(moduleRef.get(ContentAdminGuard)).toBeInstanceOf(ContentAdminGuard);
+    expect(moduleRef.get(AdventureRecoveryService)).toBeInstanceOf(
+      AdventureRecoveryService,
+    );
     for (const token of [
       AdventureAuditService,
       AdventureContentQueryService,
@@ -65,6 +80,24 @@ describe("AdventureAdminModule", () => {
       .capabilities().profile;
 
     expect(profile).toBe("readonly");
+  });
+
+  /**
+   * 依赖方向是这条测试要钉住的安全事实：管理台可以调引擎的自愈能力，
+   * 引擎永远不知道管理台存在。反过来一旦成立，内容生产线上的任何报错
+   * 都有可能把孩子正在走的播放链路一起拖下水。
+   */
+  it("imports AdventureModule one-way: the console may trigger recovery, the engine may not see the console", () => {
+    const adminImports: unknown[] =
+      Reflect.getMetadata("imports", AdventureAdminModule) ?? [];
+    const engineImports: unknown[] =
+      Reflect.getMetadata("imports", AdventureModule) ?? [];
+    const engineExports: unknown[] =
+      Reflect.getMetadata("exports", AdventureModule) ?? [];
+
+    expect(adminImports).toContain(AdventureModule);
+    expect(engineImports).not.toContain(AdventureAdminModule);
+    expect(engineExports).toContain(AdventureRecoveryService);
   });
 
   it("exports nothing, so the play engine cannot inject the authoring services", () => {

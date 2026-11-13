@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Logger,
   Param,
   Post,
   Query,
@@ -26,7 +27,12 @@ import {
 import {
   AdventureContentService,
   MutationOptions,
+  assertReason,
 } from "./adventure-content.service";
+import {
+  AdventureRecoveryService,
+  SweepReport,
+} from "@/modules/adventure/adventure-recovery.service";
 import {
   AdventureTransferService,
   ExportSelector,
@@ -87,17 +93,46 @@ function trimToNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/** 恢复动作在审计表里的归属：它不针对某一集，所以 businessKey 固定、episodeId 留空。 */
+const RECOVERY_ENTITY_TYPE = "recovery";
+const RECOVERY_BUSINESS_KEY = "adventure/recovery";
+/** detail 是 Json 列，一次大规模巡检不该往里塞几百 KB。 */
+const RECOVERY_AUDIT_DETAIL_LIMIT = 50;
+
+/**
+ * 巡检报告的审计摘要。repairs/alerts 的条数随设备数增长，所以截断存放，
+ * 但同时保留总数——读审计的人要能看出「还有多少没展开」，而不是以为只有这些。
+ */
+function summarizeSweep(report: SweepReport) {
+  return {
+    startedAt: report?.startedAt ?? null,
+    finishedAt: report?.finishedAt ?? null,
+    durationMs: report?.durationMs ?? null,
+    skipped: report?.skipped ?? false,
+    skipReason: report?.reason ?? null,
+    scanned: report?.scanned ?? null,
+    repairCount: report?.repairs?.length ?? 0,
+    alertCount: report?.alerts?.length ?? 0,
+    errorCount: report?.errors?.length ?? 0,
+    repairs: (report?.repairs ?? []).slice(0, RECOVERY_AUDIT_DETAIL_LIMIT),
+    alerts: (report?.alerts ?? []).slice(0, RECOVERY_AUDIT_DETAIL_LIMIT),
+  };
+}
+
 @ApiTags("analytics-adventure-admin")
 @ApiBearerAuth()
 @UseGuards(ContentAdminGuard)
 @Controller("analytics/adventure-admin")
 export class AdventureAdminController {
+  private readonly logger = new Logger(AdventureAdminController.name);
+
   constructor(
     private readonly query: AdventureContentQueryService,
     private readonly content: AdventureContentService,
     private readonly transfer: AdventureTransferService,
     private readonly audit: AdventureAuditService,
     private readonly configService: ConfigService,
+    private readonly recovery: AdventureRecoveryService,
   ) {}
 
   @Get("capabilities")
@@ -411,6 +446,92 @@ export class AdventureAdminController {
         "expectedBundleHash",
       ]) as ImportOptions,
     );
+  }
+
+  /**
+   * 自愈面板（L4）。GET 只读；两个 POST 是**会改数据的运维动作**——巡检会把病态
+   * 进度判成 exited/abandoned，重置熔断器等于解除降级——所以它们不豁免只读闸，
+   * 并且各留一条审计。理由走 assertReason（与内容变更同一条规则、同一个常量），
+   * controller 不复述字数门槛。
+   */
+  @Get("recovery")
+  @ApiOperation({
+    summary:
+      "自愈健康快照：熔断器状态、生效配置、最近巡检报告与引擎失败记录（只读）",
+  })
+  async recoveryHealth() {
+    return this.recovery.getHealthSnapshot();
+  }
+
+  @Post("recovery/sweep")
+  @ApiOperation({
+    summary: "手动触发一次巡检（写操作，只读环境不可用，留审计）",
+  })
+  async recoverySweep(
+    @Body() dto: MutationDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    const actor = this.actor(req);
+    const reason = assertReason(dto?.reason);
+    const report = await this.recovery.sweepBrokenProgress();
+    const audited = await this.recordRecoveryAction(
+      actor,
+      "recovery_sweep",
+      reason,
+      summarizeSweep(report),
+    );
+    return { report, audited };
+  }
+
+  @Post("recovery/reset")
+  @ApiOperation({
+    summary:
+      "重置恢复熔断器、解除降级。授权回滚：只由人决定，系统绝不自动回滚（写操作，留审计）",
+  })
+  async recoveryReset(
+    @Body() dto: MutationDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    const actor = this.actor(req);
+    const reason = assertReason(dto?.reason);
+    await this.recovery.resetBreaker();
+    const audited = await this.recordRecoveryAction(
+      actor,
+      "recovery_breaker_reset",
+      reason,
+      null,
+    );
+    return { ok: true, audited };
+  }
+
+  /**
+   * 恢复动作的审计是尽力而为：巡检/重置此刻已经生效，因为审计写不进去就把结果
+   * 一起丢掉，等于让运维在故障期间看不见自己刚做了什么。失败只进日志 + audited=false，
+   * 由 dashboard 把「这次没留痕」显式摆出来。
+   */
+  private async recordRecoveryAction(
+    actor: AuditActor,
+    action: string,
+    reason: string,
+    detail: unknown,
+  ): Promise<boolean> {
+    try {
+      await this.audit.record(actor, {
+        action,
+        entityType: RECOVERY_ENTITY_TYPE,
+        businessKey: RECOVERY_BUSINESS_KEY,
+        reason,
+        detail,
+      });
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `恢复动作审计写入失败 actor=${actor.username} action=${action}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
   }
 
   /**
