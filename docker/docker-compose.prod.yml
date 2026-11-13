@@ -53,3 +53,20 @@ services:
       - ../nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
+
+  # 设备 MQTT broker（生产）：机芯厂协议 device/up|down/{mac}，强制用户名密码认证。
+  # 宿主机端口 1884：1883 被 staging broker 占用（deda-mqtt-staging），互不影响。
+  # 设备接入地址：mqtt://valleyletters.com:1884（安全组需放行 1884）。
+  # 配置与密码文件在服务器 /opt/deda/mosquitto-prod/ 下，不入库。
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: deda-mqtt-prod
+    restart: always
+    ports:
+      - '1884:1883'
+    volumes:
+      - /opt/deda/mosquitto-prod/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - /opt/deda/mosquitto-prod/passwordfile:/mosquitto/config/passwordfile:ro
+    # 必须显式加入 deda-network：缺省会落到 default 网络，app 将无法解析 mosquitto 主机名
+    networks:
+      - deda-network

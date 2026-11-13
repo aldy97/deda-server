@@ -134,6 +134,14 @@ chmod +x /opt/deda/backup.sh
 
 恢复演练（建议每月一次）：`gunzip -c <备份> | docker exec -i deda-postgres-prod psql -U deda deda`。
 
+生产部署加固（2026-11-13 起生效）：
+
+- **部署前备份**：`deploy-prod.yml` 在部署前自动执行 `backup.sh`（未安装则告警跳过）。
+- **自动回滚**：部署成功才写入 `/opt/deda/env/.last-good-tag`；健康检查失败时 workflow 自动把 `IMAGE_TAG` 指回上一个好版本重新 `up -d`（见 §4 回滚）。首次部署无历史好版本时报错人工介入。
+- **镜像保留策略**：ECS `/opt/deda/prune-images.sh`（cron 每周日 04:07），保留最近 5 个 `prod-*` 与 3 个 `staging-*` 镜像，其余删除——2026-11-13 实测僵尸镜像占 25G/33G 磁盘。
+- **磁盘告警**：云监控磁盘 >75% 告警。
+- **生产 MQTT**：prod compose 含 mosquitto（容器 `deda-mqtt-prod`，宿主机端口 `1884`，配置在 `/opt/deda/mosquitto-prod/`），设备接入 `mqtt://valleyletters.com:1884`。1883 归 staging，互不干扰。
+
 ## 6. 备案后切换清单（已于 2026-11-12 全部完成）
 
 域名 ICP 备案已完成（沪ICP备2026060466号-1，valleyletters.com），执行记录：
