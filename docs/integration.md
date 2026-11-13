@@ -140,6 +140,7 @@
 
 - 延时预算：百度官方口径「第三方模型首句延时 + 约 1.0s」；立项书验收甲方处理段 ≤0.8s，因此上游调用强制 `thinking: disabled` + 流式。
 - 联调脚本：`scripts/simulate-baidu-llm.sh`（冒烟）、`scripts/mock-baidu-dialog.js`（17 轮 edge case + 意图/哄睡/冒险场景，`DEVICE_ID` 触发设备链路）。
+- 冒险内容版本化对机芯厂／小程序**零契约变化**：`vendor:text:out` DTO、`AdventureReply.action` 取值、chunk 上传时序均不变。变化只发生在服务端内部——孩子的进度锁定到具体内容版本，admin 发布新版或 retire 一集都不会改变正在播放那一轮的输出；内容侧故障时服务端自行平移到下一集或落到自由故事链路，孩子始终有回复。新增的 `failed_over` / `abandoned` 是内部进度状态，不出现在任何对外响应与家长报告 prompt 中。
 
 ## 机芯厂 WS 流式协议（vendor namespace）【备选链路 / backup】
 
