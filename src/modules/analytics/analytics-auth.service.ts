@@ -15,6 +15,23 @@ interface AdminAccount {
   salt: string;
   passwordHash: string;
   displayName: string;
+  /**
+   * 额外作用域。缺省只有 analytics（看板）。
+   * 内容创作者需要显式加上 "adventure-content" 才能进冒险内容管理台。
+   */
+  scopes?: string[];
+}
+
+/**
+ * 归一化账号作用域。analytics 永远保留：它是 dashboard 全部路由的基础闸，
+ * 少了它连看板都进不去，任何专项能力（如内容管理台）更无从谈起。
+ * 未声明 scopes 的账号得到 ["analytics"]，与本次改动之前的行为完全一致。
+ */
+export function normalizeScopes(scopes?: string[] | null): string[] {
+  const list = Array.isArray(scopes)
+    ? scopes.filter((scope) => typeof scope === "string" && scope.trim())
+    : [];
+  return [...new Set(["analytics", ...list])];
 }
 
 export interface AdminInfo {
@@ -48,7 +65,10 @@ export class AnalyticsAuthService {
       sub: account.username,
       username: account.username,
       displayName: account.displayName,
+      // scope 是 dashboard 全部路由的基础闸，语义与既有实现完全一致，不动。
+      // scopes 是新增的能力清单，内容管理台守卫只看它。
       scope: "analytics",
+      scopes: normalizeScopes(account.scopes),
     });
 
     return {

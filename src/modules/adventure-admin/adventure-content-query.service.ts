@@ -30,6 +30,10 @@ import {
   toBundleEpisode,
 } from "./adventure-bundle";
 import {
+  ContentAdminProfile,
+  resolveContentAdminProfile,
+} from "./content-admin-profile";
+import {
   DEFAULT_SIMULATION_THRESHOLDS,
   SimulationResult,
   SimulationThresholds,
@@ -65,7 +69,7 @@ export interface ContentAdminProfileCapabilities {
   lintThresholds: LintThresholds;
   simulationThresholds: SimulationThresholds;
   /** authoring / readonly，来自 CONTENT_ADMIN_PROFILE；缺省按 readonly 处理（fail-safe） */
-  profile: string;
+  profile: ContentAdminProfile;
   authoring: boolean;
 }
 
@@ -172,7 +176,7 @@ export interface CheckContentIdentity extends EpisodeIdentity {
 
 @Injectable()
 export class AdventureContentQueryService {
-  private readonly profile: string;
+  private readonly profile: ContentAdminProfile;
   private readonly lintOverrides: Partial<LintThresholds>;
   private readonly simulationOverrides: Partial<SimulationThresholds>;
 
@@ -181,10 +185,7 @@ export class AdventureContentQueryService {
     private readonly configService: ConfigService,
   ) {
     // 缺省 readonly：环境变量漏配时宁可让写操作被拒，也不能让 prod 意外可写
-    this.profile =
-      this.configService.get<string>("CONTENT_ADMIN_PROFILE") === "authoring"
-        ? "authoring"
-        : "readonly";
+    this.profile = resolveContentAdminProfile(this.configService);
     this.lintOverrides = {
       maxInteractionTextChars: this.number(
         "ADVENTURE_LINT_MAX_INTERACTION_CHARS",

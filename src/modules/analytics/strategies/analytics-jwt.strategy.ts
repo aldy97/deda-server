@@ -8,6 +8,12 @@ export interface AnalyticsJwtPayload {
   username: string;
   displayName: string;
   scope: string;
+  /**
+   * 能力清单。scope 是「是不是 dashboard 管理员」，scopes 是「具体能碰哪些专项模块」。
+   * 本次改动之前签发的 token 没有这个字段，validate 会补成 ["analytics"]，
+   * 等价于「重新登录之前拿不到任何专项权限」——向后兼容且偏保守。
+   */
+  scopes?: string[];
 }
 
 /**
@@ -39,6 +45,11 @@ export class AnalyticsJwtStrategy extends PassportStrategy(
       username: payload.username,
       displayName: payload.displayName,
       scope: payload.scope,
+      scopes: Array.isArray(payload.scopes)
+        ? payload.scopes.filter(
+            (scope) => typeof scope === "string" && scope.trim(),
+          )
+        : ["analytics"],
     };
   }
 }

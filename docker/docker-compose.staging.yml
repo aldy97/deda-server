@@ -24,6 +24,9 @@ services:
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
     environment:
       DASHBOARD_DIST_PATH: /opt/deda/dashboard/staging
+      # staging 是内容创作环境，放开写。prod 的 compose 不设这个变量 → 只读（fail-safe），
+      # 内容必须在 staging 改好、验证过，再用管理台的导入功能搬过去。
+      CONTENT_ADMIN_PROFILE: authoring
     deploy:
       resources:
         limits:
