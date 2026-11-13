@@ -1,8 +1,7 @@
 name: Deploy Staging
 
 on:
-  push:
-    branches: [staging]
+  workflow_call:
   workflow_dispatch:
 
 # 同一环境串行部署，避免并发部署互相踩踏
