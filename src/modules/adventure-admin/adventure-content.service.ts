@@ -181,10 +181,9 @@ export class AdventureContentService {
   ): Promise<CreateEpisodeResult> {
     const reason = assertReason(options.reason);
     const report = await this.query.checkContent(null, content, identity);
-    assertNoDraftBlocking(report);
+    assertDraftSavable(identity, content, report);
     const key = businessKey(identity);
     const payload = buildPayload(identity, content);
-    assertNoSegmentLoss(identity, content, report);
     const contentHash = payloadHash(identity, content);
 
     try {
@@ -260,8 +259,7 @@ export class AdventureContentService {
     const identity = episodeIdentity(episode);
     const key = businessKey(identity);
     const report = await this.query.checkContent(episodeId, content);
-    assertNoDraftBlocking(report);
-    assertNoSegmentLoss(identity, content, report);
+    assertDraftSavable(identity, content, report);
     const payload = buildPayload(identity, content);
     const contentHash = payloadHash(identity, content);
 
@@ -917,7 +915,7 @@ export class AdventureContentService {
   }
 }
 
-function assertReason(reason?: string | null): string {
+export function assertReason(reason?: string | null): string {
   const text = (reason ?? "").trim();
   if (text.length < MIN_REASON_CHARS) {
     throw new BadRequestException({
@@ -945,6 +943,19 @@ function assertConfirmText(
       expected: key,
     });
   }
+}
+
+/**
+ * 草稿入库门槛：身份/禁用词类错误直接拒绝，规范化会丢段也直接拒绝。
+ * 导出给搬运服务复用——导入写的也是草稿，必须过同一道门，不能因为是「从别的环境搬来的」就放宽。
+ */
+export function assertDraftSavable(
+  identity: EpisodeIdentity,
+  content: EpisodeContentDraft,
+  report: LintReport,
+): void {
+  assertNoDraftBlocking(report);
+  assertNoSegmentLoss(identity, content, report);
 }
 
 function assertNoDraftBlocking(report: LintReport): void {
