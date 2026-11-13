@@ -159,7 +159,8 @@ describe("ClientApiService", () => {
       mac: MAC,
       appid: "baidu-app-1",
       instanceid: "9223372036854775806",
-      authorization: "baidu-control-auth",
+      authorization_Role: "baidu-role-auth",
+      authorization_TTS: "baidu-tts-auth",
     };
 
     it("rejects with 401 when device has not logged in", async () => {
@@ -176,11 +177,14 @@ describe("ClientApiService", () => {
       expect(record).toMatchObject({
         instanceid: startDto.instanceid,
         appid: startDto.appid,
-        authorization: startDto.authorization,
+        authorization_Role: startDto.authorization_Role,
+        authorization_TTS: startDto.authorization_TTS,
         cloudNode: "cn",
         lang: "zh",
         status: "active",
       });
+      expect(record.roleSignedAt).toBeDefined();
+      expect(record.ttsSignedAt).toBeDefined();
       expect(redis.setValue).toHaveBeenCalledWith(
         key,
         expect.any(String),
@@ -189,13 +193,18 @@ describe("ClientApiService", () => {
       expect(redisStore.get(botCurrentKey(MAC))).toBe(startDto.instanceid);
     });
 
-    it("is idempotent for the same instance and refreshes authorization", async () => {
+    it("is idempotent for the same instance and refreshes both signatures", async () => {
       await service.botStart(startDto);
-      await service.botStart({ ...startDto, authorization: "rotated-auth" });
+      await service.botStart({
+        ...startDto,
+        authorization_Role: "rotated-role-auth",
+        authorization_TTS: "rotated-tts-auth",
+      });
       const record = JSON.parse(
         redisStore.get(botInstanceKey(MAC, startDto.instanceid)) ?? "{}",
       );
-      expect(record.authorization).toBe("rotated-auth");
+      expect(record.authorization_Role).toBe("rotated-role-auth");
+      expect(record.authorization_TTS).toBe("rotated-tts-auth");
       expect(record.status).toBe("active");
     });
 
@@ -215,6 +224,33 @@ describe("ClientApiService", () => {
       await service.botStart({ ...startDto, instanceid: "111" });
       expect(redisStore.get(botCurrentKey(MAC))).toBe("111");
     });
+
+    it("persists v1.2 dual signatures with signedAt timestamps", async () => {
+      await service.botStart(startDto);
+      const key = botInstanceKey(MAC, startDto.instanceid);
+      const record = JSON.parse(redisStore.get(key) ?? "{}");
+      expect(record.authorization_Role).toBe("baidu-role-auth");
+      expect(record.authorization_TTS).toBe("baidu-tts-auth");
+      expect(record.roleSignedAt).toBeDefined();
+      expect(record.ttsSignedAt).toBeDefined();
+    });
+
+    it("does not crash when authorization is undefined (v1.1 compat)", async () => {
+      const v1_1Dto = {
+        mac: MAC,
+        appid: "baidu-app-1",
+        instanceid: "9223372036854775806",
+        authorization: undefined,
+        authorization_Role: "role-only",
+        authorization_TTS: "tts-only",
+      };
+      await service.botStart(v1_1Dto);
+      const key = botInstanceKey(MAC, v1_1Dto.instanceid);
+      const record = JSON.parse(redisStore.get(key) ?? "{}");
+      expect(record.authorization).toBeUndefined();
+      expect(record.authorization_Role).toBe("role-only");
+      expect(record.authorization_TTS).toBe("tts-only");
+    });
   });
 
   describe("botStop", () => {
@@ -222,7 +258,8 @@ describe("ClientApiService", () => {
       mac: MAC,
       appid: "baidu-app-1",
       instanceid: "9223372036854775806",
-      authorization: "baidu-control-auth",
+      authorization_Role: "baidu-role-auth",
+      authorization_TTS: "baidu-tts-auth",
     };
 
     it("rejects with 401 when device has not logged in", async () => {
@@ -238,7 +275,7 @@ describe("ClientApiService", () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it("ends instance and clears authorization", async () => {
+    it("ends instance and clears both signatures", async () => {
       await service.botStart(startDto);
       await service.botStop({ mac: MAC, instanceid: startDto.instanceid });
       const record = JSON.parse(
@@ -246,6 +283,8 @@ describe("ClientApiService", () => {
       );
       expect(record.status).toBe("ended");
       expect(record.authorization).toBeUndefined();
+      expect(record.authorization_Role).toBeUndefined();
+      expect(record.authorization_TTS).toBeUndefined();
       expect(record.endedAt).toBeDefined();
     });
 
