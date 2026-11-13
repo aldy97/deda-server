@@ -478,6 +478,69 @@ describe("AdventureTransferService", () => {
       expect(rejected?.reason).toContain("禁用词");
     });
 
+    /**
+     * 空壳集是导入链路唯一能造成的**持久性**伤害：它自己发布不出去（lint 的 NO_SEGMENTS
+     * 会挡），但一旦落地就成了「目标环境这一集有未发布本地草稿」，之后每一次正常导入都会
+     * 被环境闸拒掉，而且拒绝理由会指向一个根本没人在写的草稿。所以宁可整批失败。
+     */
+    it("rejects an episode that carries no usable segment instead of importing an empty shell", async () => {
+      mockTargetEnvironment();
+
+      const preview = await service.planImport(
+        makeBundle([episodeA(), { ...episodeC(), segments: [] }]),
+      );
+
+      expect(preview.ok).toBe(false);
+      const rejected = preview.plan.items.find(
+        (item) => item.businessKey === "elly/1/3",
+      );
+      expect(rejected?.action).toBe("reject");
+      expect(rejected?.reason).toContain("段");
+      // 同批里内容正常的那一集照常被识别，不会因为兄弟集坏了就变成 reject
+      expect(
+        preview.plan.items.find((item) => item.businessKey === "elly/1/1")
+          ?.action,
+      ).toBe("already_up_to_date");
+    });
+
+    it("rejects an episode whose segments were all dropped while parsing the bundle", async () => {
+      mockTargetEnvironment();
+      const raw = {
+        ...makeBundle([episodeA()]),
+        episodes: [
+          episodeA(),
+          {
+            ...episodeC(),
+            // 两段都非法：一段没有文本，一段 order 不是整数。解析时会被丢弃并给出 warning。
+            segments: [
+              { order: 0, kind: "narration", text: "" },
+              { order: "不是数字", kind: "narration", text: "第三集开场" },
+            ],
+          },
+        ],
+      };
+
+      const preview = await service.planImport(raw);
+
+      expect(preview.parseWarnings.join("")).toContain("已丢弃");
+      expect(preview.ok).toBe(false);
+      expect(
+        preview.plan.items.find((item) => item.businessKey === "elly/1/3")
+          ?.action,
+      ).toBe("reject");
+    });
+
+    it("does not reject an add just because the target environment is still empty", async () => {
+      // 反向护栏：空的是**目标环境**，不是 bundle。首次导入必须照常放行，
+      // 否则一个全新的 prod 永远导不进第一集。
+      mockTargetEnvironment({ episodes: [], publishedVersions: [] });
+
+      const preview = await service.planImport(makeBundle([episodeC()]));
+
+      expect(preview.ok).toBe(true);
+      expect(preview.plan.items[0].action).toBe("add");
+    });
+
     it("hands back a short confirm token that applyImport will demand verbatim", async () => {
       mockTargetEnvironment();
 
@@ -612,6 +675,25 @@ describe("AdventureTransferService", () => {
         .applyImport(raw, actor, {
           confirmText: token,
           reason: "有一集在 prod 被下架了，整批都不该写",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse().code).toBe("IMPORT_PLAN_REJECTED");
+      expect(content.createEpisode).not.toHaveBeenCalled();
+      expect(content.saveDraft).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("writes nothing when the batch contains an empty-shell episode", async () => {
+      mockTargetEnvironment();
+      const raw = makeBundle([episodeC(), { ...episodeA(), segments: [] }]);
+      const { token } = await tokenFor(raw);
+
+      const error = await service
+        .applyImport(raw, actor, {
+          confirmText: token,
+          reason: "有一集在导出时内容全坏了，整批都不该写",
         })
         .catch((e) => e);
 

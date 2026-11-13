@@ -558,11 +558,13 @@ export class AdventureTransferService {
   }
 
   /**
-   * 纯函数计划之外的两道环境闸：
+   * 纯函数计划之外的三道环境闸：
    * - 目标环境有未发布的本地草稿且内容与导入内容不同 → 拒绝，不静默覆盖同事的工作；
+   * - 导入内容一段可用段落都没有 → 拒绝，不在目标环境留空壳集（空壳集发布不出去，
+   *   却会让之后每次正常导入都卡在上一条闸上）；
    * - 导入内容连草稿门槛都过不了（禁用词、身份非法、会丢段）→ 拒绝。
    *
-   * 两者都把 item 转成 reject，从而让整批导入失败（all-or-nothing）。
+   * 三者都把 item 转成 reject，从而让整批导入失败（all-or-nothing）。
    */
   private async applyEnvironmentGuards(
     plan: ImportPlan,
@@ -577,6 +579,20 @@ export class AdventureTransferService {
       }
       const entry = contentByKey.get(item.businessKey);
       if (!entry) {
+        continue;
+      }
+
+      const incomingSegments = Array.isArray(entry.content?.segments)
+        ? entry.content.segments
+        : [];
+      if (incomingSegments.length === 0) {
+        rejects.set(
+          item.businessKey,
+          "导入内容一段可用段落都没有：bundle 里这一集要么本来就是空的，要么所有段落都因为 " +
+            "order / kind / text 非法在解析时被丢弃（见预览的 parseWarnings）。" +
+            "导入不会在目标环境留下空壳集——空壳集发布不出去，却会让之后每一次正常导入都卡在" +
+            "「目标环境有未发布草稿」这道闸上。请先修好 bundle 再重新预览。",
+        );
         continue;
       }
 
