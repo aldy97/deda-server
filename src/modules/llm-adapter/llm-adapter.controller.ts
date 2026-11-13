@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Logger,
   Post,
   Req,
   Res,
@@ -9,6 +10,7 @@ import {
 import { ApiExcludeController } from "@nestjs/swagger";
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { LlmAdapterService } from "./llm-adapter.service";
 import { parseChatCompletionRequest } from "./dto/chat-completion.dto";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
@@ -24,6 +26,8 @@ import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 @Controller()
 @UseFilters(OpenAiExceptionFilter)
 export class LlmAdapterController {
+  private readonly logger = new Logger(LlmAdapterController.name);
+
   constructor(private readonly adapter: LlmAdapterService) {}
 
   @Post("v1/chat/completions")
@@ -49,7 +53,18 @@ export class LlmAdapterController {
     const created = Math.floor(Date.now() / 1000);
 
     if (!request.stream) {
-      const content = await this.adapter.completeReply(request, deviceHint);
+      let content = "";
+      try {
+        content = await this.adapter.completeReply(request, deviceHint);
+      } catch (error) {
+        this.logger.error(
+          `Non-stream completion failed for device=${deviceHint ?? request.user ?? "anonymous"}: ${describeError(error)}`,
+        );
+      }
+      // 空文本对孩子等同于沉默，与抛错同等处置
+      if (!content || !content.trim()) {
+        content = ADVENTURE_DEGRADED_REPLIES.lastResort;
+      }
       res.json({
         id,
         object: "chat.completion",
@@ -84,13 +99,49 @@ export class LlmAdapterController {
       ],
     });
 
-    for await (const text of this.adapter.streamReply(request, deviceHint)) {
+    /**
+     * 「永不沉默」的最后一道闸：对百度侧永远交出成功的流式响应。
+     *
+     * 一旦这里让异常冒出去，OpenAiExceptionFilter 会在响应已开始后试图
+     * res.status(500).json(...)（headers 已发，直接失效），设备端收到的
+     * 就是半截流 + 静音。所以：
+     * - 一个字都还没播 → 补一句 L0 兜底话术；
+     * - 已经播了半句 → 只做优雅收尾，不再插入兜底话术，
+     *   否则孩子会听到「前半句 + 一段无关的安抚」这种自相矛盾的内容；
+     * - 正常结束但零 chunk → 同样补兜底话术，空流对孩子就是沉默。
+     */
+    let spokeContent = false;
+    try {
+      for await (const text of this.adapter.streamReply(request, deviceHint)) {
+        spokeContent = true;
+        writeChunk({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: request.model,
+          choices: [
+            { index: 0, delta: { content: text }, finish_reason: null },
+          ],
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Stream completion failed for device=${deviceHint ?? request.user ?? "anonymous"} spokeContent=${spokeContent}: ${describeError(error)}`,
+      );
+    }
+    if (!spokeContent) {
       writeChunk({
         id,
         object: "chat.completion.chunk",
         created,
         model: request.model,
-        choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+        choices: [
+          {
+            index: 0,
+            delta: { content: ADVENTURE_DEGRADED_REPLIES.lastResort },
+            finish_reason: null,
+          },
+        ],
       });
     }
 
@@ -104,4 +155,8 @@ export class LlmAdapterController {
     res.write("data: [DONE]\n\n");
     res.end();
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
