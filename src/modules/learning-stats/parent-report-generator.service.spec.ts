@@ -119,6 +119,51 @@ describe("ParentReportGeneratorService", () => {
     );
   });
 
+  it.each([
+    ["completed", "completed"],
+    ["in_progress", "in_progress"],
+    ["failed_over", null],
+    ["abandoned", null],
+    ["some_future_internal_status", null],
+  ])(
+    "should only expose reportable adventure statuses to the prompt (%s)",
+    async (status, expected) => {
+      prisma.message.findMany.mockResolvedValue([
+        {
+          role: "user",
+          content: "我想继续冒险",
+          rawPayload: {},
+          spokeAt: new Date("2026-10-30T02:00:00Z"),
+          mode: "adventure_story",
+        },
+      ]);
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue({ status });
+      llm.complete.mockResolvedValue({
+        text: JSON.stringify({
+          expressionObservation: "孩子愿意继续故事。",
+          emotionObservation: "情绪平稳。",
+          thinkingObservation: "能延续故事语境。",
+          suggestion: "明天继续邀请孩子参与选择。",
+        }),
+      });
+
+      await service.generateDeviceReport(
+        "device-1",
+        "2026-10-30",
+        new Date("2026-10-30T17:20:00Z"),
+      );
+
+      const prompt = llm.complete.mock.calls[0][0].messages
+        .map((message: { content: string }) => message.content)
+        .join("\n");
+      expect(prompt).toContain(`"adventureStatus":${JSON.stringify(expected)}`);
+      if (expected === null) {
+        // 内部自愈/收口状态属于实现细节，绝不能进家长报告的 LLM prompt
+        expect(prompt).not.toContain(status);
+      }
+    },
+  );
+
   it("should complete an empty-day report without calling the LLM", async () => {
     await service.generateDeviceReport(
       "device-1",

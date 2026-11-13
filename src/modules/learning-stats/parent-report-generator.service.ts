@@ -21,6 +21,19 @@ const RETRY_DELAYS_MS = [5, 15, 45].map((minutes) => minutes * 60 * 1000);
 const PROMPT_VERSION = "v1";
 const MAX_TRANSCRIPT_CHARS = 24_000;
 
+/**
+ * 家长报告只认「在玩」与「已完成」两种冒险状态。
+ * failed_over（故障自愈收走）与 abandoned（内容 retire 收走）是引擎内部实现细节，
+ * 既对家长无语义，也会诱导模型编造叙述，因此一律归一为 null。
+ */
+const REPORTABLE_ADVENTURE_STATUSES = new Set(["in_progress", "completed"]);
+
+function normalizeAdventureStatus(
+  status: string | null | undefined,
+): string | null {
+  return status && REPORTABLE_ADVENTURE_STATUSES.has(status) ? status : null;
+}
+
 type ReportSummary = {
   expressionObservation: string | null;
   emotionObservation: string | null;
@@ -152,7 +165,7 @@ export class ParentReportGeneratorService
         reportDate,
         messages,
         durationSeconds: learningStat?.durationSeconds ?? 0,
-        adventureStatus: adventureDaily?.status ?? null,
+        adventureStatus: normalizeAdventureStatus(adventureDaily?.status),
         habits: habitPlans.map((plan) => ({
           title: plan.title,
           targetDays: plan.targetDays,
