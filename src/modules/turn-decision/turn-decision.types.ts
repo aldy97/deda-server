@@ -10,13 +10,18 @@ import type {
 export type { SafetySource, SafetyVerdict, ConversationIntent, IntentSource };
 
 /**
- * 落库用的意图来源。会话服务自身的 7 种来源之外，编排层还有三种「本轮没走到意图路由」
+ * 落库用的意图来源。会话服务自身的 9 种来源之外，编排层还有三种「本轮没走到意图路由」
  * 或「路由结果不是模型判的」成因，必须与真实意图区分——否则看板会把「被安全拦截」和
  * 「匿名链路」都算成 free_chat，意图分布就成了假数据。
  * - not_routed：L1/L2 判定拦截，直接播兜底话术，未做意图分类
  * - adventure_takeover：冒险状态机在编排顺序上早于 L2，命中即返回，
  *   本轮既未评估 L2 也未分类意图（已知安全盲区，看板单独暴露）
  * - no_device：请求未带设备标识（匿名链路），无会话状态可依赖，恒定 free_chat
+ *
+ * 注：pre_filter_skip 已随前置关键词过滤移除而停用，保留取值只为让上线前的
+ * 历史行仍能正确分桶；force_sleep / sleep_window_closed 是哄睡时段治理新增，
+ * 其中 sleep_window_closed 本轮**调过**模型（模型判 sleep_story 后被规则降级），
+ * 因此不计入 modelInvokedCount——该字段口径是「模型判定被直接采纳」。
  */
 export type TurnIntentSource =
   IntentSource | "not_routed" | "adventure_takeover" | "no_device";
@@ -39,6 +44,8 @@ export const TURN_INTENT_SOURCES = [
   "continuation",
   "session_sticky",
   "explicit_exit",
+  "force_sleep",
+  "sleep_window_closed",
   "adventure_takeover",
   "not_routed",
   "no_device",
