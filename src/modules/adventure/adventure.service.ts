@@ -8,8 +8,9 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import {
   AdventureDailyRecord,
+  AdventureEpisode,
   AdventureProgress,
-  AdventureSegment,
+  Prisma,
 } from "@prisma/client";
 
 export interface AdventureReply {
@@ -26,11 +27,84 @@ interface InteractionChoice {
   reply: string;
 }
 
+/**
+ * 播放用段落。来源有二：adventure_segments 表（当前发布版本的物化副本），
+ * 或孩子被锁定的 AdventureEpisodeVersion.payload 快照。两者结构一致，
+ * 引擎只认这个最小形状，不依赖行 id 与时间戳。
+ */
+interface PlayableSegment {
+  order: number;
+  kind: string;
+  text: string;
+  interactionType?: string | null;
+  options?: unknown;
+  fallbackText?: string | null;
+  exitText?: string | null;
+  rewardStar?: boolean;
+}
+
+interface EpisodeContent {
+  recap: string | null;
+  segments: PlayableSegment[];
+}
+
 /** 沉默超时：引导词最后一个 chunk ack 后 10s 无上行则兜底续播 */
 const REPLY_TIMEOUT_MS = 10000;
 
 /** 明确拒绝关键词（命中即温柔退出，进度保留当天可续玩） */
 const REFUSAL_KEYWORDS = ["不要听", "不想听", "不想玩", "不玩了", "不要玩了"];
+
+/** 进度终态：选集时永久排除，且任何路径都不得覆盖 */
+const CLOSED_PROGRESS_STATUSES = ["completed", "abandoned"];
+
+/** 已被收走、不再续玩的进度：落到选集重新分配（区别于 exited 的当日可续玩） */
+const REASSIGNABLE_PROGRESS_STATUSES = ["abandoned", "failed_over"];
+
+/** 版本快照缓存上限；payload 不可变，故只做容量淘汰，永不失效 */
+const VERSION_CACHE_LIMIT = 200;
+
+/**
+ * 把版本 payload 解析成可播段落。任何字段缺失或类型不符都降级为安全默认值，
+ * 形状彻底不可用时返回 null，由调用方回落 segments 表。
+ */
+function parseEpisodePayload(payload: unknown): EpisodeContent | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const raw = payload as { recap?: unknown; segments?: unknown };
+  if (!Array.isArray(raw.segments)) {
+    return null;
+  }
+  const segments: PlayableSegment[] = [];
+  for (const item of raw.segments) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const order = Number(row.order);
+    const text = typeof row.text === "string" ? row.text : "";
+    if (!Number.isFinite(order) || !text) {
+      continue;
+    }
+    segments.push({
+      order,
+      kind: typeof row.kind === "string" ? row.kind : "narration",
+      text,
+      interactionType:
+        typeof row.interactionType === "string" ? row.interactionType : null,
+      options: row.options ?? null,
+      fallbackText:
+        typeof row.fallbackText === "string" ? row.fallbackText : null,
+      exitText: typeof row.exitText === "string" ? row.exitText : null,
+      rewardStar: row.rewardStar === true,
+    });
+  }
+  segments.sort((a, b) => a.order - b.order);
+  return {
+    recap: typeof raw.recap === "string" ? raw.recap : null,
+    segments,
+  };
+}
 
 /** 设备角色决定选集与互动接话人设；未知旧数据回落 Elly。 */
 const CHARACTER_PERSONAS: Record<string, string> = {
@@ -48,6 +122,7 @@ const CHARACTER_PERSONAS: Record<string, string> = {
 export class AdventureService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AdventureService.name);
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly versionCache = new Map<string, EpisodeContent>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private timeoutListener:
     | ((
@@ -83,6 +158,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     for (const deviceId of this.timers.keys()) {
       this.clearTimer(deviceId);
     }
+    this.versionCache.clear();
   }
 
   /** vendor 层注册：超时兜底产生回复时的回调（负责 chunk 上传与落库） */
@@ -147,6 +223,181 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * 读取某个版本快照的可播内容。版本行不可变，命中即缓存。
+   * 版本行缺失或 payload 结构损坏时返回 null，由调用方回落 segments 表——
+   * 内容层的任何意外都不允许让孩子那一轮沉默。
+   */
+  private async resolveVersionContent(
+    versionId: string | null | undefined,
+  ): Promise<EpisodeContent | null> {
+    if (!versionId) {
+      return null;
+    }
+    const cached = this.versionCache.get(versionId);
+    if (cached) {
+      return cached;
+    }
+    const row = await this.prisma.adventureEpisodeVersion.findUnique({
+      where: { id: versionId },
+      select: { id: true, episodeId: true, version: true, payload: true },
+    });
+    if (!row) {
+      this.logger.warn(
+        `Adventure version row missing, falling back to segment table: versionId=${versionId}`,
+      );
+      return null;
+    }
+    const content = parseEpisodePayload(row.payload);
+    if (!content) {
+      this.logger.warn(
+        `Adventure version payload unusable, falling back to segment table: versionId=${versionId} episodeId=${row.episodeId} version=${row.version}`,
+      );
+      return null;
+    }
+    if (this.versionCache.size >= VERSION_CACHE_LIMIT) {
+      const oldest = this.versionCache.keys().next().value;
+      if (oldest) {
+        this.versionCache.delete(oldest);
+      }
+    }
+    this.versionCache.set(versionId, content);
+    return content;
+  }
+
+  /**
+   * 该进度应播放的段落。孩子被锁定的版本优先，保证 admin 发布新版本后，
+   * 玩到一半的孩子仍听完自己那一版（段数变少不会被误判完集，交互点不会被换型）。
+   * 无锁定（历史进度）或快照不可用时读 segments 表，与既有行为一致。
+   */
+  private async loadSegmentsForPlay(
+    progress: Pick<AdventureProgress, "episodeId" | "episodeVersionId">,
+  ): Promise<PlayableSegment[]> {
+    const pinned = await this.resolveVersionContent(progress.episodeVersionId);
+    if (pinned) {
+      return pinned.segments;
+    }
+    return this.loadSegments(progress.episodeId);
+  }
+
+  /** 新分配一集的开场前情回顾：优先当前版本 payload，回落 episode 行的物化副本。 */
+  private async resolveRecap(episode: AdventureEpisode): Promise<string[]> {
+    const content = await this.resolveVersionContent(episode.currentVersionId);
+    const recap = content?.recap ?? episode.recap;
+    return recap ? [recap] : [];
+  }
+
+  /**
+   * 选出该设备下一集：跳过已完成与已 retire 的集，也跳过被 abandoned 收走的集。
+   * failed_over 不算完成——内容修好后同一集仍可重新分配。
+   * 未发布的集是内容硬边界：宁可停播，也不跳过它去播后面的集。
+   */
+  private async selectNextEpisode(
+    deviceInternalId: string,
+    excludeEpisodeId?: string,
+  ): Promise<AdventureEpisode | null> {
+    const characterKey = await this.getCharacterKey(deviceInternalId);
+    const [episodes, progresses] = await Promise.all([
+      this.prisma.adventureEpisode.findMany({
+        where: { characterKey, season: 1 },
+        orderBy: { episodeNumber: "asc" },
+      }),
+      this.prisma.adventureProgress.findMany({
+        where: {
+          deviceId: deviceInternalId,
+          episode: { characterKey, season: 1 },
+        },
+        select: { episodeId: true, status: true },
+      }),
+    ]);
+    const closedEpisodeIds = new Set(
+      progresses
+        .filter((progress) =>
+          CLOSED_PROGRESS_STATUSES.includes(progress.status),
+        )
+        .map((progress) => progress.episodeId),
+    );
+    if (excludeEpisodeId) {
+      closedEpisodeIds.add(excludeEpisodeId);
+    }
+    const episode = episodes.find(
+      (item) => !closedEpisodeIds.has(item.id) && !item.retiredAt,
+    );
+    if (!episode || !episode.published) {
+      return null;
+    }
+    return episode;
+  }
+
+  /**
+   * 为目标集准备进度行。不存在则新建；曾以 failed_over / exited 收走的行原地重置，
+   * 避免撞 @@unique([deviceId, episodeId])。终态（completed / abandoned）只告警不覆盖。
+   */
+  private async assignProgress(
+    tx: Prisma.TransactionClient,
+    deviceInternalId: string,
+    episode: AdventureEpisode,
+  ): Promise<AdventureProgress> {
+    const existing = await tx.adventureProgress.findUnique({
+      where: {
+        deviceId_episodeId: {
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+        },
+      },
+    });
+    if (!existing) {
+      return tx.adventureProgress.create({
+        data: {
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+          status: "in_progress",
+          episodeVersionId: episode.currentVersionId,
+        },
+      });
+    }
+    if (CLOSED_PROGRESS_STATUSES.includes(existing.status)) {
+      this.logger.warn(
+        `Refusing to overwrite terminal adventure progress: deviceId=${deviceInternalId} episodeId=${episode.id} status=${existing.status}`,
+      );
+      return existing;
+    }
+    return tx.adventureProgress.update({
+      where: { id: existing.id },
+      data: {
+        status: "in_progress",
+        nextSegmentOrder: 0,
+        stars: 0,
+        offTopicCount: 0,
+        waitingSince: null,
+        completedAt: null,
+        episodeVersionId: episode.currentVersionId,
+      },
+    });
+  }
+
+  /** 跨天陈旧的 daily 行收口为 failed_over，再为今天新开一行（受唯一约束不能复用旧行）。 */
+  private async closeStaleDailyAndOpenToday(
+    tx: Prisma.TransactionClient,
+    deviceInternalId: string,
+    staleDailyId: string,
+    episodeId: string,
+    today: string,
+  ): Promise<AdventureDailyRecord> {
+    await tx.adventureDailyRecord.update({
+      where: { id: staleDailyId },
+      data: { status: "failed_over" },
+    });
+    return tx.adventureDailyRecord.create({
+      data: {
+        deviceId: deviceInternalId,
+        episodeId,
+        assignedDate: today,
+        status: "in_progress",
+      },
+    });
+  }
+
   private async getCharacterKey(deviceInternalId: string): Promise<string> {
     const device = await this.prisma.device.findUnique({
       where: { id: deviceInternalId },
@@ -168,7 +419,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
 
     const current = await this.findCurrentAdventure(deviceInternalId);
-    if (current) {
+    // abandoned（admin retire 收走）与 failed_over（故障自愈收走）都不再续玩，落到选集重新分配。
+    if (
+      current &&
+      !REASSIGNABLE_PROGRESS_STATUSES.includes(current.progress.status)
+    ) {
       const { daily, progress } = current;
       if (progress.status === "exited" && !explicitlyRequested) {
         return null;
@@ -193,32 +448,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
               nextSegmentOrder: Math.max(0, progress.nextSegmentOrder - 1),
             }
           : progress;
-      const segments = await this.loadSegments(progress.episodeId);
+      const segments = await this.loadSegmentsForPlay(progress);
       return this.playFrom(resumeProgress, segments, [], daily);
     }
 
-    const characterKey = await this.getCharacterKey(deviceInternalId);
-    const [episodes, progresses] = await Promise.all([
-      this.prisma.adventureEpisode.findMany({
-        where: { characterKey, season: 1 },
-        orderBy: { episodeNumber: "asc" },
-      }),
-      this.prisma.adventureProgress.findMany({
-        where: {
-          deviceId: deviceInternalId,
-          episode: { characterKey, season: 1 },
-        },
-        select: { episodeId: true, status: true },
-      }),
-    ]);
-    const completedEpisodeIds = new Set(
-      progresses
-        .filter((progress) => progress.status === "completed")
-        .map((progress) => progress.episodeId),
-    );
-    const episode = episodes.find((item) => !completedEpisodeIds.has(item.id));
+    const episode = await this.selectNextEpisode(deviceInternalId);
     // 未发布的下一集是内容边界：停止，不跳过它播后面的集。
-    if (!episode || !episode.published) {
+    if (!episode) {
       return null;
     }
 
@@ -231,13 +467,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           status: "in_progress",
         },
       });
-      const progress = await tx.adventureProgress.create({
-        data: {
-          deviceId: deviceInternalId,
-          episodeId: episode.id,
-          status: "in_progress",
-        },
-      });
+      const progress = await this.assignProgress(tx, deviceInternalId, episode);
       await tx.adventureEvent.create({
         data: {
           eventKey: `daily:${daily.id}:assigned`,
@@ -258,8 +488,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       });
       return { daily, progress };
     });
-    const segments = await this.loadSegments(episode.id);
-    const prefix = episode.recap ? [episode.recap] : [];
+    const segments = await this.loadSegmentsForPlay(progress);
+    const prefix = await this.resolveRecap(episode);
     return this.playFrom(progress, segments, prefix, daily);
   }
 
@@ -269,7 +499,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
    */
   private async playFrom(
     progress: AdventureProgress,
-    segments: AdventureSegment[],
+    segments: PlayableSegment[],
     prefix: string[],
     daily: AdventureDailyRecord,
   ): Promise<AdventureReply> {
@@ -374,12 +604,15 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.scheduleTimeout(deviceInternalId);
   }
 
-  /** 当前等待回答的交互点（已播，order = nextSegmentOrder - 1） */
+  /** 当前等待回答的交互点（已播，order = nextSegmentOrder - 1）；非交互段一律不认。 */
   private currentInteraction(
     progress: AdventureProgress,
-    segments: AdventureSegment[],
+    segments: PlayableSegment[],
   ) {
-    return segments.find((s) => s.order === progress.nextSegmentOrder - 1);
+    return segments.find(
+      (s) =>
+        s.order === progress.nextSegmentOrder - 1 && s.kind === "interaction",
+    );
   }
 
   /**
@@ -397,7 +630,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     const { daily, progress } = current;
     this.clearTimer(deviceInternalId);
 
-    const segments = await this.loadSegments(progress.episodeId);
+    const segments = await this.loadSegmentsForPlay(progress);
     const interaction = this.currentInteraction(progress, segments);
     if (!interaction) {
       return null;
@@ -450,8 +683,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     deviceInternalId: string,
     daily: AdventureDailyRecord,
     progress: AdventureProgress,
-    segments: AdventureSegment[],
-    interaction: AdventureSegment,
+    segments: PlayableSegment[],
+    interaction: PlayableSegment,
     asrText: string,
   ): Promise<AdventureReply> {
     const options = interaction.options as unknown as {
@@ -503,7 +736,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   /** 小模型接话；失败降级为兜底话术，保证绝不卡死 */
   private async generateBridge(
     deviceInternalId: string,
-    interaction: AdventureSegment,
+    interaction: PlayableSegment,
     asrText: string,
     kind: "open_question" | "redirect",
   ): Promise<string> {
@@ -552,12 +785,102 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return null; // 未超时：竞态下以先到的上行为准
     }
 
-    const segments = await this.loadSegments(progress.episodeId);
+    const segments = await this.loadSegmentsForPlay(progress);
     const interaction = this.currentInteraction(progress, segments);
     const fallback = interaction?.fallbackText || "没关系，我们继续吧。";
     this.clearTimer(deviceInternalId);
     const reply = await this.playFrom(progress, segments, [fallback], daily);
     return { ...reply, result: "timeout" };
+  }
+
+  /**
+   * 故障自愈：当日这一集确认无法继续（内容损坏、状态病态、未知异常）时，
+   * 把孩子平移到下一集，绝不让孩子面对沉默。
+   *
+   * 边界：
+   * - 今天已经完成过一集 → 不做任何事（每日额度是硬门禁，兜底不得绕过它）；
+   * - 当前没有在飞的冒险 → 不做任何事；
+   * - 没有可接管的下一集 → 返回 null 由上层落到自由对话，而不是抛错；
+   * - 单轮最多平移一次，不递归（下一集又坏则交给上层兜底话术）。
+   *
+   * 旧集进度标 failed_over 而非 abandoned：内容修好后同一集仍可重新分配给孩子。
+   * 当日 daily 行受 @@unique([deviceId, assignedDate]) 约束，必须复用改指下一集；
+   * 跨天的陈旧 daily 先标 failed_over 收口，再为今天新建一行。
+   */
+  async recoverToNextEpisode(
+    deviceInternalId: string,
+    reason: string,
+  ): Promise<AdventureReply | null> {
+    if (await this.isCompletedToday(deviceInternalId)) {
+      return null;
+    }
+    const current = await this.findCurrentAdventure(deviceInternalId);
+    if (!current) {
+      return null;
+    }
+    const { daily, progress } = current;
+    const fromEpisodeId = progress.episodeId;
+
+    const next = await this.selectNextEpisode(deviceInternalId, fromEpisodeId);
+    if (!next) {
+      this.logger.warn(
+        `Adventure recovery found no next episode: deviceId=${deviceInternalId} reason=${reason} fromEpisodeId=${fromEpisodeId}`,
+      );
+      return null;
+    }
+
+    const today = this.dateKey();
+    const reuseDaily = daily.assignedDate === today;
+    this.clearTimer(deviceInternalId);
+
+    const { daily: targetDaily, progress: nextProgress } =
+      await this.prisma.$transaction(async (tx) => {
+        await tx.adventureProgress.update({
+          where: { id: progress.id },
+          data: { status: "failed_over", waitingSince: null },
+        });
+        const targetDaily = reuseDaily
+          ? await tx.adventureDailyRecord.update({
+              where: { id: daily.id },
+              data: { episodeId: next.id, status: "in_progress" },
+            })
+          : await this.closeStaleDailyAndOpenToday(
+              tx,
+              deviceInternalId,
+              daily.id,
+              next.id,
+              today,
+            );
+        await tx.adventureEvent.create({
+          data: {
+            eventKey: `daily:${targetDaily.id}:reassigned:${next.id}:${Date.now()}`,
+            deviceId: deviceInternalId,
+            episodeId: next.id,
+            dailyRecordId: targetDaily.id,
+            eventType: "reassigned_after_failure",
+            payload: {
+              reason,
+              fromEpisodeId,
+              toEpisodeId: next.id,
+              reusedDaily: reuseDaily,
+              staleDailyId: reuseDaily ? null : daily.id,
+            },
+          },
+        });
+        const nextProgress = await this.assignProgress(
+          tx,
+          deviceInternalId,
+          next,
+        );
+        return { daily: targetDaily, progress: nextProgress };
+      });
+
+    this.logger.warn(
+      `Adventure recovered to next episode: deviceId=${deviceInternalId} reason=${reason} from=${fromEpisodeId} to=${next.id} reusedDaily=${reuseDaily}`,
+    );
+    const segments = await this.loadSegmentsForPlay(nextProgress);
+    const prefix = await this.resolveRecap(next);
+    return this.playFrom(nextProgress, segments, prefix, targetDaily);
   }
 
   /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。 */
@@ -655,10 +978,19 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     });
     const recovered: Array<{ deviceId: string; reply: AdventureReply }> = [];
     for (const record of stale) {
-      const reply = await this.checkTimeout(record.deviceId);
-      if (reply) {
-        recovered.push({ deviceId: record.deviceId, reply });
-        await this.timeoutListener?.(record.deviceId, reply);
+      // 逐设备隔离：一台设备的病态数据不得让其余设备的超时恢复集体饿死。
+      try {
+        const reply = await this.checkTimeout(record.deviceId);
+        if (reply) {
+          recovered.push({ deviceId: record.deviceId, reply });
+          await this.timeoutListener?.(record.deviceId, reply);
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure timeout sweep skipped device ${record.deviceId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
     return recovered;
