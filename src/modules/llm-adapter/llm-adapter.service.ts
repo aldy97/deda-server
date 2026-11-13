@@ -71,6 +71,22 @@ const STORY_INTENTS: ConversationIntent[] = [
 ];
 
 /**
+ * 哄睡实际能提供的内容类型。儿歌 / 催眠曲内容源尚未接入，
+ * storyPrompt 的 sleep_story 分支恒出故事，故此处恒为 story。
+ */
+const SERVED_SLEEP_CONTENT_TYPE = "story";
+
+/**
+ * 「家长配了什么 vs 实际播了什么」的降级证据，落在本轮 assistant 的
+ * Message.rawPayload 里（JSON 列，无需 migration），供运营看板与排查使用。
+ */
+type SleepContentDegradation = {
+  requested: string;
+  served: string;
+  reason: string;
+};
+
+/**
  * LLM 适配服务：承接百度 RTC 的 OpenAI 兼容回调。
  *
  * 编排（对齐 vendor 老链路 handleTextIn，老 WS 链路保持冻结作备份）：
@@ -384,9 +400,14 @@ export class LlmAdapterService {
       intent === "adventure_story" ||
       intent === "free_story";
 
-    // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）
+    // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）。
+    // 读取放在写入之后，拿到的是本轮生效的 contentType。
+    let sleepContentDegraded: SleepContentDegradation | null = null;
     if (device && intent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, asrText);
+      sleepContentDegraded = await this.resolveSleepContentDegradation(
+        device.id,
+      );
     }
 
     // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史。
@@ -617,8 +638,12 @@ export class LlmAdapterService {
           mode,
           conversationModeKey: activeConfig?.conversationModeKey ?? null,
           // 边界标注同老链路：content 保持播报全文纯净，
-          // filler/answer 边界结构化存 rawPayload
-          rawPayload: { filler: fillerText || null, answer: answerText },
+          // filler/answer 边界结构化存 rawPayload；哄睡内容降级证据同处留痕
+          rawPayload: {
+            filler: fillerText || null,
+            answer: answerText,
+            ...(sleepContentDegraded ? { sleepContentDegraded } : {}),
+          },
           spokeAt: new Date(),
         },
       });
@@ -843,6 +868,8 @@ export class LlmAdapterService {
           "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
         break;
       case "sleep_story":
+        // TODO(sleep): 儿歌 / 催眠曲内容源接入后，在此按 SleepConfig.contentType
+        // 分流话术；在此之前恒出故事，差异由 resolveSleepContentDegradation 留痕。
         base =
           "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
         break;
@@ -887,6 +914,39 @@ export class LlmAdapterService {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+    }
+  }
+
+  /**
+   * 哄睡内容降级取证：家长配了 song / mixed，但儿歌与催眠曲内容源尚未接入，
+   * 本轮实际只能出故事。这里不改行为，只把差异显式记录下来——结构化日志给
+   * 排查，rawPayload 给运营看板；否则配置项看起来永远「已生效」，
+   * 没人会发现儿歌其实一次都没播过。
+   *
+   * 读取失败只告警并返回 null：取证不能反过来阻塞孩子的哄睡回复。
+   */
+  private async resolveSleepContentDegradation(
+    deviceInternalId: string,
+  ): Promise<SleepContentDegradation | null> {
+    try {
+      const config = await this.sleepConfigs.getByDeviceId(deviceInternalId);
+      const requested = config?.contentType ?? null;
+      if (!requested || requested === SERVED_SLEEP_CONTENT_TYPE) return null;
+      this.logger.warn(
+        `Sleep content degraded: contentType=${requested} served=${SERVED_SLEEP_CONTENT_TYPE} device=${deviceInternalId} (儿歌/催眠曲内容源未接入)`,
+      );
+      return {
+        requested,
+        served: SERVED_SLEEP_CONTENT_TYPE,
+        reason: "content_source_unavailable",
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Sleep config read failed, skip degradation marking: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
     }
   }
 

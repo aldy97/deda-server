@@ -323,6 +323,124 @@ describe("LlmAdapterModule", () => {
       );
     });
 
+    /**
+     * 儿歌/催眠曲内容源尚未就绪：哄睡一律出故事。
+     * 但「家长配了 song、实际讲了 story」必须留下可查证据，
+     * 否则运营看到的永远是「配置生效了」的假象。
+     */
+    it.each([["song"], ["mixed"]])(
+      "contentType=%s 时记录降级并仍讲故事",
+      async (contentType) => {
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        sleepConfigs.getByDeviceId.mockResolvedValue({ contentType });
+        session.resolveWithSource.mockResolvedValue({
+          intent: "sleep_story",
+          source: "model",
+        });
+        const warnSpy = jest
+          .spyOn(
+            (service as unknown as { logger: { warn: (m: string) => void } })
+              .logger,
+            "warn",
+          )
+          .mockImplementation(() => undefined);
+        llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+        await collect(
+          service.streamReply({
+            ...boundRequest,
+            messages: [{ role: "user", content: "我要听睡前儿歌" }],
+          }),
+        );
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`contentType=${contentType}`),
+        );
+        const assistantCall = prisma.message.create.mock.calls[1][0];
+        expect(assistantCall.data.rawPayload).toMatchObject({
+          sleepContentDegraded: {
+            requested: contentType,
+            served: "story",
+          },
+        });
+        // 降级不改行为：仍按哄睡故事 prompt 出内容
+        expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
+          "我要听睡前儿歌",
+          expect.any(Array),
+          expect.objectContaining({
+            promptTemplate: expect.stringContaining("哄睡"),
+          }),
+        );
+        warnSpy.mockRestore();
+      },
+    );
+
+    it("contentType=story 时不写降级标记", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      sleepConfigs.getByDeviceId.mockResolvedValue({ contentType: "story" });
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundRequest));
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).not.toHaveProperty(
+        "sleepContentDegraded",
+      );
+    });
+
+    it("读取哄睡配置失败时只告警，不阻塞本轮回复", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      sleepConfigs.getByDeviceId.mockRejectedValue(new Error("db down"));
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      const warnSpy = jest
+        .spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        )
+        .mockImplementation(() => undefined);
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      const chunks = await collect(service.streamReply(boundRequest));
+
+      expect(chunks.join("")).toContain("晚安故事来了");
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.status).toBe("completed");
+      expect(assistantCall.data.rawPayload).not.toHaveProperty(
+        "sleepContentDegraded",
+      );
+      warnSpy.mockRestore();
+    });
+
+    // 哄睡时段门禁在 ConversationSessionService 内完成降级，编排层只需
+    // 尊重结果：白天说困了 → free_chat，不得再写哄睡语音偏好。
+    it("时段门禁降级为 free_chat 时不触发哄睡语音配置写入", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "sleep_window_closed",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["有点困啦？"])());
+
+      await collect(
+        service.streamReply({
+          ...boundRequest,
+          messages: [{ role: "user", content: "我困了" }],
+        }),
+      );
+
+      expect(sleepConfigs.applyVoiceUpdate).not.toHaveBeenCalled();
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.mode).toBe("free_chat");
+    });
+
     it("routes free_story to free_chat mode with a no-adventure-promise prompt", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolveWithSource.mockResolvedValue({
@@ -2072,6 +2190,38 @@ describe("LlmAdapterModule", () => {
         intentSource: "fallback_invalid_label",
       });
       expect(llm.completeStream).not.toHaveBeenCalled();
+    });
+
+    it("强制哄睡覆写：intentSource 记 force_sleep，可与模型判定分桶", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "force_sleep",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("今天幼儿园玩了滑梯")));
+
+      expect(recorded()).toMatchObject({
+        intent: "sleep_story",
+        intentSource: "force_sleep",
+      });
+    });
+
+    it("哄睡时段门禁：intentSource 记 sleep_window_closed，intent 记降级后的 free_chat", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "sleep_window_closed",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["有点困啦？"])());
+
+      await collect(service.streamReply(boundReq("我困了")));
+
+      expect(recorded()).toMatchObject({
+        intent: "free_chat",
+        intentSource: "sleep_window_closed",
+      });
     });
 
     it("意图路由后进入冒险：本轮 L2 已评估，判定照落", async () => {
