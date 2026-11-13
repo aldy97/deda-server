@@ -40,6 +40,18 @@ jobs:
             "mkdir -p /opt/deda /opt/deda/dashboard/prod"
           scp -r docker nginx "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}:/opt/deda/"
 
+      # 部署前备份 prod 数据库；backup.sh 未安装时告警但不阻断（首次上线前必须已安装）
+      - name: Pre-deploy backup
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<'EOF'
+          set -e
+          if [ -x /opt/deda/backup.sh ]; then
+            /opt/deda/backup.sh
+          else
+            echo "::warning::/opt/deda/backup.sh 不存在，跳过部署前备份"
+          fi
+          EOF
+
       - name: Deploy on ECS
         run: |
           ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<EOF
@@ -49,9 +61,35 @@ jobs:
           export IMAGE_TAG="prod-${{ github.sha }}"
           docker compose -p deda-prod --env-file env/.env.prod \
             -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+          echo "prod-${{ github.sha }}" > /opt/deda/env/.current-tag
           EOF
 
       - name: Health check (loopback on ECS)
         run: |
           ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
             "curl -fsS --retry 8 --retry-delay 5 --retry-all-errors http://127.0.0.1:3000/api/docs > /dev/null"
+
+      # 健康检查通过才把这个 tag 记为「上一个好版本」，供下次失败时回滚
+      - name: Record last-good tag
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+            "cp /opt/deda/env/.current-tag /opt/deda/env/.last-good-tag"
+
+      # 健康检查失败 → 自动回滚到上一个好版本；无历史好版本（首次部署）时报错人工介入
+      - name: Auto rollback on failure
+        if: failure()
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<'EOF'
+          set -e
+          cd /opt/deda
+          PREV=$(cat /opt/deda/env/.last-good-tag 2>/dev/null || true)
+          if [ -n "$PREV" ] && docker image inspect "deda-server:$PREV" >/dev/null 2>&1; then
+            export IMAGE_TAG="$PREV"
+            docker compose -p deda-prod --env-file env/.env.prod \
+              -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+            echo "::error::部署健康检查失败，已自动回滚到 $PREV，请人工排查"
+          else
+            echo "::error::部署健康检查失败，且无历史好版本可回滚，需人工介入"
+            exit 1
+          fi
+          EOF
