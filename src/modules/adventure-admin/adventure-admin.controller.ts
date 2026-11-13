@@ -9,6 +9,7 @@ import {
   Query,
   Req,
   UnauthorizedException,
+  UseFilters,
   UseGuards,
 } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
@@ -40,6 +41,7 @@ import {
 } from "./adventure-transfer.service";
 import { ADVENTURE_SEASON, EpisodeIdentity } from "./adventure-content.types";
 import { resolveContentAdminProfile } from "./content-admin-profile";
+import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   ContentAdminGuard,
   ContentReadOnly,
@@ -122,6 +124,7 @@ function summarizeSweep(report: SweepReport) {
 @ApiTags("analytics-adventure-admin")
 @ApiBearerAuth()
 @UseGuards(ContentAdminGuard)
+@UseFilters(ContentAdminExceptionFilter)
 @Controller("analytics/adventure-admin")
 export class AdventureAdminController {
   private readonly logger = new Logger(AdventureAdminController.name);

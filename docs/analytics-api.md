@@ -639,7 +639,7 @@ POST /analytics/adventure-admin/episodes/:episodeId/draft
 body { content, reason, baseVersionId?, force? }
 → { episodeId, versionId, version, businessKey, contentHash, lint, created }
    // 乐观锁：baseVersionId 与库里草稿 id 不符 → 409 DRAFT_CONFLICT，
-   //   body 带 currentDraft{id, version, updatedBy, updatedAt}，前端提示「谁在你之前改过」。
+   //   data 带 currentDraft{id, version, updatedBy, updatedAt}，前端提示「谁在你之前改过」。
    //   force=true 才覆盖（UI 上是单独的红色按钮）。不带 baseVersionId = 明确不参与并发保护。
 
 POST /analytics/adventure-admin/episodes/:episodeId/publish
@@ -697,7 +697,7 @@ body { episodeIds?, characterKey?, includeRetired? }
 → { bundle, bundleHash, confirmToken, episodeCount, skipped: [{ businessKey, reason }] }
    // 只导**当前已发布快照**（currentVersionId 指向且 status=published）；草稿不进 bundle。
    // bundle.episodes[] 是扁平形状：{characterKey, season, episodeNumber, title, recap, segments}。
-   // 什么都没导到 → 400 NOTHING_TO_EXPORT，body 带 skipped 说明每一集为什么被跳过。
+   // 什么都没导到 → 400 NOTHING_TO_EXPORT，data 带 skipped 说明每一集为什么被跳过。
    // bundleHash 只由 bundleSchemaVersion + episodes 决定，不含 exportedAt / sourceProfile，
    //   所以同一份内容在两个环境算出的 hash 一致。
 
@@ -818,15 +818,30 @@ kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + �
 
 ### 错误码约定
 
-除 HTTP 状态码外，body 里带 `code` 字段供前端做精确文案与跳转：
+线上形状（信封本身与全站一致，`code` 永远是 HTTP 状态码）：
 
-| code | 状态 | 含义 |
+```
+{ "code": 409,
+  "message": "草稿已被别人改过，请刷新后再试",   // 给人看的中文
+  "data": { "code": "DRAFT_CONFLICT",           // 给代码看的领域码
+            "currentDraft": { ... } } }          // 附带字段，随领域码而定
+```
+
+领域码在 **`data.code`**，不是 `code`。这一点由管理台专属的
+`ContentAdminExceptionFilter` 保证：领域层抛的是
+`new BadRequestException({ message, code, ...附带字段 })`，而全局
+`HttpExceptionFilter` 只取 `message`，会把领域码与附带字段一起吃掉。
+过滤器只挂在 `AdventureAdminController` 上，全站其余路由的响应体逐字不变；
+没有附带字段时 `data` 仍是 `null`，不会多出空壳对象。
+前端**按 `data.code` 分支，不要匹配中文 message**（文案会改，码不会）。
+
+| `data.code` | 状态 | 含义与 `data` 里的附带字段 |
 | --- | --- | --- |
 | `REASON_REQUIRED` / `REASON_TOO_LONG` | 400 | 理由字数不合规（至少 8 字，至多 300 字） |
-| `CONFIRM_TEXT_MISMATCH` | 400 | 确认文本与业务键不符，body 带 `expected` |
-| `CONTENT_REJECTED` | 400 | 身份 / 禁用词 / 业务键已被占用等 lint 阻断项，body 带完整 `lint` |
-| `SEGMENT_WOULD_BE_DROPPED` | 400 | 规范化会吃掉段落（缺文本 / 段号非法 / 类型非法） |
-| `PUBLISH_BLOCKED` | 400 | 还有 lint error 未清，body 带 `lint` |
+| `CONFIRM_TEXT_MISMATCH` | 400 | 确认文本与业务键不符，带 `expected` |
+| `CONTENT_REJECTED` | 400 | 身份 / 禁用词 / 业务键已被占用等 lint 阻断项，带完整 `lint` |
+| `SEGMENT_WOULD_BE_DROPPED` | 400 | 规范化会吃掉段落（缺文本 / 段号非法 / 类型非法），带 `lint` |
+| `PUBLISH_BLOCKED` | 400 | 还有 lint error 未清，带 `lint` |
 | `NO_DRAFT` | 400 | 没有待发布 / 待丢弃的草稿 |
 | `EPISODE_RETIRED` | 400 | 已 retire 的集不能直接发布，先 restore |
 | `DRAFT_IS_ONLY_CONTENT` | 400 | 草稿是这一集唯一的内容，不能丢弃 |
@@ -835,17 +850,18 @@ kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + �
 | `NOT_PUBLISHED` | 400 | 从未发布的集不能 retire |
 | `NOT_RETIRED` | 400 | 没 retire 的集不能 restore |
 | `EPISODE_WAS_PUBLISHED` | 400 | 发布过的集不能 discard，请走 retire |
-| `NOTHING_TO_EXPORT` | 400 | 没有可导出的已发布快照，body 带 `skipped` |
+| `NOTHING_TO_EXPORT` | 400 | 没有可导出的已发布快照，带 `skipped` |
 | `BUNDLE_REQUIRED` / `BUNDLE_INVALID` | 400 | 没传 bundle / bundle 解析失败（带 `errors`） |
 | `IMPORT_PLAN_REJECTED` | 400 | 导入计划里有 reject，整批不写 |
 | `BUSINESS_KEY_TAKEN` | 409 | 并发抢同一集号、绕过 lint 撞上数据库唯一约束 |
-| `DRAFT_CONFLICT` | 409 | 乐观锁失败，body 带 `currentDraft` |
-| `BUNDLE_HASH_MISMATCH` | 409 | 提交的 bundle 与预览时不是同一份 |
+| `DRAFT_CONFLICT` | 409 | 乐观锁失败，带 `currentDraft`（可直接拿去刷新编辑器） |
+| `BUNDLE_HASH_MISMATCH` | 409 | 提交的 bundle 与预览时不是同一份，带 `previewedHash` 与 `actualHash` |
 | `ALREADY_RETIRED` | 409 | 已经 retire 过了，不需要重复下架 |
-| （无 `code`） | 404 | `episodeId` / `versionId` 不存在，或该版本不属于这一集 |
+| （`data` 为 `null`） | 404 | `episodeId` / `versionId` 不存在，或该版本不属于这一集 |
 
-404 目前只给中文 message、不给 code（沿用 `NotFoundException` 的默认形状）；
-前端按状态码判断即可。
+404 只给中文 message、不给领域码（`NotFoundException` 用的是字符串载荷）；
+前端按状态码判断即可。参数校验失败（ValidationPipe）的 `message` 是字符串数组、
+`data` 为 `null`，沿用全站形状。
 
 ## 二期（进行中）
 

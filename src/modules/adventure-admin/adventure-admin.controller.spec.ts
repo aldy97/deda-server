@@ -8,6 +8,7 @@ import { AdventureContentQueryService } from "./adventure-content-query.service"
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
+import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
   ContentAdminGuard,
@@ -306,6 +307,19 @@ describe("AdventureAdminController", () => {
       expect(
         Reflect.getMetadata("__guards__", AdventureAdminController),
       ).toContain(ContentAdminGuard);
+    });
+
+    /**
+     * 少了这个过滤器，领域码（DRAFT_CONFLICT 等）与附带字段（currentDraft、
+     * expectedBundleHash）会在出网时被全局过滤器吃掉，前端只能去匹配中文
+     * message 字符串。它不会让 tsc / lint 变红，所以必须由测试钉住。
+     */
+    it("carries ContentAdminExceptionFilter so domain error codes survive to the client", () => {
+      const filters =
+        Reflect.getMetadata("__exceptionFilters__", AdventureAdminController) ??
+        [];
+
+      expect(filters).toContain(ContentAdminExceptionFilter);
     });
 
     it("exposes exactly the reviewed routes, with the reviewed read-only exemptions", () => {
