@@ -189,8 +189,20 @@ export class AdventureCircuitBreaker {
    * 刻意不吞异常：这是人工操作，Redis 真挂了就该让操作者看到失败，
    * 而不是收到一个「已清除」的假成功。
    */
+  /**
+   * 管理员显式解除降级。窗口必须用 zset 原生操作清一遍：
+   * RedisService 在**内存模式**（未配 REDIS_URL）下 deleteValue 只清字符串键，
+   * 碰不到 memorySortedSets，而真实 Redis 的 DEL 是跨类型的。只调 deleteValue
+   * 的话，MVP 模式下熔断标记没了、失败计数还在，人刚授权解除、下一次失败就
+   * 立刻重新熔断，等于把「授权回滚」变成一个按不动的按钮。
+   */
   async reset(): Promise<void> {
     await this.redis.deleteValue(ADVENTURE_BREAKER_KEYS.tripped);
+    await this.redis.zRemRangeByScore(
+      ADVENTURE_BREAKER_KEYS.window,
+      Number.MIN_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+    );
     await this.redis.deleteValue(ADVENTURE_BREAKER_KEYS.window);
     this.logger.log("Adventure circuit breaker reset by admin");
   }

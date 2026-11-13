@@ -26,13 +26,13 @@ function createFakeRedis() {
         strings.set(key, value);
         if (ttl) ttls.set(key, ttl);
       }),
-      // 与真实 RedisService 的 DEL 语义一致：不区分类型，string 与 zset 都删。
-      // 「两个 key 都删到了吗」由下面的 toHaveBeenCalledWith 断言负责，
-      // 不靠这个替身的类型差异来隐式检验。
+      // 如实复刻真实 RedisService 的**内存模式**：deleteValue 只清 memoryCache
+      // （字符串键），不清 memorySortedSets；只有配了 REDIS_URL 时 DEL 才跨类型。
+      // 这个差异必须由替身反映出来，否则「reset 清干净了」就是替身在替实现撒谎
+      // ——单测全绿、真库上窗口却还在，重置之后下一次失败立刻重新熔断。
       deleteValue: jest.fn(async (key: string) => {
         strings.delete(key);
         ttls.delete(key);
-        zsets.delete(key);
       }),
       zAdd: jest.fn(async (key: string, score: number, member: string) => {
         const set = zsets.get(key) ?? new Map<string, number>();
@@ -284,6 +284,8 @@ describe("AdventureCircuitBreaker", () => {
         ADVENTURE_BREAKER_KEYS.window,
       );
       expect(fake.strings.has(ADVENTURE_BREAKER_KEYS.tripped)).toBe(false);
+      // 窗口必须用 zset 原生操作清：内存模式下 deleteValue 碰不到 memorySortedSets
+      expect(fake.zsets.get(ADVENTURE_BREAKER_KEYS.window)?.size ?? 0).toBe(0);
       const after = await breaker.getState();
       expect(after.tripped).toBe(false);
       expect(after.failureCount).toBe(0);
