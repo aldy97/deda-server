@@ -165,7 +165,13 @@ describe("VendorService", () => {
           provide: SleepConfigsService,
           useValue: {
             applyVoiceUpdate: jest.fn(),
-            getByDeviceId: jest.fn().mockResolvedValue(null),
+            // sleepTime="00:00" 让哄睡时段全天开放：本文件的用例都在验证
+            // 老链路的话术与落库行为，不该被时段门禁左右。且本文件不用
+            // fake timers（跑真实系统时间），若留 null 会回落到默认 21:30，
+            // 哄睡用例就变成「北京时间 21:30 后才绿」的时间依赖假测试。
+            getByDeviceId: jest
+              .fn()
+              .mockResolvedValue({ contentType: "story", sleepTime: "00:00" }),
           },
         },
         {
@@ -837,8 +843,12 @@ describe("VendorService", () => {
       );
     });
 
-    it("should route ordinary chat directly to free-chat without classification or session writes", async () => {
+    // 契约变更：前置关键词过滤（isRoutingCandidate）已移除，普通闲聊也要过
+    // 分类器做语义判定——否则「我困了」这类不含词表字的表达永远进不了哄睡。
+    // free_chat 仍然不写会话，这一点没变。
+    it("should route ordinary chat to free-chat via the classifier without session writes", async () => {
       setupStreamingBase();
+      llmService.complete.mockResolvedValue({ text: "free_chat" } as any);
       mockAnswerStream("今天很适合出门走走。");
 
       await service.handleTextIn({
@@ -846,12 +856,11 @@ describe("VendorService", () => {
         asrText: "今天天气怎么样",
       });
 
-      // 普通闲聊不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
       const intentClassifyCalls = llmService.complete.mock.calls.filter(
         ([options]: any[]) =>
           options.messages[0].content.includes("对话意图分类器"),
       );
-      expect(intentClassifyCalls).toHaveLength(0);
+      expect(intentClassifyCalls).toHaveLength(1);
       expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         expect.any(String),
@@ -860,6 +869,8 @@ describe("VendorService", () => {
       );
     });
 
+    // 契约变更：活跃会话内的普通接话现在也会调分类器，但只有模型判为
+    // free_chat 时才维持原模式（session_sticky），因此英语故事不会被打断。
     it("should keep an active English session for ordinary answers without entering adventure", async () => {
       setupStreamingBase();
       prisma.conversationSession.findUnique.mockResolvedValue({
@@ -868,6 +879,7 @@ describe("VendorService", () => {
         currentMode: "english_story",
         expiresAt: new Date(Date.now() + 10 * 60_000),
       });
+      llmService.complete.mockResolvedValue({ text: "free_chat" } as any);
       mockAnswerStream("Yes, the cat is in the garden.");
 
       await service.handleTextIn({
@@ -875,12 +887,11 @@ describe("VendorService", () => {
         asrText: "I see a cat.",
       });
 
-      // 会话续期路径不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
       const intentClassifyCalls = llmService.complete.mock.calls.filter(
         ([options]: any[]) =>
           options.messages[0].content.includes("对话意图分类器"),
       );
-      expect(intentClassifyCalls).toHaveLength(0);
+      expect(intentClassifyCalls).toHaveLength(1);
       expect(adventureService.startToday).not.toHaveBeenCalled();
       expect(childMemoriesService.buildPromptBlock).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
@@ -967,6 +978,7 @@ describe("VendorService", () => {
         setupStreamingBase();
         sleepConfigsService.getByDeviceId.mockResolvedValue({
           contentType: "song",
+          sleepTime: "00:00",
         });
         llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
         mockAnswerStream("月亮轻轻闭上了眼睛。");

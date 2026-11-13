@@ -211,17 +211,27 @@ describe("Child memories conversation pipeline (e2e)", () => {
   });
 
   it("should preserve red history, activate blue v2, and recall only blue", async () => {
-    // 调用顺序（每轮）：L2 安全分类先消费一次 complete（返回 safe 放行），
-    // 随后记忆提取器消费下一次 complete。
-    mockLlmService.complete
-      .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({
-        text: extraction("red", "assert", "我最喜欢红色"),
-      })
-      .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({
-        text: extraction("blue", "supersede", "我现在最喜欢蓝色"),
-      });
+    // 按 scene 分派而非按调用顺序排队：一轮里 L2 安全分类与意图分类是
+    // Promise.all 并行发起的，谁先消费 mock 队列并不确定；且意图分类在
+    // 移除前置关键词过滤后每轮都会调用，位置式队列必然错位。
+    const extractionResponses = [
+      extraction("red", "assert", "我最喜欢红色"),
+      extraction("blue", "supersede", "我现在最喜欢蓝色"),
+    ];
+    mockLlmService.complete.mockImplementation(
+      (options: { scene?: string }) => {
+        if (options.scene === "safety_l2") {
+          return Promise.resolve({ text: "safe" });
+        }
+        if (options.scene === "intent_classify") {
+          return Promise.resolve({ text: "free_chat" });
+        }
+        if (options.scene === "memory_extract") {
+          return Promise.resolve({ text: extractionResponses.shift() ?? "[]" });
+        }
+        return Promise.resolve({ text: "[]" });
+      },
+    );
 
     await vendorService.handleTextIn({
       deviceId: "device-external",
@@ -233,6 +243,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
       asrText: "我现在最喜欢蓝色",
     });
     await waitFor(() => memories.length === 2);
+
+    // 两条记忆抽取响应都被按 scene 正确消费，没有被其他场景误吞
+    expect(extractionResponses).toHaveLength(0);
 
     const red = memories.find((memory) => memory.version === 1);
     const blue = memories.find((memory) => memory.version === 2);
