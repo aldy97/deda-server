@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ChildMemoriesService } from "./child-memories.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 type PrismaMock = {
   $transaction: jest.Mock;
@@ -73,6 +74,7 @@ describe("ChildMemoriesService", () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         ChildMemoriesService,
         {
           provide: PrismaService,

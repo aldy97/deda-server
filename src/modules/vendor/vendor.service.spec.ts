@@ -15,6 +15,7 @@ import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -81,6 +82,7 @@ describe("VendorService", () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         VendorService,
         ConversationSessionService,
         {

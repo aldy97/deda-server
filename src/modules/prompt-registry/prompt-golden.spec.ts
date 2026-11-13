@@ -19,6 +19,9 @@ import { PromptRegistryService } from "./prompt-registry.service";
  * 冻结的 46 组运行时真实输出。本文件断言重构后的代码在同样入参下产出
  * **逐字节相同**的结果——任何 prompt 文本、拼接顺序、空行、标点的意外变动都会在这里红。
  *
+ * 例外：intent_classify_system 一条在 rebase 到 origin/staging 时按上游最新正文
+ * 重新冻结（上游在本重构之外单独改过该 prompt），来源提交见 meta.intentClassifySystemRefrozenAt。
+ *
  * 全部服务通过 Nest testing module 构造，并把 PromptRegistryService 一并注入：
  * 重构前它是多余的 provider（被忽略），重构后它被真正注入。
  * 因此本文件在重构前后都无需修改断言。
@@ -35,7 +38,13 @@ interface GoldenMessages {
 type GoldenCase = GoldenMessages[] | string | number;
 
 interface GoldenFile {
-  meta: { sourceCommit: string };
+  meta: {
+    /** 冻结这批基线时的提交 */
+    sourceCommit: string;
+    /** rebase 时按上游最新正文重新冻结过 intent_classify_system 一条，此为其来源提交 */
+    intentClassifySystemRefrozenAt?: string;
+    note?: string;
+  };
   cases: Record<string, GoldenCase>;
 }
 

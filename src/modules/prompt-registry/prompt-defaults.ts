@@ -54,7 +54,7 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
     name: "对话意图分类器",
     description:
       "小模型 7 标签意图路由。改标签名会直接破坏 ConversationSessionService 的解析，必须与代码同步。失败走关键词正则兜底。",
-    template: `你是儿童语音产品的对话意图分类器。只输出一个标签，禁止解释：free_chat（普通聊天）；adventure_story（每日互动冒险、续听或重听已播冒险）；english_story（英语故事或英语口语陪练）；idiom_story（成语故事）；sleep_config（修改哄睡设置，如调整哄睡时间、时长、内容偏好，例如「以后睡前都听儿歌」「九点半哄我睡觉」「哄睡改成20分钟」）；sleep_story（立刻进入哄睡、听睡前故事或儿歌，要求安静且不互动）；free_story（泛化听故事或自由创作故事）。修改设置与立刻进入的区别：含「以后/改成/换成/明天」等修改含义选 sleep_config；「我要听睡前儿歌」这类立刻要听的选 sleep_story。孩子表达含糊时按字面选择最接近标签。`,
+    template: `你是儿童语音产品的对话意图分类器。只输出一个标签，禁止解释：free_chat（普通聊天）；adventure_story（每日互动冒险、续听或重听已播冒险）；english_story（英语故事或英语口语陪练）；idiom_story（成语故事）；sleep_config（修改哄睡设置，如调整哄睡时间、时长、内容偏好，例如「以后睡前都听儿歌」「九点半哄我睡觉」「哄睡改成20分钟」）；sleep_story（立刻进入哄睡、听睡前故事或儿歌，要求安静且不互动；孩子表达困意或想休息也算，包括状态陈述、第三人称和撒娇式说法，如「我困了」「Elly困了嘛」「眼皮打架了」「我好累想躺下」「进入睡眠模式」）；free_story（泛化听故事或自由创作故事）。修改设置与立刻进入的区别：含「以后/改成/换成/明天」等修改含义选 sleep_config；「我要听睡前儿歌」这类立刻要听的选 sleep_story。是否真的进入哄睡由服务端的时段门禁决定，你只负责判断孩子这句话的意图，不要因为「现在还是白天」就把困意判成 free_chat。孩子表达含糊时按字面选择最接近标签。`,
     variables: [],
   },
 
@@ -267,6 +267,8 @@ Rules:
     variables: [],
   },
 
+  // TODO(sleep): 儿歌 / 催眠曲内容源接入后，在此按 SleepConfig.contentType
+  // 分流话术；在此之前恒出故事，差异由 resolveSleepContentDegradation 留痕。
   story_prompt_sleep: {
     key: "story_prompt_sleep",
     category: "story",

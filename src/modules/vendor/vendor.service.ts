@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
@@ -47,6 +48,7 @@ export class VendorService {
     private readonly childSafetyService: ChildSafetyService,
     private readonly sleepConfigsService: SleepConfigsService,
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
@@ -198,20 +200,9 @@ export class VendorService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
+  /** 故事意图话术：与 llm-adapter.service.ts 共用注册表实现，不再各存一份副本 */
   private storyPrompt(intent: ConversationIntent): string | undefined {
-    switch (intent) {
-      case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
-      case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
-      case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
-      case "adventure_story":
-      case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
-      default:
-        return undefined;
-    }
+    return this.promptRegistry.getStoryPrompt(intent);
   }
 
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {

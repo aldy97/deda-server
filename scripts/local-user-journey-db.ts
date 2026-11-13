@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../src/common/prisma/prisma.service";
 import { LlmService } from "../src/modules/llm/llm.service";
+import { PromptRegistryService } from "../src/modules/prompt-registry/prompt-registry.service";
 import { ParentReportGeneratorService } from "../src/modules/learning-stats/parent-report-generator.service";
 
 const prisma = new PrismaClient();
@@ -598,9 +599,13 @@ async function generateReport(reportDate: string) {
   const prismaService = new PrismaService();
   await prismaService.$connect();
   try {
+    // 脚本运行在 Nest 容器之外，onModuleInit 不会触发，需显式预载一次，
+    // 否则 admin 在 dashboard 发布的 prompt 覆盖不会生效（只会走代码默认值）
+    const promptRegistry = new PromptRegistryService(prismaService);
+    await promptRegistry.reload();
     const generator = new ParentReportGeneratorService(
       prismaService,
-      new LlmService(config, prismaService),
+      new LlmService(config, prismaService, promptRegistry),
       config,
     );
     await generator.generateDeviceReport(
