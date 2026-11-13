@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Logger,
@@ -500,7 +501,7 @@ describe("PromptAdminService", () => {
       expect(registry.reload).toHaveBeenCalledTimes(1);
     });
 
-    it("确认码错误 → 403，DB 与缓存都不动", async () => {
+    it("确认码错误 → 400，DB 与缓存都不动", async () => {
       const { service, prisma, registry } = await withDraft();
       await expect(
         service.publish(
@@ -508,7 +509,7 @@ describe("PromptAdminService", () => {
           { revision: 1, changeNote: "上线", confirmCode: "错了吗" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
       expect(prisma.templates[0].publishedRevision).toBeNull();
       expect(prisma.versions[0].publishedAt).toBeNull();
       expect(registry.reload).not.toHaveBeenCalled();
@@ -522,14 +523,14 @@ describe("PromptAdminService", () => {
           { revision: 1, changeNote: "上线", confirmCode: "deda2025" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
       await expect(
         service.publish(
           "persona_elly",
           { revision: 1, changeNote: "上线", confirmCode: " DEDA2025" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
     });
 
     it("revision 与当前草稿不符 → 409（别人已经改过了）", async () => {
@@ -576,7 +577,7 @@ describe("PromptAdminService", () => {
           { revision: 1, changeNote: "上线", confirmCode: "DEDA2025" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
       await expect(
         service.publish(
           "persona_elly",
@@ -675,7 +676,7 @@ describe("PromptAdminService", () => {
       );
     });
 
-    it("确认码错误 → 403，不产生新版本", async () => {
+    it("确认码错误 → 400，不产生新版本", async () => {
       const { service, prisma } = await publishedTwice();
       await expect(
         service.rollback(
@@ -683,7 +684,7 @@ describe("PromptAdminService", () => {
           { targetRevision: 1, changeNote: "x", confirmCode: "nope" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
       expect(prisma.versions).toHaveLength(2);
     });
   });
@@ -731,7 +732,7 @@ describe("PromptAdminService", () => {
       );
     });
 
-    it("确认码错误 → 403", async () => {
+    it("确认码错误 → 400", async () => {
       const { service } = makeService();
       await expect(
         service.resetToDefault(
@@ -739,7 +740,7 @@ describe("PromptAdminService", () => {
           { changeNote: "x", confirmCode: "wrong" },
           AUTHOR,
         ),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(BadRequestException);
     });
   });
 

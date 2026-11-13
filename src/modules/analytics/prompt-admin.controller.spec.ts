@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ExecutionContext,
   ForbiddenException,
@@ -393,17 +394,17 @@ describe("PromptAdminController", () => {
       expect(service.publish).not.toHaveBeenCalled();
     });
 
-    it("确认码错误由 service 判 403 并原样透传", async () => {
+    it("确认码错误由 service 判 400 并原样透传", async () => {
       service.publish.mockRejectedValue(
-        new ForbiddenException("Wrong confirm code"),
+        new BadRequestException("Wrong confirm code"),
       );
 
       const res = await http()
         .post(`/analytics/prompts/${KEY}/publish`)
         .send({ revision: 1, changeNote: "x", confirmCode: "WRONG" });
 
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe(403);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe(400);
     });
 
     it("写开关关闭时 service 的 403 原样透传", async () => {
