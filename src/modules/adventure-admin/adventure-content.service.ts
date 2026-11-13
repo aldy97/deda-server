@@ -18,6 +18,7 @@ import {
   EpisodeContentDraft,
   EpisodeIdentity,
   businessKey,
+  draftToken,
 } from "./adventure-content.types";
 import { LintReport } from "./adventure-linter";
 import { episodeContentHash, toBundleEpisode } from "./adventure-bundle";
@@ -62,12 +63,47 @@ const REVERTABLE_VERSION_STATUSES = ["published", "superseded"];
  */
 const RETIRE_ABANDONABLE_STATUSES = ["in_progress", "awaiting_reply", "exited"];
 
+/**
+ * 乐观锁判定：编辑器加载时看到的草稿，和现在库里的草稿，还是同一份吗？
+ *
+ * 基线是两个令牌，因为草稿是**可变行**：
+ * - baseVersionId：加载后别人**新建**了草稿 → id 对不上；
+ * - baseDraftUpdatedAt：加载后别人往**同一行**里又存了一次 → id 一模一样，只有时间戳能分辨。
+ *
+ * 两个令牌都不带 = 调用方明确不参与并发保护（导入链路就是这样：它在计划阶段
+ * 有自己更强的闸——目标集有别人未发布且内容不同的草稿时直接 reject）。
+ * 带了但解析不出来 → 按「已过期」处理（fail closed）：宁可让人多点一次「加载对方版本」，
+ * 也绝不静默覆盖别人写了一半的内容。
+ */
+function isStaleBase(
+  draft: AdventureEpisodeVersion,
+  options: MutationOptions,
+): boolean {
+  if (options.baseVersionId && options.baseVersionId !== draft.id) {
+    return true;
+  }
+  if (!options.baseDraftUpdatedAt) {
+    return false;
+  }
+  const actual = draftToken(draft);
+  if (actual === null) {
+    return true;
+  }
+  const claimed = Date.parse(options.baseDraftUpdatedAt);
+  return !Number.isFinite(claimed) || claimed !== new Date(actual).getTime();
+}
+
 export interface MutationOptions {
   reason?: string | null;
   /** 破坏性操作的确认文本，必须原样等于业务键 */
   confirmText?: string | null;
-  /** 乐观锁基线：编辑器从 getEpisode 拿到的 baseVersionId */
+  /** 乐观锁基线之一：编辑器从 getEpisode 拿到的 baseVersionId */
   baseVersionId?: string | null;
+  /**
+   * 乐观锁基线之二：编辑器从 getEpisode 拿到的 baseDraftUpdatedAt（草稿行的 updatedAt）。
+   * 草稿是可变行，只比 id 检测不到「同一行被别人又存了一次」，所以必须有这个时间令牌。
+   */
+  baseDraftUpdatedAt?: string | null;
   /** 明知有人在改也要覆盖（UI 上是一个单独的红色按钮） */
   force?: boolean;
 }
@@ -89,6 +125,11 @@ export interface CreateEpisodeResult {
 
 export interface SaveDraftResult extends CreateEpisodeResult {
   created: boolean;
+  /**
+   * 保存之后的新并发令牌。编辑器必须改用它继续保存，
+   * 否则会被自己刚写进去的那一次顶成 409（自己锁死自己）。
+   */
+  draftUpdatedAt: string | null;
 }
 
 export interface PublishResult {
@@ -244,9 +285,12 @@ export class AdventureContentService {
    * 保存草稿。每集同时只有一个草稿，草稿**可变**——否则每敲一个字就多一个版本行，
    * 版本历史会被淹掉，真正需要回滚时找不到落点。
    *
-   * 乐观锁：编辑器把 getEpisode 返回的 baseVersionId 原样带回来；
-   * 对不上说明别人已经改过，返回 409 并附上对方草稿的信息，由人来决定加载还是覆盖。
-   * 不带 baseVersionId 表示调用方明确不参与并发保护（只有导入链路会这样）。
+   * 乐观锁（见 isStaleBase）：编辑器把 getEpisode 返回的 baseVersionId 与
+   * baseDraftUpdatedAt 原样带回来；任一对不上都说明别人已经改过，返回 409 并附上
+   * 对方草稿的信息，由人来决定加载还是覆盖。两个令牌都不带表示调用方明确不参与
+   * 并发保护——只有导入链路会这样：它在计划阶段有自己更强的一道闸，目标集存在别人
+   * 未发布且内容不同的草稿时直接判 reject（见 adventure-transfer.service.ts），
+   * 根本走不到这里；语义上导入就是「按这份已确认的 bundle 覆盖」。
    */
   async saveDraft(
     episodeId: string,
@@ -270,12 +314,7 @@ export class AdventureContentService {
           orderBy: { version: "desc" },
         });
         const draft = findDraft(versions);
-        if (
-          draft &&
-          !options.force &&
-          options.baseVersionId &&
-          options.baseVersionId !== draft.id
-        ) {
+        if (draft && !options.force && isStaleBase(draft, options)) {
           throw new ConflictException({
             message: `这一集的草稿已经被 ${draft.createdByName} 改过（v${draft.version}）。请选「加载对方版本」或「覆盖我的改动」。`,
             code: "DRAFT_CONFLICT",
@@ -336,6 +375,7 @@ export class AdventureContentService {
           businessKey: key,
           contentHash,
           created: !draft,
+          draftUpdatedAt: draftToken(version),
           lint: report,
         };
       });

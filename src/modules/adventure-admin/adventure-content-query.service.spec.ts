@@ -248,6 +248,7 @@ describe("AdventureContentQueryService", () => {
           version: 3,
           status: "draft",
           payload: draftContent,
+          updatedAt: new Date("2026-11-11T08:00:00.000Z"),
         })
         .mockResolvedValueOnce(null);
 
@@ -255,6 +256,8 @@ describe("AdventureContentQueryService", () => {
 
       expect(detail.contentSource).toBe("draft");
       expect(detail.baseVersionId).toBe("v3");
+      // 草稿是可变行，光有 id 挡不住「同一行被别人改过」，所以再发一个 updatedAt 令牌
+      expect(detail.baseDraftUpdatedAt).toBe("2026-11-11T08:00:00.000Z");
       // 内容一律按白名单补全后返回：表单拿到的每一段字段齐全，不会有 undefined 空洞
       expect(detail.content.title).toBe("第三集");
       expect(detail.content.recap).toBe("上集回顾");
@@ -290,6 +293,7 @@ describe("AdventureContentQueryService", () => {
 
       expect(detail.contentSource).toBe("published");
       expect(detail.baseVersionId).toBe("v2");
+      expect(detail.baseDraftUpdatedAt).toBeNull();
       expect(detail.content.segments).toHaveLength(2);
     });
 
@@ -305,6 +309,7 @@ describe("AdventureContentQueryService", () => {
 
       expect(detail.contentSource).toBe("empty");
       expect(detail.baseVersionId).toBeNull();
+      expect(detail.baseDraftUpdatedAt).toBeNull();
       expect(detail.content).toEqual({
         title: "第三集",
         recap: "上集回顾",

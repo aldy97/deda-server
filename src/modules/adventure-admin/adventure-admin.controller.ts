@@ -191,7 +191,7 @@ export class AdventureAdminController {
   @Post("episodes/:episodeId/draft")
   @ApiOperation({
     summary:
-      "存草稿。带 baseVersionId 参与乐观锁；别人已经改过时返回 409 DRAFT_CONFLICT",
+      "存草稿。带 baseVersionId + baseDraftUpdatedAt 参与乐观锁；别人已经改过（哪怕是往同一行草稿里存的）返回 409 DRAFT_CONFLICT。响应里的 draftUpdatedAt 是下一次保存该带的新令牌",
   })
   async saveDraft(
     @Param("episodeId") episodeId: string,
@@ -202,7 +202,12 @@ export class AdventureAdminController {
       episodeId,
       dto.content,
       this.actor(req),
-      this.picked(dto, ["reason", "baseVersionId", "force"]) as MutationOptions,
+      this.picked(dto, [
+        "reason",
+        "baseVersionId",
+        "baseDraftUpdatedAt",
+        "force",
+      ]) as MutationOptions,
     );
   }
 

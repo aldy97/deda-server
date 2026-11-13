@@ -76,5 +76,16 @@ export function businessKey(identity: EpisodeIdentity): string {
   return `${identity.characterKey}/${identity.season}/${identity.episodeNumber}`;
 }
 
+/**
+ * 草稿的并发令牌：草稿行的 updatedAt。
+ *
+ * 草稿是**可变行**（原地 update，id 与 version 都不变），所以「这一行在我加载之后
+ * 有没有被别人存过」只能靠时间戳辨认。测试替身可能不带 updatedAt，故返回 null；
+ * 真正的 Prisma 行一定有（schema 上是 @updatedAt）。
+ */
+export function draftToken(row: { updatedAt?: Date | null }): string | null {
+  return row.updatedAt ? row.updatedAt.toISOString() : null;
+}
+
 /** 引擎播放时真正读取的最小段落形状（与 AdventureService 的 PlayableSegment 同构）。 */
 export type PlayableSegmentDraft = EpisodeSegmentDraft;

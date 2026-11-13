@@ -569,9 +569,13 @@ GET /analytics/adventure-admin/episodes?characterKey=&published=&includeRetired=
    // 默认不含已 retire 的集；pageSize 最大 200
 
 GET /analytics/adventure-admin/episodes/:episodeId
-→ { summary, content, contentSource: "draft"|"published"|"empty", baseVersionId, lint, impact }
+→ { summary, content, contentSource: "draft"|"published"|"empty", baseVersionId,
+    baseDraftUpdatedAt, lint, impact }
    // content 是编辑器该加载的那一份：草稿优先，其次当前发布版，最后是空壳
-   // baseVersionId 是乐观锁基线，存草稿时必须原样带回
+   // baseVersionId + baseDraftUpdatedAt 是乐观锁基线（双令牌），存草稿时必须原样带回。
+   //   baseDraftUpdatedAt 是当前草稿行的 updatedAt（ISO 串），没有草稿时为 null。
+   //   之所以要两个：草稿是**可变行**，原地保存后 id 与 version 都不变，只比 id
+   //   检测不到「我加载之后别人往同一行里又存了一次」，那种情况会静默互相覆盖。
 
 GET /analytics/adventure-admin/episodes/:episodeId/versions
 → [VersionSummary]
@@ -636,11 +640,16 @@ body { identity, content, reason }
    // 集号被永久占用（见 discard）。
 
 POST /analytics/adventure-admin/episodes/:episodeId/draft
-body { content, reason, baseVersionId?, force? }
-→ { episodeId, versionId, version, businessKey, contentHash, lint, created }
-   // 乐观锁：baseVersionId 与库里草稿 id 不符 → 409 DRAFT_CONFLICT，
-   //   data 带 currentDraft{id, version, updatedBy, updatedAt}，前端提示「谁在你之前改过」。
-   //   force=true 才覆盖（UI 上是单独的红色按钮）。不带 baseVersionId = 明确不参与并发保护。
+body { content, reason, baseVersionId?, baseDraftUpdatedAt?, force? }
+→ { episodeId, versionId, version, businessKey, contentHash, lint, created, draftUpdatedAt }
+   // 乐观锁（双令牌）：baseVersionId 与库里草稿 id 不符，**或** baseDraftUpdatedAt 与库里
+   //   草稿的 updatedAt 不符 → 409 DRAFT_CONFLICT，data 带 currentDraft{id, version,
+   //   updatedBy, updatedAt}，前端提示「谁在你之前改过」。令牌解析不出来也算不符（fail closed）。
+   //   force=true 才覆盖（UI 上是单独的红色按钮）。两个令牌都不带 = 明确不参与并发保护
+   //   （只有导入链路这样：它在 import/preview 阶段有自己更强的闸——目标集存在别人
+   //     未发布且内容不同的草稿时直接判 reject，不静默覆盖）。
+   // 响应里的 draftUpdatedAt 是**下一次保存该带的新令牌**：编辑器必须改用它，
+   //   否则会被自己刚存的那一次顶成 409（自己锁死自己）。
 
 POST /analytics/adventure-admin/episodes/:episodeId/publish
 body { reason }
@@ -854,7 +863,7 @@ kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + �
 | `BUNDLE_REQUIRED` / `BUNDLE_INVALID` | 400 | 没传 bundle / bundle 解析失败（带 `errors`） |
 | `IMPORT_PLAN_REJECTED` | 400 | 导入计划里有 reject，整批不写 |
 | `BUSINESS_KEY_TAKEN` | 409 | 并发抢同一集号、绕过 lint 撞上数据库唯一约束 |
-| `DRAFT_CONFLICT` | 409 | 乐观锁失败，带 `currentDraft`（可直接拿去刷新编辑器） |
+| `DRAFT_CONFLICT` | 409 | 乐观锁失败（id 或 updatedAt 任一对不上），带 `currentDraft`（可直接拿去刷新编辑器） |
 | `BUNDLE_HASH_MISMATCH` | 409 | 提交的 bundle 与预览时不是同一份，带 `previewedHash` 与 `actualHash` |
 | `ALREADY_RETIRED` | 409 | 已经 retire 过了，不需要重复下架 |
 | （`data` 为 `null`） | 404 | `episodeId` / `versionId` 不存在，或该版本不属于这一集 |

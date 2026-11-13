@@ -403,6 +403,107 @@ describe("AdventureContentService", () => {
       expect(audit.record).not.toHaveBeenCalled();
     });
 
+    it("returns 409 when the very same draft row was already saved over by someone else", async () => {
+      // 草稿是可变行：原地 update 后 id 和 version 都不变，只比 id 检测不到这次覆盖
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([
+        versionRow({
+          id: "v3",
+          version: 3,
+          status: "draft",
+          createdByName: "Carol",
+          updatedAt: new Date("2026-11-12T09:30:00.000Z"),
+        }),
+      ]);
+
+      const error = await service
+        .saveDraft("ep1", content, actor, {
+          baseVersionId: "v3",
+          baseDraftUpdatedAt: "2026-11-11T08:00:00.000Z",
+          reason: "我这边还开着昨天加载的那一份",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      const body = error.getResponse();
+      expect(body.code).toBe("DRAFT_CONFLICT");
+      expect(body.currentDraft).toMatchObject({
+        id: "v3",
+        version: 3,
+        updatedBy: "Carol",
+      });
+      expect(tx.adventureEpisodeVersion.update).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the concurrency token cannot be parsed at all", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([
+        versionRow({
+          id: "v3",
+          version: 3,
+          status: "draft",
+          updatedAt: new Date("2026-11-12T09:30:00.000Z"),
+        }),
+      ]);
+
+      const error = await service
+        .saveDraft("ep1", content, actor, {
+          baseVersionId: "v3",
+          baseDraftUpdatedAt: "昨天下午",
+          reason: "令牌坏了也要挡住，不能当成没参与并发保护",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse().code).toBe("DRAFT_CONFLICT");
+      expect(tx.adventureEpisodeVersion.update).not.toHaveBeenCalled();
+    });
+
+    it("saves and hands back a fresh token when the concurrency baseline still matches", async () => {
+      const draft = versionRow({
+        id: "v3",
+        version: 3,
+        status: "draft",
+        updatedAt: new Date("2026-11-12T09:30:00.000Z"),
+      });
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([draft]);
+      tx.adventureEpisodeVersion.update.mockResolvedValueOnce({
+        ...draft,
+        updatedAt: new Date("2026-11-13T02:00:00.000Z"),
+      });
+
+      const result = await service.saveDraft("ep1", content, actor, {
+        baseVersionId: "v3",
+        baseDraftUpdatedAt: "2026-11-12T09:30:00.000Z",
+        reason: "接着改，令牌还是我加载时那一份",
+      });
+
+      expect(tx.adventureEpisodeVersion.update).toHaveBeenCalledTimes(1);
+      expect(auditActions()).toEqual(["update_draft"]);
+      // 编辑器拿新令牌续用：不必回读一次，也不会被自己上一次保存顶成 409
+      expect(result.draftUpdatedAt).toBe("2026-11-13T02:00:00.000Z");
+    });
+
+    it("still overwrites a stale token when the caller explicitly forces it", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([
+        versionRow({
+          id: "v3",
+          version: 3,
+          status: "draft",
+          updatedAt: new Date("2026-11-12T09:30:00.000Z"),
+        }),
+      ]);
+
+      const result = await service.saveDraft("ep1", content, actor, {
+        baseVersionId: "v3",
+        baseDraftUpdatedAt: "2026-11-11T08:00:00.000Z",
+        reason: "确认覆盖 Carol 的改动",
+        force: true,
+      });
+
+      expect(tx.adventureEpisodeVersion.update).toHaveBeenCalledTimes(1);
+      expect(result.versionId).toBe("v3");
+    });
+
     it("overwrites without a base when the caller explicitly says so", async () => {
       tx.adventureEpisodeVersion.findMany.mockResolvedValue([
         versionRow({ id: "v4", version: 4, status: "draft" }),

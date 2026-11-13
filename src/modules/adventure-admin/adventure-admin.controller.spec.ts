@@ -586,6 +586,7 @@ describe("AdventureAdminController", () => {
           content: DRAFT,
           reason: "改第二段的措辞",
           baseVersionId: "v7",
+          baseDraftUpdatedAt: "2026-11-12T09:30:00.000Z",
           force: true,
         } as never,
         adminRequest(),
@@ -595,7 +596,33 @@ describe("AdventureAdminController", () => {
         "ep1",
         DRAFT,
         expect.anything(),
-        { reason: "改第二段的措辞", baseVersionId: "v7", force: true },
+        {
+          reason: "改第二段的措辞",
+          baseVersionId: "v7",
+          baseDraftUpdatedAt: "2026-11-12T09:30:00.000Z",
+          force: true,
+        },
+      );
+    });
+
+    it("saveDraft drops an empty concurrency token instead of forwarding it", async () => {
+      content.saveDraft.mockResolvedValue({ episodeId: "ep1" });
+
+      await controller.saveDraft(
+        "ep1",
+        {
+          content: DRAFT,
+          reason: "这一集当时还没有草稿",
+          baseDraftUpdatedAt: null,
+        } as never,
+        adminRequest(),
+      );
+
+      expect(content.saveDraft).toHaveBeenCalledWith(
+        "ep1",
+        DRAFT,
+        expect.anything(),
+        { reason: "这一集当时还没有草稿" },
       );
     });
 

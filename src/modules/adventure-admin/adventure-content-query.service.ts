@@ -15,6 +15,7 @@ import {
   EpisodeIdentity,
   REPLY_WAITING_INTERACTION_TYPES,
   businessKey,
+  draftToken,
 } from "./adventure-content.types";
 import {
   LintContext,
@@ -140,8 +141,14 @@ export interface EpisodeDetail {
   /** 编辑器应加载的内容：草稿优先，其次当前发布版，最后是空壳 */
   content: EpisodeContentDraft;
   contentSource: "draft" | "published" | "empty";
-  /** 乐观锁基线：保存草稿时必须原样带回，变了说明有人抢先改过 */
+  /** 乐观锁基线（之一）：保存草稿时必须原样带回，变了说明有人抢先建了草稿 */
   baseVersionId: string | null;
+  /**
+   * 乐观锁基线（之二）：当前草稿的 updatedAt，没有草稿时为 null。
+   * 草稿是可变行——原地 update 后 id 和 version 都不变，只比 baseVersionId
+   * 检测不到「我加载之后别人往同一行里存过一次」，所以再发一个时间令牌。
+   */
+  baseDraftUpdatedAt: string | null;
   lint: LintReport;
   impact: EpisodeImpact;
 }
@@ -352,14 +359,17 @@ export class AdventureContentQueryService {
     let content: EpisodeContentDraft;
     let contentSource: EpisodeDetail["contentSource"];
     let baseVersionId: string | null;
+    let baseDraftUpdatedAt: string | null;
     if (draft) {
       content = contentFromPayload(identity, draft.payload);
       contentSource = "draft";
       baseVersionId = draft.id;
+      baseDraftUpdatedAt = draftToken(draft);
     } else if (published) {
       content = contentFromPayload(identity, published.payload);
       contentSource = "published";
       baseVersionId = published.id;
+      baseDraftUpdatedAt = null;
     } else {
       // 从未有过版本：用物化在 episode 行上的标题/回顾搭一个空壳，
       // 让编辑器打开就是可填的表单，而不是白屏。
@@ -370,6 +380,7 @@ export class AdventureContentQueryService {
       });
       contentSource = "empty";
       baseVersionId = null;
+      baseDraftUpdatedAt = null;
     }
 
     const [lint, impact] = await Promise.all([
@@ -381,6 +392,7 @@ export class AdventureContentQueryService {
       content,
       contentSource,
       baseVersionId,
+      baseDraftUpdatedAt,
       lint,
       impact,
     };

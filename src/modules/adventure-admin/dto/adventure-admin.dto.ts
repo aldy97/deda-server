@@ -248,13 +248,24 @@ export class SaveDraftDto {
 
   @ApiPropertyOptional({
     description:
-      "乐观锁基线：把 GET /episodes/:id 返回的 baseVersionId 原样带回来。" +
-      "别人已经改过草稿时会返回 409 DRAFT_CONFLICT，而不是静默覆盖。",
+      "乐观锁基线之一：把 GET /episodes/:id 返回的 baseVersionId 原样带回来。" +
+      "别人已经建过草稿时会返回 409 DRAFT_CONFLICT，而不是静默覆盖。",
   })
   @IsOptional()
   @IsString()
   @MaxLength(64)
   baseVersionId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "乐观锁基线之二：把 GET /episodes/:id 返回的 baseDraftUpdatedAt 原样带回来" +
+      "（或上一次存草稿返回的 draftUpdatedAt）。草稿是可变行、id 不变，" +
+      "只有这个时间戳能分辨「同一行被别人又存过一次」；对不上返回 409 DRAFT_CONFLICT。",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  baseDraftUpdatedAt?: string;
 
   @ApiPropertyOptional({
     description: "明知有人在改也要覆盖（UI 上是单独的红色按钮）",
