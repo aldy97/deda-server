@@ -14,6 +14,7 @@ import {
   LlmMessage,
   LlmUpstreamError,
 } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
   ConversationIntent,
@@ -121,6 +122,7 @@ export class LlmAdapterService {
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
     private readonly turnDecisions: TurnDecisionRecorder,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -849,43 +851,18 @@ export class LlmAdapterService {
   }
 
   /**
-   * 故事意图的话术（复制自 vendor.service.ts storyPrompt，两处需同步修改）。
-   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或
-   * 无集可播），统一走「自由创作、不承诺冒险」的降级话术。
+   * 故事意图话术：统一走 prompt 注册表。
+   * 此前这里是 vendor.service.ts storyPrompt 的逐字副本（靠注释「两处需同步修改」
+   * 维系一致），现两处都委托 PromptRegistryService.getStoryPrompt，单一真相。
+   *
+   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或无集可播），
+   * 统一走「自由创作、不承诺冒险」的降级话术。
    */
   private storyPrompt(
     intent: ConversationIntent,
     favoriteStoryType?: string | null,
   ): string | undefined {
-    let base: string | undefined;
-    switch (intent) {
-      case "english_story":
-        base =
-          "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
-        break;
-      case "idiom_story":
-        base =
-          "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
-        break;
-      case "sleep_story":
-        // TODO(sleep): 儿歌 / 催眠曲内容源接入后，在此按 SleepConfig.contentType
-        // 分流话术；在此之前恒出故事，差异由 resolveSleepContentDegradation 留痕。
-        base =
-          "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
-        break;
-      case "adventure_story":
-      case "free_story":
-        base =
-          "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
-        break;
-      default:
-        return undefined;
-    }
-    // 主动选题：孩子没指定题材时，优先讲 TA 最喜欢的故事类型（长期记忆）
-    if (favoriteStoryType) {
-      base += `\n孩子最喜欢的故事类型是「${favoriteStoryType}」：如果孩子这轮没有指定别的题材，优先讲这个类型。`;
-    }
-    return base;
+    return this.promptRegistry.getStoryPrompt(intent, favoriteStoryType);
   }
 
   /**
@@ -1078,10 +1055,9 @@ export class LlmAdapterService {
       return;
     }
 
-    const persona = params.device
-      ? (LlmService.CHARACTER_PERSONAS[params.device.characterKey ?? "elly"] ??
-        LlmService.CHARACTER_PERSONAS.elly)
-      : LlmService.CHARACTER_PERSONAS.elly;
+    // 人设走注册表：admin 在 dashboard 发布的新版本立即生效；
+    // 未知/缺省 characterKey 一律回落 elly（与既有防匿名行为一致）
+    const persona = this.promptRegistry.getPersona(params.device?.characterKey);
     // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝人设名出现
     const personaName = persona.split("：")[0];
     // 孩子名硬禁（优先英文名，与 buildChildBrief 的称呼口径一致）；
@@ -1126,7 +1102,7 @@ export class LlmAdapterService {
       try {
         const stream = openStream(
           attempt === 2
-            ? "你上一句被拒绝了：它以孩子的名字开头，或出现了你自己的人设名。请生成一句完全不同的话——不同的措辞、不同的结构、不带任何名字。"
+            ? this.promptRegistry.getTemplate("filler_retry_instruction")
             : undefined,
         );
         for await (const chunk of stream) {

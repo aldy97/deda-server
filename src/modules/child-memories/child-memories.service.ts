@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import {
   CHILD_MEMORY_RULES,
   ChildMemoryKey,
@@ -35,6 +36,7 @@ export class ChildMemoriesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {}
 
   /** 小模型只产生候选；格式、安全、版本与写库全部由后端控制。 */
@@ -53,17 +55,7 @@ export class ChildMemoriesService {
       messages: [
         {
           role: "system",
-          content:
-            "你是儿童长期记忆提取器。只输出 JSON 数组，最多 3 项。" +
-            "每项格式为 {key,value,operation,evidence,confidence}。" +
-            "key 只能是 favorite_color/favorite_animal/favorite_story_type/" +
-            "preferred_interaction/interest_topic；operation 只能是 " +
-            "assert/confirm/supersede/retract。只提取孩子明确表达的长期偏好；" +
-            "临时状态、犹豫、猜测、敏感信息、学校、地址、健康信息均输出 []。" +
-            "孩子在提问（尤其询问 Elly 或对方的偏好、名字）时不算陈述，输出 []。" +
-            "interest_topic 涵盖孩子感兴趣的事物与活动，例如恐龙、太空、打篮球、画画、游泳。" +
-            "evidence 必须是孩子原话 childText 的原文摘抄，不得改写、转述或补全。" +
-            "“也喜欢”不能替代单值最爱；没有可保存信息输出 []。",
+          content: this.promptRegistry.getTemplate("memory_extract_system"),
         },
         {
           role: "user",

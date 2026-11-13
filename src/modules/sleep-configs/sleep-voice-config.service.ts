@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { SleepConfigsService } from "./sleep-configs.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 
 /**
  * 孩子语音修改哄睡配置（sleep_config 意图的处理层）。
@@ -38,26 +39,6 @@ const CONTENT_TYPE_LABEL: Record<ContentType, string> = {
   mixed: "睡前故事和儿歌",
 };
 
-const EXTRACT_SYSTEM_PROMPT = `你是儿童陪伴产品的哄睡配置解析器。孩子会通过语音要求修改哄睡设置。
-从孩子的话中抽取要修改的字段，只输出一行 JSON，禁止任何解释。
-
-字段与取值：
-- contentType：哄睡内容类型，只能是 "story"（睡前故事）、"song"（睡前儿歌）、"mixed"（故事加儿歌都要）
-- durationMinutes：哄睡时长分钟数，只能是 10、15、20、25、30 之一；就近取档
-- sleepTime：哄睡开始时间，24 小时制 "HH:mm"，例如晚上九点半是 "21:30"
-
-输出格式：
-- 能确定字段：{"field":"contentType","value":"song"} 或 {"field":"durationMinutes","value":20} 或 {"field":"sleepTime","value":"21:30"}
-- 无法确定要改什么：{"field":null}
-
-示例：
-孩子：以后睡前都听儿歌 → {"field":"contentType","value":"song"}
-孩子：我想听睡前故事 → {"field":"contentType","value":"story"}
-孩子：故事和儿歌都要 → {"field":"contentType","value":"mixed"}
-孩子：哄睡改成二十分钟 → {"field":"durationMinutes","value":20}
-孩子：明天九点半哄我睡觉 → {"field":"sleepTime","value":"21:30"}
-孩子：哄睡嘛随便啦 → {"field":null}`;
-
 @Injectable()
 export class SleepVoiceConfigService {
   private readonly logger = new Logger(SleepVoiceConfigService.name);
@@ -65,6 +46,7 @@ export class SleepVoiceConfigService {
   constructor(
     private readonly sleepConfigs: SleepConfigsService,
     private readonly llm: LlmService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {}
 
   /**
@@ -120,7 +102,12 @@ export class SleepVoiceConfigService {
         temperature: 0,
         maxTokens: 64,
         messages: [
-          { role: "system", content: EXTRACT_SYSTEM_PROMPT },
+          {
+            role: "system",
+            content: this.promptRegistry.getTemplate(
+              "sleep_config_extract_system",
+            ),
+          },
           { role: "user", content: `孩子：${asrText}` },
         ],
       });

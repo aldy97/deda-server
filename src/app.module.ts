@@ -21,6 +21,7 @@ import { MusicModule } from "./modules/music/music.module";
 import { LlmModule } from "./modules/llm/llm.module";
 import { RedisModule } from "./common/redis/redis.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
+import { PromptRegistryModule } from "./modules/prompt-registry/prompt-registry.module";
 import { MqttModule } from "./common/mqtt/mqtt.module";
 import { DeviceStatusModule } from "./modules/device-status/device-status.module";
 import { DeviceLinkModule } from "./modules/device-link/device-link.module";
@@ -71,6 +72,7 @@ const staticImports = existsSync(dashboardDistPath)
       },
     }),
     PrismaModule,
+    PromptRegistryModule,
     RedisModule,
     MqttModule,
     DeviceStatusModule,

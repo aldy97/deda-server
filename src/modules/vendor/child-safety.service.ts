@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 
 /**
  * 儿童安全分层过滤（L1 正则闸 + L2 小模型分类）。
@@ -252,7 +253,10 @@ export class ChildSafetyService {
 
   private readonly logger = new Logger(ChildSafetyService.name);
 
-  constructor(private readonly llmService: LlmService) {}
+  constructor(
+    private readonly llmService: LlmService,
+    private readonly promptRegistry: PromptRegistryService,
+  ) {}
 
   /** L1：显式敏感词正则闸，零延迟、确定性 */
   checkL1(text: string): SafetyVerdict {
@@ -298,17 +302,7 @@ export class ChildSafetyService {
         messages: [
           {
             role: "system",
-            content:
-              "你是儿童语音产品的安全分类器。只输出一个标签，禁止解释：" +
-              "safe（安全内容）；" +
-              "sexual（性、色情、隐私部位相关的话题或提问）；" +
-              "violence（真实暴力话题、暴力方法、血腥内容，或索要伤害他人的方法）；" +
-              "self_harm（自杀、自残、轻生、不想活等自我伤害信号）；" +
-              "emotional_harm（孩子因愤怒、嫉妒、委屈等情绪说出的攻击性气话，" +
-              "例如「我要杀了我弟弟」「我打死你」，重点是情绪宣泄而非真实暴力意图）。" +
-              "判断原则：气话和情绪宣泄一律归为 emotional_harm；" +
-              "只有真正涉及暴力内容本身才归 violence。" +
-              "孩子表达含糊时按字面选择最接近的标签。",
+            content: this.promptRegistry.getTemplate("safety_l2_system"),
           },
           { role: "user", content: `孩子的话：${asrText}` },
         ],

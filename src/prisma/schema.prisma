@@ -624,3 +624,52 @@ model DevicePresenceDaily {
   @@index([date])
   @@map("device_presence_daily")
 }
+
+/// 可编辑 prompt 注册表：当前生效指针 + 展示元信息。
+/// 代码内 PROMPT_DEFAULTS（prompt-defaults.ts）是 fail-safe 兜底：
+/// publishedRevision 为 null、DB 不可用、渲染失败，一律回落代码默认值，
+/// 产品行为退化为「注册表上线前」。首次部署只建 draft 不自动 publish，
+/// 因此上线当天全部走代码默认值，行为零变化。
+/// renderSchema 是变量契约的展示快照，渲染时一律以代码为准（防 admin 改契约）。
+model PromptTemplate {
+  id                String    @id @default(uuid())
+  key               String    @unique // 业务键，与代码 PROMPT_KEYS 一一对应，禁止删行
+  category          String // small_model / main_rules / story / persona
+  scene             String? // 关联 LLM_SCENES；人设等无单一场景的为 null
+  name              String // 中文展示名
+  description       String? // 用途与影响面说明，dashboard 上给 admin 看
+  renderSchema      Json? // 变量契约快照 [{name,required,description}]，仅展示用
+  draftRevision     Int? // 未发布草稿的版本号；null = 无草稿
+  publishedRevision Int? // 当前生效版本号；null = 未发布，运行时走代码默认值
+  publishedAt       DateTime?
+  publishedBy       String? // admin username
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  versions PromptTemplateVersion[]
+
+  @@map("prompt_templates")
+}
+
+/// prompt 版本链，同时充当审计日志（谁、何时、改了什么、为什么）。
+/// 不额外建审计表：本表已是完整审计链。
+/// 状态由 PromptTemplate 的两个指针派生，不存 status 枚举，避免指针与状态漂移：
+/// revision == draftRevision 是草稿，== publishedRevision 是生效版本，其余是历史。
+/// 回滚 = 以目标版本内容创建新 revision 并直接发布（同 git revert），
+/// revision 恒单调递增，不做时间倒流的状态回改。
+model PromptTemplateVersion {
+  id                String    @id @default(uuid())
+  templateId        String
+  revision          Int // 同一 template 内单调递增
+  content           String    @db.Text
+  changeNote        String? // 发布说明，publish/rollback 时必填
+  authorUsername    String
+  authorDisplayName String?
+  createdAt         DateTime  @default(now())
+  publishedAt       DateTime?
+
+  template PromptTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, revision])
+  @@map("prompt_template_versions")
+}

@@ -498,6 +498,90 @@ GET /analytics/fleet/devices/:deviceId?days=30
 - 低电量阈值固定 20（仅在线设备）
 - `null` ≠ `0`：前端 `null` 渲染 `-`
 
+## Prompt 管理（admin view / edit / publish）
+
+> 例外：本节含写操作（PATCH / POST），不适用上文「所有接口均为 GET」的约定。
+> 背景、回落链、版本语义、不可编辑红线见 `docs/prompt-registry.md`。
+> 路由全部挂 `analytics/` 前缀 + `AnalyticsAuthGuard`：dashboard 的 vite dev proxy
+> 与生产 nginx 都只转发 `/analytics`，换前缀就要改部署配置。
+
+```
+GET /analytics/meta
+→ { nodeEnv, promptWriteEnabled, publishConfirmCode }
+```
+
+- `nodeEnv`：`development` / `staging` / `production`，dashboard 左上角环境标签据此渲染
+  （配色与中文标签由前端决定，后端只给环境名）。
+- **取不到该接口时前端必须 fail-closed**：按「未知环境」处理并禁用所有发布按钮。
+- `publishConfirmCode` 仅用于让提示文案与 env 配置一致（ops 改码后 UI 不给错提示），
+  **禁止预填进输入框**——真正的闸口是服务端校验，前端预填会让「手动输入」形同虚设。
+
+```
+GET /analytics/prompts
+→ [ { key, category, scene, name, description,
+      variables: [{ name, required, description }],
+      maxChars, defaultContent, effectiveContent, source,
+      publishedRevision, draftRevision, publishedAt, publishedBy,
+      deviatesFromDefault } ]
+```
+
+- 恒返回全部 17 个 key：catalog 以代码 `PROMPT_DEFAULTS` 为准，与 DB 是否已有行无关。
+- `source`：`"db"` = 生效值来自已发布版本；`"default"` = 回落代码默认值。
+- `effectiveContent` 是**运行时真正生效**的正文；`deviatesFromDefault=true` 表示它
+  与 `defaultContent` 不一致（dashboard 标「已偏离默认」）。
+- 列表接口会先同步一次注册表，保证「当前生效」不是最长 60s 前的缓存快照。
+
+```
+GET /analytics/prompts/:key
+→ 上述字段 + { draftContent, draftChangeNote, publishedContent, discardedDraftRevision }
+```
+
+- `discardedDraftRevision` 仅回滚后非 null：本次回滚丢弃的未发布草稿号
+  （正文仍留在版本表，可从历史恢复）。
+
+```
+GET /analytics/prompts/:key/versions
+→ [ { revision, content, changeNote, authorUsername, authorDisplayName,
+      createdAt, publishedAt, isPublished, isDraft } ]
+```
+
+- 按 `revision` 倒序；从未编辑过的 key 返回 `[]` 而不是 404。
+
+```
+PATCH /analytics/prompts/:key/draft
+body { content, expectedRevision, changeNote? }
+→ 详情（同 GET :key）
+```
+
+- 草稿**不影响线上生效内容**。
+- `expectedRevision` 是乐观锁：无草稿时传 0；与服务端当前 `draftRevision` 不一致 → 409。
+- `content` 上限 20000 字符；`changeNote` 上限 500，可省略。
+
+```
+POST /analytics/prompts/:key/publish           → 200，body { revision, changeNote, confirmCode }
+POST /analytics/prompts/:key/rollback          → 200，body { targetRevision, changeNote, confirmCode }
+POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, confirmCode }
+→ 详情（同 GET :key）
+```
+
+- 三者都会**立即改变线上所有设备的模型行为**，故一律要求 `changeNote` + `confirmCode`；
+  确认码在服务端用 `timingSafeEqual` 校验，前端弹窗只是提醒、不构成安全边界。
+- `rollback` = 以目标版本正文**新建 revision 并发布**（git revert 语义）；
+  `reset-to-default` 同理以代码默认正文新建版本。历史版本永不改写、永不删除，
+  **没有 delete 接口**（删行只会静默回落默认值）。
+- 成功返回 **200 而非 201**：动作型写操作，与 `POST /analytics/devices/:deviceId/wipe` 一致。
+- 生效时延：单实例部署下发布方本机立即生效（服务端 await 注册表原子换入）；
+  多实例部署其余实例最长滞后 60s（缓存 TTL）。
+
+错误码：
+
+- 400 参数校验失败（正文为空/超长、缺 `expectedRevision`、缺 `changeNote` 或 `confirmCode`、白名单外字段）
+- 401 未登录 / token 无效 / token 非 analytics scope（策略层 `validate` 先拒，
+  守卫里那条 403 分支在真实 HTTP 链路上不可达）
+- 403 确认码不正确 / `PROMPT_WRITE_ENABLED=false`
+- 404 未知 prompt key / 回滚目标版本不存在
+- 409 乐观锁冲突 / 没有待发布的草稿 / `revision` 与当前草稿号不符
+
 ## 二期（进行中）
 
 - `device_presence_daily`：已落库（`DeviceLinkService.handleDeviceUp` 心跳旁路，内存聚合、5 分钟批量 flush）。`onlineNow` / `devicesPoweredOn` / `powerOnRate` 及 trend 的 `poweredOn` 均已接通；fleet 接口已上线（见「Fleet」节）。

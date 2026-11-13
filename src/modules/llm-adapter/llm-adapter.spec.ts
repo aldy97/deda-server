@@ -16,6 +16,7 @@ import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 const VALID_TOKEN = "test-adapter-key";
 
@@ -169,6 +170,7 @@ describe("LlmAdapterModule", () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [LlmAdapterController],
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         LlmAdapterService,
         { provide: LlmService, useValue: llm },
         { provide: ChildSafetyService, useValue: childSafety },
@@ -1843,6 +1845,7 @@ describe("LlmAdapterModule", () => {
     it("rejects every token when LLM_ADAPTER_API_KEY is unset", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmAdapterService,
           { provide: LlmService, useValue: llm },
           { provide: ChildSafetyService, useValue: childSafety },
