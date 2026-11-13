@@ -155,6 +155,22 @@ describe("Adventure streaming pipeline (e2e)", () => {
       findMany: jest.fn().mockImplementation(() => Promise.resolve(segments)),
     },
     adventureDailyRecord: {
+      // 引擎的 openOrReuseTodayDaily 按 @@unique([deviceId, assignedDate]) 查当日行：
+      // 当天那行若已被收走（retire→abandoned / 故障→failed_over），无条件 create
+      // 会撞唯一约束并把孩子永久卡在门外。少了这个方法，替身就会让引擎抛
+      // TypeError，然后被 L1 兜底接住、孩子只听到降级话术——测试绿不了，
+      // 而且掩盖的正好是它本该覆盖的那条链路。
+      findUnique: jest.fn(({ where }) => {
+        const key = where?.deviceId_assignedDate;
+        return Promise.resolve(
+          dailyRecord &&
+            key &&
+            dailyRecord.deviceId === key.deviceId &&
+            dailyRecord.assignedDate === key.assignedDate
+            ? dailyRecord
+            : null,
+        );
+      }),
       findFirst: jest.fn(({ where }) => {
         if (where.completedDate) {
           return Promise.resolve(
