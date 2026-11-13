@@ -36,6 +36,8 @@ import { LlmCostService } from "./llm-cost.service";
 import { ParentReportsAnalyticsController } from "./parent-reports-analytics.controller";
 import { ParentReportsAnalyticsService } from "./parent-reports-analytics.service";
 import { DevicesAdminController } from "./devices-admin.controller";
+import { FleetController } from "./fleet.controller";
+import { FleetService } from "./fleet.service";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 
 @Module({
@@ -54,8 +56,10 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     MemoriesAnalyticsController,
     LlmAnalyticsController,
     ParentReportsAnalyticsController,
+    FleetController,
   ],
   providers: [
+    FleetService,
     {
       provide: ANALYTICS_JWT_SERVICE,
       inject: [ConfigService],
