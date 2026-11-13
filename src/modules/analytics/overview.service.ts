@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { DeviceLinkService } from "../device-link/device-link.service";
 import {
   DEFAULT_REPORT_TIMEZONE,
   isValidReportDate,
@@ -29,9 +30,12 @@ type TrendMetricKey = (typeof TREND_METRIC_KEYS)[number];
 
 @Injectable()
 export class OverviewService {
+  private readonly logger = new Logger(OverviewService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly retentionService: RetentionService,
+    private readonly deviceLink: DeviceLinkService,
   ) {}
 
   /** 解析 date 参数：缺省=昨天（Asia/Shanghai 完整自然日 T-1） */
@@ -105,6 +109,7 @@ export class OverviewService {
       firstConversationIds,
       active7dIds,
       retention,
+      devices,
     ] = await Promise.all([
       this.prisma.device.count({ where: { createdAt: { lt: end } } }),
       this.prisma.user.count({ where: { createdAt: { lt: end } } }),
@@ -122,12 +127,36 @@ export class OverviewService {
         distinct: ["deviceId"],
       }),
       this.retentionService.getLatestRetention(date),
+      this.prisma.device.findMany({
+        where: { createdAt: { lt: end } },
+        select: { deviceId: true, macAddress: true },
+      }),
     ]);
 
     const dayBucket = daily.get(date);
     const dau = dayBucket?.devices.size ?? 0;
     const turns = dayBucket?.turns ?? 0;
     const prevDau = prevDaily.get(shiftReportDate(date, -1))?.devices.size ?? 0;
+
+    let onlineNow: number | null = null;
+    try {
+      const macs = devices.map(
+        (d: { deviceId: string; macAddress: string | null }) =>
+          d.macAddress ?? d.deviceId,
+      );
+      const statuses = await this.deviceLink.getStatusBatch(macs);
+      let count = 0;
+      for (const [, s] of statuses) {
+        if (s.online) count++;
+      }
+      onlineNow = count;
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Failed to query device online status: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
 
     return {
       date,
@@ -157,8 +186,7 @@ export class OverviewService {
         // 开机率依赖 device_presence_daily（二期落库），一期恒 null
         devicesPoweredOn: null,
         powerOnRate: null,
-        // onlineNow 依赖 Redis 在线集合（二期），一期恒 null
-        onlineNow: null,
+        onlineNow,
       },
       retention,
       funnel: {

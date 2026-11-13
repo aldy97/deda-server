@@ -97,6 +97,53 @@ export class DeviceLinkService implements OnModuleInit {
     };
   }
 
+  /**
+   * 批量读取设备链路状态。
+   * @param macs 设备 MAC 列表（任意大小写/分隔符，内部归一化去重）
+   * @returns 以归一化大写 MAC 为 key 的 Map，空数组直接返回空 Map 不碰 Redis
+   */
+  async getStatusBatch(
+    macs: string[],
+  ): Promise<Map<string, DeviceLinkStatus & { online: boolean }>> {
+    if (macs.length === 0) return new Map();
+
+    const normalizedSet = new Set<string>();
+    const ordered: string[] = [];
+    for (const mac of macs) {
+      const n = this.normalizeMac(mac);
+      if (!normalizedSet.has(n)) {
+        normalizedSet.add(n);
+        ordered.push(n);
+      }
+    }
+
+    const keys = ordered.map((n) => this.statusKey(n));
+    const values = await this.redisService.mGetValue(keys);
+
+    const result = new Map<string, DeviceLinkStatus & { online: boolean }>();
+    for (let i = 0; i < ordered.length; i++) {
+      const mac = ordered[i];
+      const empty: DeviceLinkStatus = {
+        mac,
+        battery: null,
+        volume: null,
+        version: null,
+        charging: null,
+        lastSeenAt: null,
+      };
+      const raw = values[i];
+      const status: DeviceLinkStatus = raw
+        ? { ...empty, ...(JSON.parse(raw) as Partial<DeviceLinkStatus>) }
+        : empty;
+      result.set(mac, {
+        ...status,
+        online: this.isOnline(status.lastSeenAt),
+      });
+    }
+
+    return result;
+  }
+
   /** 下发查询指令：要求设备立即上报一次电量/音量/版本 */
   requestStatus(mac: string): void {
     this.publishCommand(mac, DeviceLinkCommand.Query, null);

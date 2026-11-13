@@ -34,6 +34,7 @@ describe("DeviceLinkService", () => {
           useValue: {
             getValue: jest.fn().mockResolvedValue(null),
             setValue: jest.fn().mockResolvedValue(undefined),
+            mGetValue: jest.fn().mockResolvedValue([]),
           },
         },
         {
@@ -463,6 +464,107 @@ describe("DeviceLinkService", () => {
           (call: any[]) => call[0] === "device/down/AABBCCDDEEFF",
         ),
       ).toBe(true);
+    });
+  });
+
+  describe("getStatusBatch", () => {
+    const now = Date.now();
+
+    it("normalises mixed-case MACs to uppercase keys", async () => {
+      redisService.mGetValue.mockResolvedValue([
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          lastSeenAt: now - 5_000,
+        }),
+        JSON.stringify({
+          mac: "112233445566",
+          battery: 60,
+          volume: null,
+          version: null,
+          lastSeenAt: now - 5_000,
+        }),
+      ]);
+
+      const result = await service.getStatusBatch([
+        "aa-bb-cc-dd-ee-ff",
+        "11:22:33:44:55:66",
+      ]);
+
+      expect(result.size).toBe(2);
+      expect(result.has("AABBCCDDEEFF")).toBe(true);
+      expect(result.has("112233445566")).toBe(true);
+      expect(result.get("AABBCCDDEEFF")?.online).toBe(true);
+      expect(result.get("112233445566")?.online).toBe(true);
+    });
+
+    it("returns empty status maps with online=false on full cache miss", async () => {
+      redisService.mGetValue.mockResolvedValue([null, null]);
+
+      const result = await service.getStatusBatch([
+        "AABBCCDDEEFF",
+        "112233445566",
+      ]);
+
+      expect(result.size).toBe(2);
+      expect(result.get("AABBCCDDEEFF")).toEqual({
+        mac: "AABBCCDDEEFF",
+        battery: null,
+        volume: null,
+        version: null,
+        charging: null,
+        lastSeenAt: null,
+        online: false,
+      });
+      expect(result.get("112233445566")?.online).toBe(false);
+    });
+
+    it("marks online=false when lastSeenAt exceeds 15s window", async () => {
+      redisService.mGetValue.mockResolvedValue([
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          lastSeenAt: now - 20_000,
+        }),
+      ]);
+
+      const result = await service.getStatusBatch(["AABBCCDDEEFF"]);
+
+      expect(result.get("AABBCCDDEEFF")?.online).toBe(false);
+    });
+
+    it("deduplicates MACs and queries Redis only once each", async () => {
+      redisService.mGetValue.mockResolvedValue([
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          battery: 80,
+          volume: 50,
+          version: "1.2.3",
+          lastSeenAt: now - 5_000,
+        }),
+      ]);
+
+      const result = await service.getStatusBatch([
+        "aa:bb:cc:dd:ee:ff",
+        "AA-BB-CC-DD-EE-FF",
+        "aabbccddeeff",
+      ]);
+
+      expect(result.size).toBe(1);
+      expect(redisService.mGetValue).toHaveBeenCalledWith([
+        "device:link:AABBCCDDEEFF",
+      ]);
+    });
+
+    it("returns empty Map without touching Redis when input is empty", async () => {
+      const result = await service.getStatusBatch([]);
+
+      expect(result.size).toBe(0);
+      expect(redisService.mGetValue).not.toHaveBeenCalled();
     });
   });
 });

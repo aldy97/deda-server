@@ -6,6 +6,7 @@ import {
   reportDayRange,
   shiftReportDate,
 } from "../learning-stats/parent-report-date.util";
+import { DeviceLinkService } from "../device-link/device-link.service";
 import { OverviewService } from "./overview.service";
 import { RetentionService } from "./retention.service";
 
@@ -88,12 +89,21 @@ function buildPrisma(data: {
   };
 }
 
-function buildService(prisma: any): Promise<OverviewService> {
+function buildService(
+  prisma: any,
+  deviceLinkOverride?: { getStatusBatch: jest.Mock },
+): Promise<OverviewService> {
   return Test.createTestingModule({
     providers: [
       OverviewService,
       RetentionService,
       { provide: PrismaService, useValue: prisma },
+      {
+        provide: DeviceLinkService,
+        useValue: deviceLinkOverride ?? {
+          getStatusBatch: jest.fn().mockResolvedValue(new Map()),
+        },
+      },
     ],
   })
     .compile()
@@ -111,9 +121,27 @@ describe("OverviewService.getOverview", () => {
   it("汇总总量、当日活跃、漏斗与留存（时长为估算口径）", async () => {
     const prisma = buildPrisma({
       devices: [
-        { id: "d1", createdAt: spokeAtOn("2026-11-01"), characterKey: "elly" },
-        { id: "d2", createdAt: spokeAtOn("2026-11-01"), characterKey: "polly" },
-        { id: "d3", createdAt: spokeAtOn("2026-11-01"), characterKey: "elly" },
+        {
+          id: "d1",
+          deviceId: "aa:bb:cc:dd:ee:01",
+          macAddress: "aa:bb:cc:dd:ee:01",
+          createdAt: spokeAtOn("2026-11-01"),
+          characterKey: "elly",
+        },
+        {
+          id: "d2",
+          deviceId: "aa:bb:cc:dd:ee:02",
+          macAddress: null,
+          createdAt: spokeAtOn("2026-11-01"),
+          characterKey: "polly",
+        },
+        {
+          id: "d3",
+          deviceId: "aa:bb:cc:dd:ee:03",
+          macAddress: "aa:bb:cc:dd:ee:03",
+          createdAt: spokeAtOn("2026-11-01"),
+          characterKey: "elly",
+        },
       ],
       users: [{ id: "u1", createdAt: spokeAtOn("2026-11-01") }],
       bindings: [
@@ -129,7 +157,45 @@ describe("OverviewService.getOverview", () => {
         { deviceId: "d1", role: "user", spokeAt: shiftDate(DATE, -1, 10) },
       ],
     });
-    const service = await buildService(prisma);
+    const d1OnlineStatus = {
+      mac: "AABBCCDDEE01",
+      battery: 80,
+      volume: 50,
+      version: "1.2.3",
+      charging: true,
+      lastSeenAt: Date.now() - 5_000,
+      online: true,
+    };
+    const d3OnlineStatus = {
+      mac: "AABBCCDDEE03",
+      battery: 60,
+      volume: null,
+      version: null,
+      charging: null,
+      lastSeenAt: Date.now() - 5_000,
+      online: true,
+    };
+    const mockGetStatusBatch = jest.fn().mockResolvedValue(
+      new Map([
+        ["AABBCCDDEE01", d1OnlineStatus],
+        [
+          "AABBCCDDEE02",
+          {
+            mac: "AABBCCDDEE02",
+            battery: null,
+            volume: null,
+            version: null,
+            charging: null,
+            lastSeenAt: null,
+            online: false,
+          },
+        ],
+        ["AABBCCDDEE03", d3OnlineStatus],
+      ]),
+    );
+    const service = await buildService(prisma, {
+      getStatusBatch: mockGetStatusBatch,
+    });
 
     const result = await service.getOverview({ date: DATE });
 
@@ -146,7 +212,8 @@ describe("OverviewService.getOverview", () => {
     expect(result.today.dauDeltaPct).toBe(0);
     // 一期占位
     expect(result.today.devicesPoweredOn).toBeNull();
-    expect(result.today.onlineNow).toBeNull();
+    // d1 (AABBCCDDEE01) 和 d3 (AABBCCDDEE03) 在线，d2 离线
+    expect(result.today.onlineNow).toBe(2);
     // d1 激活于前一天且当天有消息 → D1=1
     expect(result.retention.d1).toBe(1);
     expect(result.retention.d7).toBeNull();
@@ -178,6 +245,30 @@ describe("OverviewService.getOverview", () => {
     await expect(service.getOverview({ date: "2026-13-40" })).rejects.toThrow(
       BadRequestException,
     );
+  });
+
+  it("getStatusBatch 抛错时 onlineNow 为 null 且方法不抛", async () => {
+    const prisma = buildPrisma({
+      devices: [
+        {
+          id: "d1",
+          deviceId: "aa:bb:cc:dd:ee:01",
+          macAddress: "aa:bb:cc:dd:ee:01",
+          createdAt: spokeAtOn("2026-11-01"),
+          characterKey: "elly",
+        },
+      ],
+      users: [],
+      bindings: [],
+      messages: [],
+    });
+    const service = await buildService(prisma, {
+      getStatusBatch: jest.fn().mockRejectedValue(new Error("Redis down")),
+    });
+
+    const result = await service.getOverview({ date: DATE });
+
+    expect(result.today.onlineNow).toBeNull();
   });
 });
 

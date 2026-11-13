@@ -154,4 +154,27 @@ export class RedisService implements OnModuleDestroy {
       }
     }
   }
+
+  /**
+   * MGET 批量读取，返回值与入参顺序一一对应，miss 的位置为 null。
+   * 空数组直接短路返回 []，不碰 Redis。
+   * Redis 未配置时走内存兜底，逐 key 查（保持与 getValue 一致的过期语义）。
+   */
+  async mGetValue(keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
+
+    if (this.client) {
+      return this.client.mget(keys);
+    }
+
+    return keys.map((key) => {
+      const item = this.memoryCache.get(key);
+      if (!item) return null;
+      if (Date.now() > item.expiresAt) {
+        this.memoryCache.delete(key);
+        return null;
+      }
+      return item.value;
+    });
+  }
 }
