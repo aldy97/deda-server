@@ -214,8 +214,7 @@ model ChildProfile {
 model DeviceConfig {
   id                   String   @id @default(uuid())
   deviceId             String
-  mode                 String   // 顶层模式：free_chat / english_chat
-  conversationModeKey  String?  // 自由对话子模式业务 key（如 free_chat_casual）
+  mode                 String   // 设备对话模式：free_chat / english_chat
   cefrLevel            String?  // CEFR 难度等级
   language             String?  // 语言：zh/en/bilingual
   speechRate           String?  // 语速：slow/normal/fast
@@ -238,8 +237,7 @@ model Message {
   content       String
   status        String   @default("completed") // assistant: completed / failed
   conversationId String? // 厂商侧对话唯一 ID（如有）
-  mode                String?  // 当前配置顶层模式快照
-  conversationModeKey String?  // 当前配置自由对话子模式快照
+  mode                String?  // 当前配置 mode 快照
   cefrLevel           String?  // 当前配置 CEFR
   rawPayload      Json?    // Webhook 原始 payload
   spokeAt         DateTime // 消息发生时间
@@ -272,42 +270,6 @@ model LearningStat {
   @@unique([deviceId, statDate])
   @@index([deviceId, statDate])
   @@map("learning_stats")
-}
-
-// 对话模式顶层分类
-model ConversationModeCategory {
-  id          String   @id @default(uuid())
-  key         String   @unique // 业务键：free_chat / english_chat
-  name        String   // 展示名
-  description String?  // 描述
-  sortOrder   Int      @default(0) // 排序
-  isActive    Boolean  @default(true) // 是否启用
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  modes ConversationMode[]
-
-  @@map("conversation_mode_categories")
-}
-
-// 对话模式细粒度子模式
-model ConversationMode {
-  id             String  @id @default(uuid())
-  categoryId     String
-  key            String  // 业务键，如 free_chat_casual
-  name           String  // 展示名
-  description    String? // 描述
-  sortOrder      Int     @default(0) // 排序
-  isActive       Boolean @default(true) // 是否启用
-  configSchema   Json?   // 前端配置 schema（可选）
-  promptTemplate String? // 提示词模板（可选）
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  category ConversationModeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-
-  @@unique([categoryId, key])
-  @@map("conversation_modes")
 }
 
 // Webhook 接收日志

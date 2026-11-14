@@ -134,25 +134,7 @@ export class VendorService {
   }
 
   /**
-   * 自由对话按 conversationModeKey 读取子模式 prompt 模板。
-   */
-  private async resolvePromptTemplate(
-    mode: string | null | undefined,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
-    }
-
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
-  }
-
-  /**
-   * 获取同一设备、同一顶层模式的最近消息历史。
+   * 获取同一设备、同一 mode 的最近消息历史。
    *
    * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
    * 边界结构化存 rawPayload { filler, answer }。
@@ -299,17 +281,20 @@ export class VendorService {
     }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
-    // 只有英语/成语/哄睡故事意图才戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置
-    // 戳 free_chat/english_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const mode =
-      storyIntent === "english_story" ||
-      storyIntent === "idiom_story" ||
-      storyIntent === "sleep_story"
-        ? storyIntent
-        : activeConfig?.mode === "english_chat"
-          ? "english_chat"
-          : "free_chat";
+      storyIntent === "adventure_story"
+        ? "free_story"
+        : storyIntent === "english_story" ||
+            storyIntent === "idiom_story" ||
+            storyIntent === "sleep_story" ||
+            storyIntent === "free_story"
+          ? storyIntent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
     if (storyIntent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, dto.asrText);
@@ -332,7 +317,6 @@ export class VendorService {
         content: dto.asrText,
         status: "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         rawPayload: dto as any,
         spokeAt: sourceOccurredAt,
       },
@@ -361,10 +345,7 @@ export class VendorService {
     const childProfile = await this.getChildProfile(device.id);
     const promptTemplate = storyMode
       ? this.storyPrompt(storyIntent)
-      : await this.resolvePromptTemplate(
-          mode,
-          activeConfig?.conversationModeKey,
-        );
+      : undefined;
 
     const promptOptions = {
       childProfile: childProfile
@@ -376,7 +357,6 @@ export class VendorService {
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
     // free_chat 全量注入 5 槽位记忆（含软冷却：传入近 5 条 assistant 原文）；
@@ -495,7 +475,6 @@ export class VendorService {
         content: reply.responseText,
         status: llmFailed ? "failed" : "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         // 边界标注（方案 3）：content 保持播报全文纯净，
         // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
         rawPayload: { filler, answer },
@@ -575,7 +554,6 @@ export class VendorService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { asrText },
         spokeAt: new Date(),
       },
@@ -588,7 +566,6 @@ export class VendorService {
         content: text,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: text,
@@ -668,7 +645,6 @@ export class VendorService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { asrText },
         spokeAt: new Date(),
       },
@@ -681,7 +657,6 @@ export class VendorService {
         content: text,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: text,
@@ -730,7 +705,6 @@ export class VendorService {
           content: asrText,
           status: "completed",
           mode: "adventure_story",
-          conversationModeKey: null,
           rawPayload: { asrText },
           spokeAt: new Date(),
         },
@@ -785,7 +759,6 @@ export class VendorService {
         content: responseText,
         status: "completed",
         mode: "adventure_story",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: responseText,

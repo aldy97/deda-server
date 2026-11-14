@@ -669,7 +669,6 @@ export class LlmService {
       };
       promptTemplate?: string;
       mode?: string;
-      conversationModeKey?: string;
       characterKey?: string;
     },
   ): LlmMessage[] {

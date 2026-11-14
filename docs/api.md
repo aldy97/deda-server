@@ -57,14 +57,12 @@
 {
   "deviceId": "dev-local-001",
   "mode": "free_chat",
-  "conversationModeKey": "free_chat_casual",
-  "conversationModeName": "自由闲聊",
   "language": "bilingual",
   "speechRate": "normal"
 }
 ```
 
-无历史配置时默认 `free_chat + free_chat_casual`。
+无历史配置时默认 `free_chat`。
 
 ---
 
@@ -75,7 +73,7 @@
 自由对话请求示例：
 
 ```json
-{ "mode": "free_chat", "conversationModeKey": "free_chat_casual" }
+{ "mode": "free_chat" }
 ```
 
 英语对话请求示例：
@@ -88,42 +86,19 @@
 
 校验规则（详见 `docs/integration.md`「设备配置入参校验」）：
 
-- `400`：mode 非法、`free_chat` 缺少或误传子模式、`english_chat` 携带子模式，或子模式不存在／未启用／分类不匹配。
+- `400`：mode 非法或不在 `DEVICE_MODES` 允许范围内。
 
 ---
 
-## 5. 选择自由对话子模式
-
-先取子模式：
-
-- `GET /conversation-modes?categoryKey=free_chat` → `ConversationMode[]`
-
-示例：
-
-```json
-[
-  {
-    "id": "...",
-    "key": "free_chat_casual",
-    "name": "自由闲聊",
-    "description": "..."
-  }
-]
-```
-
-再保存：同链路 4，`POST /device-configs/:deviceId/mode` 带 `conversationModeKey`。
-
----
-
-## 6. 切换英语对话
+## 5. 切换英语对话
 
 `POST /device-configs/:deviceId/mode`，请求 `{ "mode": "english_chat" }`。
 
-英语对话是唯一英语学习顶层模式，没有对话子模式，也不需要其他内容配置。
+英语对话是设备配置里唯一的英语学习 mode；mode 已平级化，不再有子模式，也不需要其他内容配置。
 
 ---
 
-## 7. 查询对话记录
+## 6. 查询对话记录
 
 `GET /conversations?page=1&pageSize=20&deviceId=dev-local-001`
 
@@ -157,7 +132,7 @@
 
 ---
 
-## 8. 孩子档案查询/更新
+## 7. 孩子档案查询/更新
 
 - `GET /child-profiles/device/:deviceId`
 - `PATCH /child-profiles/device/:deviceId`
@@ -176,17 +151,17 @@
 
 ---
 
-## 9. 学习全览 MVP
+## 8. 学习全览 MVP
 
 均需要 `Authorization: ******
 
-### 9.1 仪表盘
+### 8.1 仪表盘
 
 `GET /learning-stats/dashboard?deviceId=&range=`（deviceId、range 均可选）
 
 - `range` 缺省：全量累计（兼容旧调用方）。
 - `range=today|week|month`：`totalDurationMinutes`/`topicCount` 按时间窗统计，并额外返回 `practiceCount`（范围内对话轮数）；`continuousDays` 与 `devices` 保持全量语义。
-- 语境参数 `mode`/`conversationModeKey`（可选）：显式指定统计语境（只读查看，不影响设备配置）；缺省按设备当前顶层模式过滤，自由对话可精确到子模式。
+- 语境参数 `mode`（可选）：显式指定统计语境（只读查看，不影响设备配置）；缺省按设备当前模式过滤。
 - 时间窗为**自然历**：today=当天；week=本周一 00:00 至今；month=本月 1 号 00:00 至今。
 
 响应示例：
@@ -217,9 +192,9 @@
 }
 ```
 
-### 9.2 学习趋势
+### 8.2 学习趋势
 
-`GET /learning-stats/daily?deviceId=&days=7&mode=&conversationModeKey=`
+`GET /learning-stats/daily?deviceId=&days=7&mode=`
 
 说明：语境参数可选，语义同 9.1；天数由前端按自然历计算（今日=1、本周一至今、本月 1 号至今）。家长报告趋势使用 `scope=all`，统计全部模式。
 
@@ -232,21 +207,19 @@
 ]
 ```
 
-### 9.3 主题分布
+### 8.3 主题分布
 
 `GET /learning-stats/topics?deviceId=`
 
-说明：返回**全部**学过的语境（不按当前 active config 过滤），按 `mode + conversationModeKey` 分组；`isActive` 标记当前语境，free_chat 精确到子模式。`avgScore` 为启发式英文开口分（0-100），自由对话为 null。
+说明：返回**全部**学过的语境（不按当前 active config 过滤），按 `mode` 分组；`isActive` 标记当前模式。`avgScore` 为启发式英文开口分（0-100），自由对话为 null。
 
 响应示例：
 
 ```json
 [
   {
-    "id": "free_chat|free_chat_casual",
+    "id": "free_chat",
     "mode": "free_chat",
-    "conversationModeKey": "free_chat_casual",
-    "conversationModeName": "自由闲聊",
     "count": 3,
     "lastSpokeAt": "2026-09-25T02:15:32.353Z",
     "isActive": true,
@@ -255,7 +228,7 @@
 ]
 ```
 
-### 9.4 学习动态时间线
+### 8.4 学习动态时间线
 
 `GET /learning-stats/timeline?deviceId=&page=1&pageSize=10`
 
@@ -281,15 +254,15 @@
 }
 ```
 
-### 9.5 学习动态（事件卡）
+### 8.5 学习动态（事件卡）
 
 `GET /learning-stats/activities?deviceId=&page=1&pageSize=10&range=`
 
-`range` 可选（today/week/month，自然历口径同 9.1）；语境参数可选，缺省按当前顶层模式过滤。streak 在所选语境的完整历史上计算，再按 range 过滤展示日期。
+`range` 可选（today/week/month，自然历口径同 9.1）；语境参数可选，缺省按设备当前 mode 过滤。streak 在所选语境的完整历史上计算，再按 range 过滤展示日期。
 
 按日倒序分页（`total` = 活跃日数）。事件类型：
 
-- `study`：某日某顶层模式的练习卡，`turnCount` = 当日轮数
+- `study`：某日某 mode 的练习卡，`turnCount` = 当日轮数
 - `streak`：连续学习 ≥2 天，卡在连续段最后一天，含 `streakDays`
 
 ```json

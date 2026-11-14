@@ -51,10 +51,6 @@ export class MessagesQueryDto {
 
   @IsOptional()
   @IsString()
-  conversationModeKey?: string;
-
-  @IsOptional()
-  @IsString()
   turnId?: string;
 
   @IsOptional()

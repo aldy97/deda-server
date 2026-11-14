@@ -89,7 +89,7 @@ GET /analytics/engagement/hourly-heatmap?startDate=&endDate=
 → { grid: [[7 行（周一=0）× 24 列活跃设备数]], maxValue }
 
 GET /analytics/engagement/mode-usage?startDate=&endDate=
-→ { series: [{ date, modes: [{ mode, conversationModeKey, turns, devices }] }] }
+→ { series: [{ date, modes: [{ mode, turns, devices }] }] }
    // 口径与小程序 learning-stats/mode-usage 一致（role=user 按 mode 聚合）
 
 GET /analytics/engagement/feature-adoption?date=
@@ -402,11 +402,11 @@ GET /analytics/decisions/review-queue?startDate=&endDate=&category=&deviceId=&pa
 
 ```
 GET /analytics/messages
-  ?startDate=&endDate=&deviceId=&role=&status=&mode=&conversationModeKey=
+  ?startDate=&endDate=&deviceId=&role=&status=&mode=
   &turnId=&conversationId=&keyword=&sort=spokeAt_desc&page=1&pageSize=20
 → { total, page, pageSize,
     items: [{ id, turnId, conversationId, role, content, status, mode,
-              conversationModeKey, cefrLevel, spokeAt, createdAt,
+              cefrLevel, spokeAt, createdAt,
               device: { deviceId, deviceCode, characterKey } }] }
    // 列表不含 rawPayload；deviceId 为业务设备 ID（内部 resolve 成 UUID）；
    // spokeAt 区间闭区间、Asia/Shanghai 当日边界；keyword 大小写不敏感 ≤50 字；
@@ -414,11 +414,10 @@ GET /analytics/messages
    // status 枚举：completed / failed / interrupted（interrupted=被打断，推断口径见下）
 
 GET /analytics/messages/modes?startDate=&endDate=
-→ { categories: [{ key, name, messageCount,
-                   modes: [{ key, name, messageCount }] }] }
-   // 对话模式选项源（供过滤下拉）：配置表 conversation_mode_categories/conversation_modes
-   // 全量启用项（sortOrder 升序）+ 区间内消息数（spokeAt 口径，仅参考，0 也返回）；
-   // 分类 messageCount 按顶层 mode 统计（含无子模式的消息），子模式按 conversationModeKey
+→ { modes: [{ key, name, messageCount }] }
+   // 对话模式选项源（供过滤下拉）：7 个可写入 mode 恒返回（区间内 0 条也返回，保证恒可选），
+   // 区间内实际出现过的 legacy mode（历史数据）追加返回；name 缺失时回落 key 原文；
+   // messageCount 为 spokeAt 口径，仅作参考；排序按 messageCount 降序、同数按 key 升序
 
 GET /analytics/messages/interruption-rate?startDate=&endDate=
 → { assistantTotal, interrupted, interruptionRate,

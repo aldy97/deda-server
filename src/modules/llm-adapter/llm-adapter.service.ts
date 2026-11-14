@@ -64,11 +64,12 @@ const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
 const MAC_PATTERN =
   /^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$/;
 
-/** 故事类意图 → 顶层模式快照（对齐老链路 handleTextIn 的 mode 决策） */
+/** 故事类意图 → 落库 mode 快照（对齐老链路 handleTextIn 的 mode 决策） */
 const STORY_INTENTS: ConversationIntent[] = [
   "english_story",
   "idiom_story",
   "sleep_story",
+  "free_story",
 ];
 
 /**
@@ -383,17 +384,20 @@ export class LlmAdapterService {
       }
     }
 
-    // mode 决策对齐老链路：故事类意图戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置戳
-    // english_chat/free_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const activeConfig = device
       ? await this.resolveActiveConfig(device.id)
       : null;
-    const mode = STORY_INTENTS.includes(intent)
-      ? intent
-      : activeConfig?.mode === "english_chat"
-        ? "english_chat"
-        : "free_chat";
+    const mode =
+      intent === "adventure_story"
+        ? "free_story"
+        : STORY_INTENTS.includes(intent)
+          ? intent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
     // 故事类回合判定（含被门禁拦截后走自由创作的 adventure/free_story）：
     // 主模型 maxTokens 分档与 filler 情境共用
@@ -434,7 +438,6 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: { channel: "baidu-rtc" },
           spokeAt: sourceOccurredAt,
         },
@@ -529,10 +532,7 @@ export class LlmAdapterService {
       ? this.storyPrompt(intent, favoriteStoryType)
       : intent === "adventure_story" || intent === "free_story"
         ? this.storyPrompt(intent, favoriteStoryType)
-        : await this.resolvePromptTemplate(
-            mode,
-            activeConfig?.conversationModeKey,
-          );
+        : undefined;
 
     const built = this.llmService.buildEnglishTutorPrompt(asrText, history, {
       childProfile: childProfile
@@ -545,7 +545,6 @@ export class LlmAdapterService {
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
       characterKey: device?.characterKey,
     });
     const messages: LlmMessage[] = [
@@ -638,7 +637,6 @@ export class LlmAdapterService {
           content: responseText,
           status: llmFailed ? "failed" : "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           // 边界标注同老链路：content 保持播报全文纯净，
           // filler/answer 边界结构化存 rawPayload；哄睡内容降级证据同处留痕
           rawPayload: {
@@ -715,7 +713,6 @@ export class LlmAdapterService {
         content: asrText,
         status: "completed",
         mode: "adventure_story",
-        conversationModeKey: null,
         rawPayload: { channel: "baidu-rtc" },
         spokeAt: new Date(),
       },
@@ -733,7 +730,6 @@ export class LlmAdapterService {
         content: responseText,
         status: "completed",
         mode: "adventure_story",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: responseText,
@@ -925,21 +921,6 @@ export class LlmAdapterService {
       );
       return null;
     }
-  }
-
-  /** 自由对话按 conversationModeKey 读取子模式 prompt 模板 */
-  private async resolvePromptTemplate(
-    mode: string,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
-    }
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
   }
 
   /**
@@ -1291,7 +1272,6 @@ export class LlmAdapterService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { channel: "baidu-rtc" },
         spokeAt: new Date(),
       },
@@ -1304,7 +1284,6 @@ export class LlmAdapterService {
         content: replyText,
         status,
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: assistantPayload,
         spokeAt: new Date(),
       },

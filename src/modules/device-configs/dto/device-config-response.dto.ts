@@ -10,9 +10,6 @@ export class DeviceConfigResponseDto {
   })
   mode: string;
 
-  @ApiPropertyOptional({ description: "自由对话子模式 key" })
-  conversationModeKey?: string | null;
-
   @ApiPropertyOptional({ description: "CEFR 等级" })
   cefrLevel?: string | null;
 

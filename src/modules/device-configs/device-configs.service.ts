@@ -37,7 +37,6 @@ export class DeviceConfigsService {
     return {
       deviceId,
       mode: "free_chat",
-      conversationModeKey: "free_chat_casual",
       cefrLevel: null,
       language: "bilingual",
       speechRate: "normal",
@@ -58,7 +57,6 @@ export class DeviceConfigsService {
 
     const newConfig = await this.createActiveConfig(deviceInternalId, {
       mode: dto.mode,
-      conversationModeKey: dto.conversationModeKey || null,
       cefrLevel: dto.cefrLevel || null,
       language: dto.language || "bilingual",
       speechRate: dto.speechRate || "normal",
@@ -81,7 +79,6 @@ export class DeviceConfigsService {
 
     const newConfig = await this.createActiveConfig(deviceInternalId, {
       mode: dto.mode,
-      conversationModeKey: dto.conversationModeKey || null,
       cefrLevel: null,
       language: dto.language || "bilingual",
       speechRate: dto.speechRate || "normal",
@@ -90,43 +87,12 @@ export class DeviceConfigsService {
     return await this.mapToResponseDto(newConfig, deviceId);
   }
 
-  /** free_chat 保留子模式；english_chat 不接受子模式。 */
-  private async validateModePayload(dto: {
-    mode: string;
-    conversationModeKey?: string;
-  }): Promise<void> {
-    const { mode, conversationModeKey } = dto;
+  /** 校验 mode 是否为合法 DEVICE_MODES 值。 */
+  private validateModePayload(dto: { mode: string }): void {
+    const { mode } = dto;
 
     if (!DEVICE_MODES.includes(mode as DeviceMode)) {
       throw new BadRequestException(`Invalid mode: ${mode}`);
-    }
-    if (mode === "free_chat" && !conversationModeKey) {
-      throw new BadRequestException(
-        "free_chat mode requires conversationModeKey",
-      );
-    }
-    if (mode === "english_chat" && conversationModeKey) {
-      throw new BadRequestException(
-        "english_chat mode does not accept conversationModeKey",
-      );
-    }
-
-    if (conversationModeKey) {
-      const conversationMode = await this.prisma.conversationMode.findFirst({
-        where: { key: conversationModeKey, isActive: true },
-        include: { category: true },
-      });
-
-      if (!conversationMode) {
-        throw new BadRequestException(
-          `Unknown or inactive conversationModeKey: ${conversationModeKey}`,
-        );
-      }
-      if (conversationMode.category.key !== "free_chat") {
-        throw new BadRequestException(
-          `conversationModeKey ${conversationModeKey} does not belong to category free_chat`,
-        );
-      }
     }
   }
 
@@ -160,7 +126,6 @@ export class DeviceConfigsService {
     deviceInternalId: string,
     data: {
       mode: string;
-      conversationModeKey: string | null;
       cefrLevel: string | null;
       language: string;
       speechRate: string;
@@ -189,7 +154,6 @@ export class DeviceConfigsService {
     return {
       deviceId: businessDeviceId,
       mode: config.mode,
-      conversationModeKey: config.conversationModeKey,
       cefrLevel: config.cefrLevel,
       language: config.language,
       speechRate: config.speechRate,

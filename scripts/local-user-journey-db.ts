@@ -54,7 +54,7 @@ async function prepare() {
   if (device.characterKey !== "elly") {
     throw new Error(`Expected elly device, got ${device.characterKey}`);
   }
-  // 旅程断言基于 free_chat 顶层模式快照；历史手动测试可能把设备留在
+  // 旅程断言基于 free_chat mode 快照；历史手动测试可能把设备留在
   // english_chat，这里重置为自由对话默认配置，保证结果可复现。
   await prisma.deviceConfig.updateMany({
     where: { deviceId: device.id, isActive: true },
@@ -64,7 +64,6 @@ async function prepare() {
     data: {
       deviceId: device.id,
       mode: "free_chat",
-      conversationModeKey: "free_chat_casual",
       language: "bilingual",
       speechRate: "normal",
       isActive: true,

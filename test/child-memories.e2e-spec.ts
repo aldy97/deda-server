@@ -67,13 +67,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
       deviceConfig: {
         findFirst: jest.fn().mockResolvedValue({
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       },
       childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
-      conversationMode: {
-        findFirst: jest.fn().mockResolvedValue({ promptTemplate: null }),
-      },
       message: {
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(({ data }) => Promise.resolve(data)),
