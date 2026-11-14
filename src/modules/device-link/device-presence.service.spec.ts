@@ -112,6 +112,18 @@ describe("DevicePresenceService", () => {
   describe("flush", () => {
     const uuid = knownUuid;
 
+    // flush() 用「真实当前日期」算 staleThreshold = today - 1，并回收更早的 bucket，
+    // 而本组用例的时间戳固定在 2026-11-12 / 11-13。这里把系统时间钉在同一时刻，
+    // 否则真实日期一旦跨过 2026-11-14，bucket 会被当成过期回收，整组用例集体变红。
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date("2026-11-13T10:00:00Z"));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     function seenAt(hours: number, minutes = 0, seconds = 0): Date {
       const d = new Date("2026-11-12T00:00:00Z");
       d.setHours(hours, minutes, seconds, 0);
