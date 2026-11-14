@@ -34,18 +34,6 @@ describe("Vendor WebSocket (e2e)", () => {
       findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue(undefined),
     },
-    conversationModeCategory: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-      createMany: jest.fn().mockResolvedValue({ count: 0 }),
-    },
-    conversationMode: {
-      upsert: jest.fn().mockResolvedValue({}),
-      createMany: jest.fn().mockResolvedValue({ count: 0 }),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
     adventureEpisode: {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),

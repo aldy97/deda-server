@@ -46,12 +46,11 @@
 | 微信登录换 JWT     | `POST /users/login`                                                                                                              | `pages/login/login.ts`                                                                                 | `src/modules/users/users.controller.ts`                                                                                        | code 来自 `wx.login`                |
 | 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序 |
 | 查询设备当前配置   | `GET /device-configs/:deviceId/current`                                                                                          | `pages/device-list/device-list.ts` 等                                                                  | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 多页面共用                          |
-| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | `pages/switch-mode/switch-mode.ts`                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 顶层模式仅 `free_chat / english_chat` |
-| 选择自由对话子模式 | `GET /conversation-modes?categoryKey=free_chat`<br>`POST /device-configs/:deviceId/mode`                                         | `pages/choose-free-chat-mode/choose-free-chat-mode.ts`                                                 | `src/modules/conversation-modes/conversation-modes.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts` | 子页提交完整载荷（mode+conversationModeKey）；`english_chat` 无子模式 |
+| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | （小程序入口已下线）                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 设备 mode 仅 `free_chat / english_chat` |
 | 查询对话记录       | `GET /conversations?page&pageSize&deviceId`                                                                                      | `pages/chat-history/chat-history.ts`                                                                   | `src/modules/conversations/conversations.controller.ts`                                                                        | 一条 item=一条消息（turnId 关联成轮）；page=1 为最新一页，页内时间正序（顶老底新），前端勿再自行反转；删除接口已移除；URL 无语境参数时前端按设备当前配置推导过滤（后端只认显式传参、不读配置） |
 | 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案；`gender` 可选值为 `male/female`，`null` 表示未设置或清除，PATCH 省略时保留原值 |
 | 学习全览 MVP       | `GET /learning-stats/dashboard`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/topics`<br>`GET /learning-stats/timeline` | `pages/learning-data/learning-data.ts`                                                                 | `src/modules/learning-stats/learning-stats.controller.ts`<br>`src/modules/learning-stats/learning-stats.service.ts`            | 仪表盘/趋势/主题/时间线             |
-| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前顶层模式过滤；自由对话可继续按子模式过滤；topics 按 `mode + conversationModeKey` 全量分组 |
+| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前模式过滤；topics 按 `mode` 全量分组 |
 | 设备状态/控制      | `GET /devices/:id/status`<br>`POST /devices/:id/control`                                               | 设备详情/控制页                                                                                         | `src/modules/devices/devices.controller.ts`<br>`src/modules/device-link/device-link.service.ts`                                  | 2026-11 起接机芯厂新 MQTT 协议（`docs/vendor-mqtt-protocol.md`）：status 为真实值（`online/offline`，`battery/volume/isCharging` 可 `null`，前端需容错）；`volume` 为设备真实音量，`control` 下发后回读 status 即可确认生效；control 仅 `volume` 真实下发，其余动作协议待补 |
 
 ## 设备配网与认领链路（BLE + client-api，2026-11 起）
@@ -85,19 +84,12 @@
 
 ## 设备配置入参校验
 
-`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` / `conversationModeKey` 做服务端强校验：
+`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` 做服务端强校验：
 
-| mode | conversationModeKey |
-| ---- | ------------------- |
-| `free_chat` | **必填**，须为启用中的 free_chat 分类子模式 |
-| `english_chat` | **禁止**，必须省略或为 `null` |
+- `400`：mode 不在 `DEVICE_MODES` 枚举内。
+- 无配置设备默认 `free_chat`。
 
-错误语义：
-
-- `400`：mode 不在枚举内、违反上表必填/禁止规则、`conversationModeKey` 不存在/未启用/分类与 mode 不匹配。
-- 无配置设备默认 `free_chat + free_chat_casual`。
-
-前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts` 需按上表提交；英语对话直接提交 `mode=english_chat`，不再进入子模式或教材选择页。
+前端对齐：提交 `mode` 字段即可（`free_chat` / `english_chat`）；mode 已平级化，不再有子模式概念，小程序侧原切换页（switch-mode / choose-free-chat-mode）已下线。
 
 ## 百度 RTC 直连主链路（当前主链路，2026-11 起）
 
@@ -246,7 +238,7 @@
 - 机制：全部系统 prompt / 规则段 / 话术模板集中在 prompt registry（17 个 key），运行时按「DB published → 代码默认值 → 抛错」回落；首次上线行为零变化。详见 `docs/prompt-registry.md`。
 - dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）与写策略；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
 - 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
-- 边界：子模式模板仍归 `conversation_modes.promptTemplate`（本次不迁移）；儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
+- 边界：原「子模式模板」归 `conversation_modes.promptTemplate`；该表已随 mode 平级化迁移 `20261113141812_remove_conversation_mode_key` 删除，子模式模板概念一并废弃，可运营编辑的 prompt 文本现在只有 prompt registry 一个入口。儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
 
 ## 联调顺序
 
@@ -264,7 +256,7 @@
 ## 常见坑
 
 - **CORS**：后端 `CORS_ORIGIN=*` 仅用于开发；生产需改为小程序域名。
-- **字段命名**：后端用 camelCase（如 `deviceId`、`conversationModeKey`），数据库存储也是 camelCase。
+- **字段命名**：后端用 camelCase（如 `deviceId`、`mode`），数据库存储也是 camelCase。
 - **时间格式**：后端返回 ISO 8601 字符串（如 `2026-09-25T09:11:00.657Z`）。
 - **401/403**：token 过期或设备不属于当前用户；前端应重新登录或提示无权限。
 - **代理配置**：小程序开发版直连 `127.0.0.1:3000`；真机需 HTTPS 域名或开启「不校验合法域名」。
@@ -272,7 +264,7 @@
 
 ## 单次联调最小文件集示例
 
-以「切换自由对话子模式」为例：
+以「查看设备当前对话模式」为例：
 
-- 后端：`src/modules/device-configs/device-configs.controller.ts`、`src/modules/device-configs/device-configs.service.ts`、`src/modules/conversation-modes/conversation-modes.controller.ts`。
-- 前端：`deda-wechat-app/miniprogram/pages/choose-free-chat-mode/choose-free-chat-mode.ts`、`deda-wechat-app/miniprogram/api/api.ts`。
+- 后端：`src/modules/device-configs/device-configs.controller.ts`、`src/modules/device-configs/device-configs.service.ts`。
+- 前端：`deda-wechat-app/miniprogram/api/api.ts`、`deda-wechat-app/miniprogram/pages/device-control/device-control.ts`。

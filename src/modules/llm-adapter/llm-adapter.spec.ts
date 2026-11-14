@@ -47,7 +47,6 @@ describe("LlmAdapterModule", () => {
     };
     deviceConfig: { findFirst: jest.Mock };
     childProfile: { findUnique: jest.Mock };
-    conversationMode: { findFirst: jest.Mock };
   };
   let memories: {
     buildPromptBlock: jest.Mock;
@@ -125,7 +124,6 @@ describe("LlmAdapterModule", () => {
       },
       deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
       childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
-      conversationMode: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     memories = {
       buildPromptBlock: jest
@@ -443,7 +441,7 @@ describe("LlmAdapterModule", () => {
       expect(assistantCall.data.mode).toBe("free_chat");
     });
 
-    it("routes free_story to free_chat mode with a no-adventure-promise prompt", async () => {
+    it("routes free_story to free_story mode with a no-adventure-promise prompt", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolveWithSource.mockResolvedValue({
         intent: "free_story",
@@ -452,21 +450,13 @@ describe("LlmAdapterModule", () => {
       llm.completeStream.mockReturnValue(makeStream(["故事来了"])());
       await collect(service.streamReply(boundRequest));
       const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.mode).toBe("free_chat");
-      expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
-        "讲一个英语故事",
-        expect.any(Array),
-        expect.objectContaining({
-          promptTemplate: expect.stringContaining("不要承诺开始"),
-        }),
-      );
+      expect(assistantCall.data.mode).toBe("free_story");
     });
 
     it("uses deviceConfig english_chat when intent is free_chat", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "english_chat",
-        conversationModeKey: null,
       });
       session.resolveWithSource.mockResolvedValue({
         intent: "free_chat",
@@ -483,14 +473,10 @@ describe("LlmAdapterModule", () => {
       expect(assistantCall.data.mode).toBe("english_chat");
     });
 
-    it("applies the conversationMode prompt template for free_chat submodes", async () => {
+    it("uses no prompt template for free_chat intent", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
-      });
-      prisma.conversationMode.findFirst.mockResolvedValue({
-        promptTemplate: "SUBMODE-TPL",
       });
       session.resolveWithSource.mockResolvedValue({
         intent: "free_chat",
@@ -502,11 +488,9 @@ describe("LlmAdapterModule", () => {
         "讲一个英语故事",
         expect.any(Array),
         expect.objectContaining({
-          promptTemplate: "SUBMODE-TPL",
+          promptTemplate: undefined,
         }),
       );
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.conversationModeKey).toBe("free_chat_casual");
     });
 
     it("degrades to free_chat when intent resolution throws", async () => {
@@ -621,6 +605,10 @@ describe("LlmAdapterModule", () => {
           promptTemplate: expect.stringContaining("不要承诺开始"),
         }),
       );
+      // 门禁后落 free_story 模式
+      expect(prisma.message.create.mock.calls[0][0].data.mode).toBe(
+        "free_story",
+      );
     });
 
     it("falls back to free-story prompt when no episode is available", async () => {
@@ -639,6 +627,41 @@ describe("LlmAdapterModule", () => {
         expect.objectContaining({
           promptTemplate: expect.stringContaining("不要承诺开始"),
         }),
+      );
+      // 无集可播时落 free_story 模式
+      expect(prisma.message.create.mock.calls[0][0].data.mode).toBe(
+        "free_story",
+      );
+    });
+
+    it("persists free_story intent messages with mode free_story", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["好的，给你讲个故事"])());
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["好的，给你讲个故事"]);
+      expect(prisma.message.create.mock.calls[0][0].data.mode).toBe(
+        "free_story",
+      );
+    });
+
+    it("persists free_chat intent as english_chat when device config is english_chat", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      prisma.deviceConfig.findFirst.mockResolvedValue({ mode: "english_chat" });
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(
+        makeStream(["The weather is nice."])(),
+      );
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["The weather is nice."]);
+      expect(prisma.message.create.mock.calls[0][0].data.mode).toBe(
+        "english_chat",
       );
     });
 

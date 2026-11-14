@@ -149,18 +149,24 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 判据：**这段文本一旦写错会不会直接造成儿童安全风险或身份漂移**。
 会 → 硬编码；不会 → 可以进注册表。
 
-## 与 `ConversationMode.promptTemplate` 的边界
+## 与已废弃的 `ConversationMode.promptTemplate` 的边界
 
-本次**不迁移** `conversation_modes.promptTemplate`（子模式模板），只划边界：
+`conversation_modes` / `conversation_mode_categories` 两张表已随 mode 平级化迁移
+`20261113141812_remove_conversation_mode_key` 删除，「自由对话子模式」概念一并废弃：
+`messages.conversationModeKey` 与 `device_configs.conversationModeKey` 两列同时删除，
+原 3 行子模式 `promptTemplate` **未迁移**（本地库实测均为 NULL；生产/staging 库取值未核验，
+删表前建议先 `pg_dump -t conversation_modes` 备份），`free_chat` 回合回归 prompt registry
+的默认主链路模板。
+
+下面这条历史边界保留作为记录，右列已不成立：
 
 | | 归属 | 编辑入口 | 语义 |
 | --- | --- | --- | --- |
 | 系统 prompt / 规则段 / 话术模板 / 人设 | prompt registry | `/analytics/prompts` | 全局生效，改一次影响所有设备 |
-| 子模式（对话模式）模板 | `conversation_modes` 表 | 既有 conversation-modes 接口 | 按模式生效，是**业务配置**不是 prompt 工程 |
+| ~~子模式（对话模式）模板~~ | ~~`conversation_modes` 表~~ | 接口与表均已删除 | 概念已废弃 |
 
-两者都会在运行时拼进最终发给模型的文本，但生命周期与责任人不同：
-前者由 prompt 工程/安全把关，后者由运营按模式配置。
-后续若要合并，前提是先给 conversation-modes 补上同等的版本与审计能力。
+结论：可运营编辑的 prompt 文本现在只有 prompt registry 一个入口，不再存在第二个
+「按模式生效」的文本来源，也就不需要再划分两者的生命周期与责任人。
 
 ## 配置项
 

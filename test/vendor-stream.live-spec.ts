@@ -55,18 +55,6 @@ describe("Vendor streaming pipeline (live LLM)", () => {
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: "live-msg-001" }),
     },
-    conversationModeCategory: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-      createMany: jest.fn().mockResolvedValue({ count: 0 }),
-    },
-    conversationMode: {
-      upsert: jest.fn().mockResolvedValue({}),
-      createMany: jest.fn().mockResolvedValue({ count: 0 }),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
   };
 
   const sleep = (ms: number) =>

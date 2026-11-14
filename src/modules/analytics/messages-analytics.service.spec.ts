@@ -9,7 +9,6 @@ function buildPrisma(data: {
   devices?: Row[];
   messages?: Row[];
   message?: Row | null;
-  categories?: Row[];
   groups?: Row[];
   countImpl?: (where: any) => number;
 }) {
@@ -28,11 +27,6 @@ function buildPrisma(data: {
       findMany: jest.fn((_args?: any) => data.messages ?? []),
       findUnique: jest.fn((_args?: any) => data.message ?? null),
       groupBy: jest.fn((_args?: any) => Promise.resolve(data.groups ?? [])),
-    },
-    conversationModeCategory: {
-      findMany: jest.fn((_args?: any) =>
-        Promise.resolve(data.categories ?? []),
-      ),
     },
   };
 }
@@ -99,7 +93,7 @@ describe("MessagesAnalyticsService", () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  it("组合过滤：role/status/mode/conversationModeKey/turnId/conversationId/keyword", async () => {
+  it("组合过滤：role/status/mode/turnId/conversationId/keyword", async () => {
     const prisma = buildPrisma({ messages: [] });
     const service = await buildService(prisma);
 
@@ -107,7 +101,6 @@ describe("MessagesAnalyticsService", () => {
       role: "user",
       status: "completed",
       mode: "free_chat",
-      conversationModeKey: "daily_life",
       turnId: "turn-1",
       conversationId: "conv-1",
       keyword: "小兔子",
@@ -118,7 +111,6 @@ describe("MessagesAnalyticsService", () => {
       role: "user",
       status: "completed",
       mode: "free_chat",
-      conversationModeKey: "daily_life",
       turnId: "turn-1",
       conversationId: "conv-1",
       content: { contains: "小兔子", mode: "insensitive" },
@@ -148,7 +140,6 @@ describe("MessagesAnalyticsService", () => {
           content: "你好",
           status: "completed",
           mode: "free_chat",
-          conversationModeKey: "daily_life",
           cefrLevel: "A1",
           spokeAt: new Date("2026-11-07T12:34:56Z"),
           createdAt: new Date("2026-11-07T12:34:57Z"),
@@ -201,75 +192,39 @@ describe("MessagesAnalyticsService", () => {
   });
 
   describe("getModes", () => {
-    const categories = [
-      {
-        key: "free_chat",
-        name: "自由对话",
-        sortOrder: 1,
-        modes: [
-          { key: "free_chat_casual", name: "日常闲聊", sortOrder: 1 },
-          { key: "free_chat_curious", name: "好奇探索", sortOrder: 2 },
-        ],
-      },
-      {
-        key: "english_chat",
-        name: "英语角",
-        sortOrder: 2,
-        modes: [
-          { key: "english_chat_beginner", name: "启蒙对话", sortOrder: 1 },
-        ],
-      },
-    ];
-
-    it("返回配置表全量分类与子模式，并标注区间内消息数", async () => {
+    it("should return all 7 writable modes with key/name/messageCount shape", async () => {
       const prisma = buildPrisma({
-        categories,
         groups: [
-          {
-            mode: "free_chat",
-            conversationModeKey: "free_chat_casual",
-            _count: { _all: 10 },
-          },
-          {
-            mode: "free_chat",
-            conversationModeKey: "free_chat_curious",
-            _count: { _all: 3 },
-          },
-          {
-            mode: "english_chat",
-            conversationModeKey: null,
-            _count: { _all: 5 },
-          },
+          { mode: "free_chat", _count: { _all: 13 } },
+          { mode: "english_chat", _count: { _all: 5 } },
         ],
       });
       const service = await buildService(prisma);
 
       const result = await service.getModes({});
 
-      const freeChat = result.categories.find((c) => c.key === "free_chat");
-      // 分类计数 = 该顶层模式下全部消息（含无子模式的）
-      expect(freeChat?.messageCount).toBe(13);
-      expect(freeChat?.modes).toEqual([
-        { key: "free_chat_casual", name: "日常闲聊", messageCount: 10 },
-        { key: "free_chat_curious", name: "好奇探索", messageCount: 3 },
-      ]);
-      const english = result.categories.find((c) => c.key === "english_chat");
-      expect(english?.messageCount).toBe(5);
-      expect(english?.modes[0].messageCount).toBe(0);
-
-      // 只取启用项，按 sortOrder 排
-      const findArgs = prisma.conversationModeCategory.findMany.mock
-        .calls[0][0] as any;
-      expect(findArgs.where).toEqual({ isActive: true });
-      expect(findArgs.orderBy).toEqual({ sortOrder: "asc" });
-      expect(findArgs.include.modes).toEqual({
-        where: { isActive: true },
-        orderBy: { sortOrder: "asc" },
+      expect(result.modes).toHaveLength(7);
+      // 有数据的模式
+      expect(result.modes).toContainEqual({
+        key: "free_chat",
+        name: "自由对话",
+        messageCount: 13,
+      });
+      expect(result.modes).toContainEqual({
+        key: "english_chat",
+        name: "英语对话",
+        messageCount: 5,
+      });
+      // 无数据但仍返回
+      expect(result.modes).toContainEqual({
+        key: "adventure_story",
+        name: "每日冒险",
+        messageCount: 0,
       });
     });
 
     it("区间过滤按 spokeAt 传给 groupBy（Asia/Shanghai 边界）", async () => {
-      const prisma = buildPrisma({ categories: [], groups: [] });
+      const prisma = buildPrisma({ groups: [] });
       const service = await buildService(prisma);
 
       await service.getModes({
@@ -287,6 +242,66 @@ describe("MessagesAnalyticsService", () => {
       await expect(
         service.getModes({ startDate: "2026-11-08", endDate: "2026-11-01" }),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it("should sort by messageCount desc then key asc for ties", async () => {
+      const prisma = buildPrisma({
+        groups: [
+          { mode: "free_chat", _count: { _all: 5 } },
+          { mode: "idiom_story", _count: { _all: 10 } },
+          { mode: "english_story", _count: { _all: 5 } },
+          { mode: "sleep_story", _count: { _all: 10 } },
+        ],
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.getModes({});
+
+      const keys = result.modes.map((m) => m.key);
+      // 10 的在前，同 10 → key asc: idiom_story < sleep_story
+      // 5 的在后，同 5 → key asc: english_story < free_chat
+      // 0 的最后，key asc
+      expect(keys.indexOf("idiom_story")).toBeLessThan(
+        keys.indexOf("sleep_story"),
+      );
+      expect(keys.indexOf("idiom_story")).toBeLessThan(
+        keys.indexOf("free_chat"),
+      );
+      expect(keys.indexOf("english_story")).toBeLessThan(
+        keys.indexOf("free_chat"),
+      );
+    });
+
+    it("区间内出现过的 legacy mode 追加返回，name 不在表里就回落 key 原文", async () => {
+      const prisma = buildPrisma({
+        groups: [
+          { mode: "free_chat", _count: { _all: 3 } },
+          { mode: "daily_adventure", _count: { _all: 8 } },
+          { mode: "music", _count: { _all: 1 } },
+          { mode: null, _count: { _all: 99 } },
+        ],
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.getModes({});
+
+      // 7 个可写入 mode + daily_adventure + music = 9；mode 为 null 的分组不进结果
+      expect(result.modes).toHaveLength(9);
+      expect(result.modes).toContainEqual({
+        key: "daily_adventure",
+        name: "daily_adventure",
+        messageCount: 8,
+      });
+      expect(result.modes).toContainEqual({
+        key: "music",
+        name: "music",
+        messageCount: 1,
+      });
+      // legacy 一样参与排序：8 条的 daily_adventure 排在 3 条的 free_chat 前面
+      const keys: string[] = result.modes.map((m) => m.key);
+      expect(keys.indexOf("daily_adventure")).toBeLessThan(
+        keys.indexOf("free_chat"),
+      );
     });
   });
 

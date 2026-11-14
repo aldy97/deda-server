@@ -238,7 +238,6 @@ describe("prompt 黄金基线等价性", () => {
             mode: "english_chat",
             childProfile: CHILD_PROFILE,
             promptTemplate: "Use very simple vocabulary for a 5 year old.",
-            conversationModeKey: "free_chat_casual",
           },
         ],
       ],
