@@ -8,6 +8,7 @@ import {
 } from "./adventure.constants";
 import { AdventureCircuitBreaker } from "./adventure-circuit-breaker.service";
 import { AdventureRecoveryService } from "./adventure-recovery.service";
+import { adventureDateKey } from "./adventure-date.util";
 
 /**
  * 巡检的每个 detector 都必须有一正一反两条用例：
@@ -15,7 +16,37 @@ import { AdventureRecoveryService } from "./adventure-recovery.service";
  * 巡检改的是真在玩的孩子的状态，误伤比漏检严重得多。
  */
 
-const TODAY = "2026-11-13";
+/**
+ * 全部日期都以这个**被 mock 的时钟**为锚点派生，一个日历日都不写死。
+ *
+ * 写死过一次的后果：`const TODAY = "2026-11-13"` 在 11-14 零点之后整组用例失效——
+ * detector 6 拿真实时钟算「今天」，把测试里当作「今天」的行判成跨天陈旧并收走。
+ * 巡检的其它判定都基于 Date.now()（beforeEach 里已经 mock 掉），锚点必须同源，
+ * 否则这份测试的结论会随墙上日历悄悄改变。
+ */
+const NOW = new Date("2026-11-13T09:00:00.000Z");
+const TODAY = adventureDateKey(NOW);
+const YESTERDAY = adventureDateKey(
+  new Date(NOW.getTime() - 24 * 60 * 60 * 1000),
+);
+
+/**
+ * 「今天 / 昨天 的 hh:mm」——按**本地时区**锚定，不用固定的 UTC 瞬时。
+ * 固定瞬时写到极端时区（UTC+14）会翻日：它的本地日期变成「今天」，于是断言
+ * completedDate 的用例就红了。巡检的日键口径是服务器本地日历日
+ * （见 adventure-date.util.ts），fixture 必须用同一种口径表达「哪一天」。
+ */
+function todayAt(hours: number, minutes = 0): Date {
+  const d = new Date(NOW.getTime());
+  d.setHours(hours, minutes, 0, 0);
+  return d;
+}
+
+function yesterdayAt(hours: number, minutes = 0): Date {
+  const d = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
+  d.setHours(hours, minutes, 0, 0);
+  return d;
+}
 
 function makeEpisode(overrides: Record<string, unknown> = {}) {
   return {
@@ -184,7 +215,6 @@ function seed(
 describe("AdventureRecoveryService", () => {
   let warnSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
-  const NOW = new Date("2026-11-13T09:00:00.000Z");
 
   beforeEach(() => {
     warnSpy = jest.spyOn(Logger.prototype, "warn").mockReturnValue(undefined);
@@ -547,7 +577,7 @@ describe("AdventureRecoveryService", () => {
       h.prisma.adventureProgress.findUnique.mockResolvedValue(
         makeProgress({
           status: "completed",
-          completedAt: new Date("2026-11-13T08:30:00.000Z"),
+          completedAt: todayAt(8, 30),
         }),
       );
       const report = await h.service.sweepBrokenProgress();
@@ -557,7 +587,7 @@ describe("AdventureRecoveryService", () => {
         where: { id: "daily-1" },
         data: {
           status: "completed",
-          completedAt: new Date("2026-11-13T08:30:00.000Z"),
+          completedAt: todayAt(8, 30),
           completedDate: TODAY,
         },
       });
@@ -568,7 +598,7 @@ describe("AdventureRecoveryService", () => {
       seed(h, {
         dailies: [
           {
-            ...makeDaily({ assignedDate: "2026-11-12" }),
+            ...makeDaily({ assignedDate: YESTERDAY }),
             episode: makeEpisode(),
           },
         ],
@@ -576,7 +606,7 @@ describe("AdventureRecoveryService", () => {
       h.prisma.adventureProgress.findUnique.mockResolvedValue(
         makeProgress({
           status: "completed",
-          completedAt: new Date("2026-11-12T10:00:00.000Z"),
+          completedAt: yesterdayAt(10),
         }),
       );
       await h.service.sweepBrokenProgress();
@@ -584,8 +614,8 @@ describe("AdventureRecoveryService", () => {
         where: { id: "daily-1" },
         data: {
           status: "completed",
-          completedAt: new Date("2026-11-12T10:00:00.000Z"),
-          completedDate: "2026-11-12",
+          completedAt: yesterdayAt(10),
+          completedDate: YESTERDAY,
         },
       });
     });
@@ -595,7 +625,7 @@ describe("AdventureRecoveryService", () => {
       seed(h, {
         dailies: [
           {
-            ...makeDaily({ assignedDate: "2026-11-12" }),
+            ...makeDaily({ assignedDate: YESTERDAY }),
             episode: makeEpisode(),
           },
         ],
@@ -630,9 +660,9 @@ describe("AdventureRecoveryService", () => {
       seed(h, {
         dailies: [
           {
-            ...makeDaily({ assignedDate: "2026-11-12" }),
+            ...makeDaily({ assignedDate: YESTERDAY }),
             episode: makeEpisode({
-              retiredAt: new Date("2026-11-12T10:00:00Z"),
+              retiredAt: yesterdayAt(10),
             }),
           },
         ],
@@ -661,7 +691,7 @@ describe("AdventureRecoveryService", () => {
           {
             ...makeDaily({ assignedDate: TODAY }),
             episode: makeEpisode({
-              retiredAt: new Date("2026-11-13T08:10:00Z"),
+              retiredAt: todayAt(8, 10),
             }),
           },
         ],
@@ -678,7 +708,7 @@ describe("AdventureRecoveryService", () => {
       seed(h, {
         dailies: [
           {
-            ...makeDaily({ assignedDate: "2026-11-12" }),
+            ...makeDaily({ assignedDate: YESTERDAY }),
             episode: makeEpisode(),
           },
         ],

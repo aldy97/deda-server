@@ -36,6 +36,17 @@ type DailyWithEpisode = Prisma.AdventureDailyRecordGetPayload<{
   include: { episode: true };
 }>;
 
+/**
+ * 「今天」的日键。刻意经由 Date.now() 取时钟而不是 new Date()：本服务其余的时间
+ * 判定（挂起超时、引擎失败窗口、巡检耗时）全部基于 Date.now()，两处时钟必须同源。
+ * 分家的后果很具体——detector 6 会拿真实日历日去判定「跨天」，而同一次巡检里
+ * 「挂起多久」用的却是另一个时钟；测试里 mock 了 Date.now() 也管不住这一处。
+ * 生产语义零变化：Date.now() 与 new Date() 读的是同一个墙钟。
+ */
+function todayKey(): string {
+  return adventureDateKey(new Date(Date.now()));
+}
+
 /** 巡检关心的进度状态：只有「还在飞」的行可能病态，终态行一律不碰。 */
 const ACTIVE_PROGRESS_STATUSES = ["in_progress", "awaiting_reply"];
 
@@ -569,7 +580,7 @@ export class AdventureRecoveryService implements OnModuleInit, OnModuleDestroy {
     // 而且 daily 卡在 in_progress 会挡住新分配。语义与 retire() 保持一致：
     // abandoned（永不重新分配），而不是 failed_over（内容修好还能回来）。
     const episode = daily.episode;
-    if (daily.assignedDate < adventureDateKey() && episode?.retiredAt) {
+    if (daily.assignedDate < todayKey() && episode?.retiredAt) {
       await this.prisma.adventureDailyRecord.update({
         where: { id: daily.id },
         data: { status: "abandoned" },
