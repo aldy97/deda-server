@@ -40,7 +40,6 @@ describe("DeviceConfigsController", () => {
       const config = {
         deviceId: "dev-001",
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       };
       service.current.mockResolvedValue(config);
 
@@ -60,7 +59,6 @@ describe("DeviceConfigsController", () => {
       const config = {
         deviceId: "dev-001",
         mode: "english_chat",
-        conversationModeKey: null,
       };
       service.apply.mockResolvedValue(config);
 
@@ -76,12 +74,10 @@ describe("DeviceConfigsController", () => {
     it("should switch mode", async () => {
       const dto: SwitchModeDto = {
         mode: "free_chat",
-        conversationModeKey: "free_chat_roleplay",
       };
       const config = {
         deviceId: "dev-001",
         mode: "free_chat",
-        conversationModeKey: "free_chat_roleplay",
       };
       service.switchMode.mockResolvedValue(config);
 

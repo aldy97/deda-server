@@ -21,10 +21,11 @@ import { MusicModule } from "./modules/music/music.module";
 import { LlmModule } from "./modules/llm/llm.module";
 import { RedisModule } from "./common/redis/redis.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
+import { PromptRegistryModule } from "./modules/prompt-registry/prompt-registry.module";
 import { MqttModule } from "./common/mqtt/mqtt.module";
 import { DeviceStatusModule } from "./modules/device-status/device-status.module";
 import { DeviceLinkModule } from "./modules/device-link/device-link.module";
-import { ConversationModesModule } from "./modules/conversation-modes/conversation-modes.module";
+
 import { AdventureModule } from "./modules/adventure/adventure.module";
 import { AdventureAdminModule } from "./modules/adventure-admin/adventure-admin.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
@@ -72,11 +73,11 @@ const staticImports = existsSync(dashboardDistPath)
       },
     }),
     PrismaModule,
+    PromptRegistryModule,
     RedisModule,
     MqttModule,
     DeviceStatusModule,
     DeviceLinkModule,
-    ConversationModesModule,
     UsersModule,
     DevicesModule,
     ChildProfilesModule,

@@ -30,26 +30,6 @@ describe("DeviceConfigs validation (e2e)", () => {
         Promise.resolve({ id: "config-new", ...data }),
       ),
     },
-    conversationModeCategory: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue({ id: "cat-uuid-001" }),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
-    conversationMode: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      findFirst: jest.fn(({ where }: any) => {
-        if (where.key === "free_chat_casual") {
-          return Promise.resolve({
-            id: "mode-uuid-001",
-            key: "free_chat_casual",
-            isActive: true,
-            category: { key: "free_chat" },
-          });
-        }
-        return Promise.resolve(null);
-      }),
-    },
   };
 
   beforeAll(async () => {
@@ -61,7 +41,6 @@ describe("DeviceConfigs validation (e2e)", () => {
       .compile();
 
     app = moduleFixture.createNestApplication();
-    // 镜像 src/main.ts 的全局装配，使 DTO @IsIn 在 HTTP 层生效
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -96,65 +75,45 @@ describe("DeviceConfigs validation (e2e)", () => {
         .expect(400);
     });
 
-    it("should reject free_chat without conversationModeKey with 400", () => {
+    it("should accept free_chat with 201", () => {
       return authedPost("/device-configs/dev-001/mode")
         .send({ mode: "free_chat" })
-        .expect(400);
-    });
-
-    it("should reject english_chat with conversationModeKey with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({
-          mode: "english_chat",
-          conversationModeKey: "free_chat_casual",
-        })
-        .expect(400);
-    });
-
-    it("should reject an unknown conversationModeKey with 400", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({ mode: "free_chat", conversationModeKey: "not_a_mode" })
-        .expect(400);
-    });
-
-    it("should accept a valid free_chat payload with 201", () => {
-      return authedPost("/device-configs/dev-001/mode")
-        .send({ mode: "free_chat", conversationModeKey: "free_chat_casual" })
         .expect(201)
         .expect((res) => {
           expect(res.body.code).toBe(0);
           expect(res.body.data.mode).toBe("free_chat");
-          expect(res.body.data.conversationModeKey).toBe("free_chat_casual");
         });
     });
 
-    it("should accept a valid english_chat payload with 201", () => {
+    it("should accept english_chat with 201", () => {
       return authedPost("/device-configs/dev-001/mode")
         .send({ mode: "english_chat" })
         .expect(201)
         .expect((res) => {
           expect(res.body.code).toBe(0);
           expect(res.body.data.mode).toBe("english_chat");
-          expect(res.body.data.conversationModeKey).toBeNull();
         });
     });
   });
 
   describe("POST /device-configs/:deviceId/apply", () => {
-    it("should reject free_chat without conversationModeKey with 400", () => {
+    it("should accept free_chat with 201", () => {
       return authedPost("/device-configs/dev-001/apply")
         .send({ mode: "free_chat" })
-        .expect(400);
+        .expect(201)
+        .expect((res) => {
+          expect(res.body.code).toBe(0);
+          expect(res.body.data.mode).toBe("free_chat");
+        });
     });
 
-    it("should accept a valid english_chat payload with 201", () => {
+    it("should accept english_chat with 201", () => {
       return authedPost("/device-configs/dev-001/apply")
         .send({ mode: "english_chat" })
         .expect(201)
         .expect((res) => {
           expect(res.body.code).toBe(0);
           expect(res.body.data.mode).toBe("english_chat");
-          expect(res.body.data.conversationModeKey).toBeNull();
         });
     });
   });
@@ -163,7 +122,7 @@ describe("DeviceConfigs validation (e2e)", () => {
     it("should reject requests without a token with 401", () => {
       return request(app.getHttpServer())
         .post("/device-configs/dev-001/mode")
-        .send({ mode: "free_chat", conversationModeKey: "free_chat_casual" })
+        .send({ mode: "free_chat" })
         .expect(401);
     });
   });

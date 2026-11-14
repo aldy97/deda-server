@@ -40,13 +40,18 @@ import { TurnDecisionAnalyticsController } from "./turn-decision-analytics.contr
 import { TurnDecisionAnalyticsService } from "./turn-decision-analytics.service";
 import { FleetController } from "./fleet.controller";
 import { FleetService } from "./fleet.service";
+import { PromptAdminController } from "./prompt-admin.controller";
+import { PromptAdminService } from "./prompt-admin.service";
+import { AnalyticsMetaController } from "./analytics-meta.controller";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 
 @Module({
   imports: [PassportModule, DeviceLinkModule],
   controllers: [
     AnalyticsAuthController,
+    AnalyticsMetaController,
     DevicesAdminController,
+    PromptAdminController,
     OverviewController,
     RetentionController,
     EngagementController,
@@ -94,6 +99,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     LlmCostService,
     ParentReportsAnalyticsService,
     TurnDecisionAnalyticsService,
+    PromptAdminService,
   ],
 })
 export class AnalyticsModule {}

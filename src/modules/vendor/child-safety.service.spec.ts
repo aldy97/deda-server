@@ -1,6 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ChildSafetyService } from "./child-safety.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 describe("ChildSafetyService", () => {
   let service: ChildSafetyService;
@@ -13,6 +14,7 @@ describe("ChildSafetyService", () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         ChildSafetyService,
         { provide: LlmService, useValue: llmService },
       ],

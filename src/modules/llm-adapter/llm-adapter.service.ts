@@ -14,6 +14,7 @@ import {
   LlmMessage,
   LlmUpstreamError,
 } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
   ConversationIntent,
@@ -63,11 +64,12 @@ const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
 const MAC_PATTERN =
   /^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$/;
 
-/** 故事类意图 → 顶层模式快照（对齐老链路 handleTextIn 的 mode 决策） */
+/** 故事类意图 → 落库 mode 快照（对齐老链路 handleTextIn 的 mode 决策） */
 const STORY_INTENTS: ConversationIntent[] = [
   "english_story",
   "idiom_story",
   "sleep_story",
+  "free_story",
 ];
 
 /**
@@ -121,6 +123,7 @@ export class LlmAdapterService {
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
     private readonly turnDecisions: TurnDecisionRecorder,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -398,17 +401,20 @@ export class LlmAdapterService {
       }
     }
 
-    // mode 决策对齐老链路：故事类意图戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置戳
-    // english_chat/free_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const activeConfig = device
       ? await this.resolveActiveConfig(device.id)
       : null;
-    const mode = STORY_INTENTS.includes(intent)
-      ? intent
-      : activeConfig?.mode === "english_chat"
-        ? "english_chat"
-        : "free_chat";
+    const mode =
+      intent === "adventure_story"
+        ? "free_story"
+        : STORY_INTENTS.includes(intent)
+          ? intent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
     // 故事类回合判定（含被门禁拦截后走自由创作的 adventure/free_story）：
     // 主模型 maxTokens 分档与 filler 情境共用
@@ -449,7 +455,6 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: { channel: "baidu-rtc" },
           spokeAt: sourceOccurredAt,
         },
@@ -544,10 +549,7 @@ export class LlmAdapterService {
       ? this.storyPrompt(intent, favoriteStoryType)
       : intent === "adventure_story" || intent === "free_story"
         ? this.storyPrompt(intent, favoriteStoryType)
-        : await this.resolvePromptTemplate(
-            mode,
-            activeConfig?.conversationModeKey,
-          );
+        : undefined;
 
     const built = this.llmService.buildEnglishTutorPrompt(asrText, history, {
       childProfile: childProfile
@@ -560,7 +562,6 @@ export class LlmAdapterService {
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
       characterKey: device?.characterKey,
     });
     const messages: LlmMessage[] = [
@@ -653,7 +654,6 @@ export class LlmAdapterService {
           content: responseText,
           status: llmFailed ? "failed" : "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           // 边界标注同老链路：content 保持播报全文纯净，
           // filler/answer 边界结构化存 rawPayload；哄睡内容降级证据同处留痕
           rawPayload: {
@@ -734,7 +734,6 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode: "adventure_story",
-          conversationModeKey: null,
           rawPayload: { channel: "baidu-rtc" },
           spokeAt: new Date(),
         },
@@ -758,7 +757,6 @@ export class LlmAdapterService {
           content: responseText,
           status: "completed",
           mode: "adventure_story",
-          conversationModeKey: null,
           rawPayload: {
             filler: null,
             answer: responseText,
@@ -891,43 +889,18 @@ export class LlmAdapterService {
   }
 
   /**
-   * 故事意图的话术（复制自 vendor.service.ts storyPrompt，两处需同步修改）。
-   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或
-   * 无集可播），统一走「自由创作、不承诺冒险」的降级话术。
+   * 故事意图话术：统一走 prompt 注册表。
+   * 此前这里是 vendor.service.ts storyPrompt 的逐字副本（靠注释「两处需同步修改」
+   * 维系一致），现两处都委托 PromptRegistryService.getStoryPrompt，单一真相。
+   *
+   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或无集可播），
+   * 统一走「自由创作、不承诺冒险」的降级话术。
    */
   private storyPrompt(
     intent: ConversationIntent,
     favoriteStoryType?: string | null,
   ): string | undefined {
-    let base: string | undefined;
-    switch (intent) {
-      case "english_story":
-        base =
-          "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
-        break;
-      case "idiom_story":
-        base =
-          "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
-        break;
-      case "sleep_story":
-        // TODO(sleep): 儿歌 / 催眠曲内容源接入后，在此按 SleepConfig.contentType
-        // 分流话术；在此之前恒出故事，差异由 resolveSleepContentDegradation 留痕。
-        base =
-          "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
-        break;
-      case "adventure_story":
-      case "free_story":
-        base =
-          "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
-        break;
-      default:
-        return undefined;
-    }
-    // 主动选题：孩子没指定题材时，优先讲 TA 最喜欢的故事类型（长期记忆）
-    if (favoriteStoryType) {
-      base += `\n孩子最喜欢的故事类型是「${favoriteStoryType}」：如果孩子这轮没有指定别的题材，优先讲这个类型。`;
-    }
-    return base;
+    return this.promptRegistry.getStoryPrompt(intent, favoriteStoryType);
   }
 
   /**
@@ -990,21 +963,6 @@ export class LlmAdapterService {
       );
       return null;
     }
-  }
-
-  /** 自由对话按 conversationModeKey 读取子模式 prompt 模板 */
-  private async resolvePromptTemplate(
-    mode: string,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
-    }
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
   }
 
   /**
@@ -1120,10 +1078,9 @@ export class LlmAdapterService {
       return;
     }
 
-    const persona = params.device
-      ? (LlmService.CHARACTER_PERSONAS[params.device.characterKey ?? "elly"] ??
-        LlmService.CHARACTER_PERSONAS.elly)
-      : LlmService.CHARACTER_PERSONAS.elly;
+    // 人设走注册表：admin 在 dashboard 发布的新版本立即生效；
+    // 未知/缺省 characterKey 一律回落 elly（与既有防匿名行为一致）
+    const persona = this.promptRegistry.getPersona(params.device?.characterKey);
     // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝人设名出现
     const personaName = persona.split("：")[0];
     // 孩子名硬禁（优先英文名，与 buildChildBrief 的称呼口径一致）；
@@ -1168,7 +1125,7 @@ export class LlmAdapterService {
       try {
         const stream = openStream(
           attempt === 2
-            ? "你上一句被拒绝了：它以孩子的名字开头，或出现了你自己的人设名。请生成一句完全不同的话——不同的措辞、不同的结构、不带任何名字。"
+            ? this.promptRegistry.getTemplate("filler_retry_instruction")
             : undefined,
         );
         for await (const chunk of stream) {
@@ -1357,7 +1314,6 @@ export class LlmAdapterService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { channel: "baidu-rtc" },
         spokeAt: new Date(),
       },
@@ -1370,7 +1326,6 @@ export class LlmAdapterService {
         content: replyText,
         status,
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: assistantPayload,
         spokeAt: new Date(),
       },

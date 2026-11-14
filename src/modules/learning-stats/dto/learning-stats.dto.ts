@@ -138,8 +138,6 @@ export interface DailyTrendPoint {
 export interface TopicBreakdownItem {
   id: string;
   mode: string;
-  conversationModeKey?: string | null;
-  conversationModeName?: string | null;
   count: number;
   lastSpokeAt: string;
   isActive: boolean;
@@ -215,7 +213,6 @@ export interface LearningStatsHealthDto {
 export interface StatsContext {
   /** 精确顶层 mode */
   mode?: string;
-  conversationModeKey?: string;
   /** 家长报告口径：不按设备当前配置过滤，统计全部用户交互 */
   scope?: "all";
 }

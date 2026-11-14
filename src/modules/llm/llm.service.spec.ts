@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { LlmService, LlmUpstreamError } from "./llm.service";
 import * as llmCostUtil from "./llm-cost.util";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 import axios from "axios";
 import { Readable } from "stream";
 
@@ -21,7 +22,9 @@ describe("LlmService", () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         LlmService,
+        PROMPT_REGISTRY_PROVIDER,
         PRISMA_MOCK,
         {
           provide: ConfigService,
@@ -141,7 +144,9 @@ describe("LlmService", () => {
     it("should throw error when API key is missing", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -565,7 +570,9 @@ describe("LlmService", () => {
     it("should call the small-model base URL with its own API key when configured", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -618,7 +625,9 @@ describe("LlmService", () => {
     it("should use small-model credentials for non-streaming adventure bridges", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -664,7 +673,9 @@ describe("LlmService", () => {
     it("should fall back to primary credentials when small-model env is not set", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -756,7 +767,9 @@ describe("LlmService", () => {
     it("should throw when API key is missing", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -846,7 +859,9 @@ describe("LlmService", () => {
     it("缺 API key → LlmUpstreamError 且不可重试", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,
@@ -1356,7 +1371,9 @@ describe("LlmService", () => {
     it("缺少 API key 时也记失败日志", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
+          PROMPT_REGISTRY_PROVIDER,
           LlmService,
+          PROMPT_REGISTRY_PROVIDER,
           PRISMA_MOCK,
           {
             provide: ConfigService,

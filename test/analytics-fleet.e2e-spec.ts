@@ -78,7 +78,7 @@ describe("Analytics fleet (e2e)", () => {
         characterKey: "elly",
         macAddress: d1Id.toUpperCase(),
         firmwareVersion: "1.2.3",
-        deviceCode: "EL-D01",
+        deviceCode: `EL-${suffix}`,
         wifiName: "HomeWiFi",
         createdAt: new Date("2026-07-10T12:00:00Z"),
       },
@@ -341,14 +341,16 @@ describe("Analytics fleet (e2e)", () => {
     it("returns paginated device list", async () => {
       mockGetStatusBatch.mockResolvedValue(new Map());
 
-      const res = await get("/analytics/fleet/devices?page=1&pageSize=10");
+      const res = await get(
+        `/analytics/fleet/devices?keyword=${macPrefix}&page=1&pageSize=10`,
+      );
 
       expect(res.status).toBe(200);
       expect(res.body.code).toBe(0);
       const data = res.body.data;
       expect(data.page).toBe(1);
       expect(data.pageSize).toBe(10);
-      expect(data.total).toBeGreaterThanOrEqual(2);
+      expect(data.total).toBe(2);
       expect(Array.isArray(data.items)).toBe(true);
       // createdAt desc → d2 before d1
       expect(data.items[0].deviceId).toBe(d2Id);
@@ -380,7 +382,9 @@ describe("Analytics fleet (e2e)", () => {
         ]),
       );
 
-      const res = await get("/analytics/fleet/devices?page=1&pageSize=10");
+      const res = await get(
+        `/analytics/fleet/devices?keyword=${macPrefix}&page=1&pageSize=10`,
+      );
 
       expect(res.status).toBe(200);
       const d2 = res.body.data.items.find(
@@ -400,7 +404,7 @@ describe("Analytics fleet (e2e)", () => {
       mockGetStatusBatch.mockResolvedValue(new Map());
 
       const res = await get(
-        `/analytics/fleet/devices?keyword=${encodeURIComponent("el-d")}&page=1&pageSize=20`,
+        `/analytics/fleet/devices?keyword=${suffix.toUpperCase()}&page=1&pageSize=20`,
       );
 
       expect(res.status).toBe(200);

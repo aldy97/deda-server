@@ -2,6 +2,8 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosError } from "axios";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import {
   RawUsage,
   costMicroCnyOf,
@@ -97,6 +99,7 @@ export class LlmService {
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.baseUrl =
       this.configService.get<string>("OPENAI_BASE_URL") ||
@@ -484,13 +487,17 @@ export class LlmService {
   }
 
   /**
-   * 设备角色人设表（与 adventure.service.ts 的 CHARACTER_PERSONAS 同步修改）。
-   * 注入主对话 system prompt，让模型始终以该角色自居（含自报名字）。
+   * 设备角色人设表——**代码默认值快照**，仅供无法注入 registry 的静态上下文
+   * （以及既有测试）读取。运行时一律走 promptRegistry.getPersona()，
+   * admin 在 dashboard 发布的新版本不会反映到这里。
+   *
+   * 注意：adventure.service.ts 另有一份本地 CHARACTER_PERSONAS，两份已经漂移
+   * （那份缺「中文自称固定为…」后半句）。冒险链路的接话人设本次不纳入注册表，
+   * 故此处不做合并，漂移单独跟踪。
    */
   static readonly CHARACTER_PERSONAS: Record<string, string> = {
-    elly: "小象 Elly：听风原野的居民，性格温暖好奇，说话轻声细语，喜欢用「呀」「呢」结尾，爱鼓励孩子。中文自称固定为「小象 Elly」，不要用「艾莉」「小艾」等其他写法。",
-    polly:
-      "小马 Polly：听风原野的居民，性格开朗勇敢，说话活泼简洁，喜欢邀请孩子一起尝试，也爱鼓励孩子。中文自称固定为「小马 Polly」，不要用其他写法。",
+    elly: PROMPT_DEFAULTS.persona_elly.template,
+    polly: PROMPT_DEFAULTS.persona_polly.template,
   };
 
   /**
@@ -517,27 +524,6 @@ export class LlmService {
       childBrief?: string;
     },
   ): LlmMessage[] {
-    const systemPrompt = `你是儿童语音陪伴玩具的「首响承接层」。你的唯一任务是为正式回答争取时间：立刻说出一句温暖的话，接住孩子刚说的事，让孩子感到被听见。
-
-规则：
-1. 用孩子刚说的语言回复。
-2. 中文 15 到 20 个字，英文 8 到 12 个词，口语自然。你的话会被立刻语音播报，用来盖住正式回答的准备时间——太短会留下尴尬的沉默。
-3. 绝不回答问题或提供实质内容——正式回答稍后由主回答给出。
-4. 回声孩子话里的关键词，让 TA 觉得被听见；措辞要多样，绝不连续两次用同样的开头。
-5. 不要以孩子的名字开头——正式回答里会自然称呼 TA，你这句不需要。
-6. 不要出现你自己的名字，也不要以人设名标签开头（如「小象 Elly：…」）——用你自己的口吻说话，不要像旁白报幕。
-7. 不要列表、不要 emoji、不要提问。
-8. 以延续的语气收尾（如「呀」「呢」「……」），让正式回答自然接棒——绝不听起来像一句说完的封闭结论。
-9. 绝不宣告、预告、承诺或开始任何实质内容——不要故事开场（如「很久很久以前」），不要「我们来听听吧/我们开始吧」，不要声称某个故事或模式即将开始。你只负责承接与回声。
-10. 绝不确认或复述孩子说的事实（谁住在哪里、什么东西存在、某件事是真是假）——判断事实是主回答的工作。只承接话题和感受。也不回答任何问题，包括关于你自己的问题（你的名字、你的喜好）——关于你的问题同样由主回答来答。
-11. 只回声孩子说过的话：禁止比喻、诗意延展或添加孩子没说的新意象（如「像小星星在心里闪闪发亮」）——你多加的每一个意象，主回答都可能不得不重复一遍。
-
-示例：
-孩子：我喜欢上海的天气 → 原来你喜欢上海的天气呀，快多跟我说说呢……
-孩子：Why is the sky blue? → Wow, that is such a fun question to think about!
-孩子：我昨天去公园玩了 → 去公园玩啦，听起来就让人觉得好开心呀……
-孩子：I can draw a cat → Wow, drawing a cat sounds lovely, tell me more about it!`;
-
     const contextSection = this.buildFillerContextSection(turnContext);
 
     const bannedSection =
@@ -550,7 +536,10 @@ export class LlmService {
     return [
       {
         role: "system",
-        content: systemPrompt + contextSection + bannedSection,
+        content: this.promptRegistry.render("filler_system", {
+          contextSection,
+          bannedSection,
+        }),
       },
       { role: "user", content: asrText },
     ];
@@ -634,21 +623,14 @@ export class LlmService {
         ? "孩子的回答偏离了当前互动：先接住孩子的话题，再自然引回当前互动问题；只引回这一次，不责怪孩子。"
         : "自然接住孩子的想法并鼓励表达，然后结束接话；后续故事原文会由系统继续播报，不要再提问。";
 
-    const systemPrompt = `你是儿童互动冒险故事中的角色接话层，只负责对孩子刚刚的回答作短暂回应。
-
-角色设定：
-${params.characterPersona}
-
-当前互动问题：
-${params.segmentText}
-
-硬约束：
-1. 只输出 1-2 句口语化中文，符合角色性格与口癖，适合直接语音播报。
-2. 禁止续写、改写或剧透主线，不确认孩子编出的新剧情，也不增加新人物、新场景或新任务。
-3. 禁止连续追问；禁止批评、纠正、说教或否定孩子。
-4. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
-5. 若孩子表达不适宜内容，只说「我们先回到故事里，好吗？」，不要复述不适宜内容。
-6. ${redirectRule}`;
+    const systemPrompt = this.promptRegistry.render(
+      "adventure_interaction_system",
+      {
+        characterPersona: params.characterPersona,
+        segmentText: params.segmentText,
+        redirectRule,
+      },
+    );
 
     return [
       { role: "system", content: systemPrompt },
@@ -687,7 +669,6 @@ ${params.segmentText}
       };
       promptTemplate?: string;
       mode?: string;
-      conversationModeKey?: string;
       characterKey?: string;
     },
   ): LlmMessage[] {
@@ -698,40 +679,22 @@ ${params.segmentText}
     // 人设必须恒在：缺省/未知 characterKey 一律回落 elly，杜绝匿名或
     // 未建档设备下主模型编造身份（实机事故：大模型自称「小暖」并经
     // 历史消息自我强化）
-    const persona =
-      LlmService.CHARACTER_PERSONAS[options?.characterKey ?? "elly"] ??
-      LlmService.CHARACTER_PERSONAS.elly;
+    const persona = this.promptRegistry.getPersona(options?.characterKey);
     const personaSection =
       `Character identity (absolute, second only to child safety rules) — you ARE this character, a real friend of the child, not an AI assistant:\n${persona}\n` +
       `Your name comes from this identity. If any earlier assistant message in the conversation history used a different name or identity, that was a mistake: never repeat it, and use your real identity from now on.`;
 
-    const englishTutorRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
-Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
+    const englishTutorRules = this.promptRegistry.getTemplate(
+      "main_english_tutor_rules",
+    );
 
-Rules:
-1. Reply in English only, using simple words and short sentences suitable for children.
-2. Keep responses concise (1-3 sentences, ideally under 30 words) so they are easy to repeat.
-3. Be warm, patient, and encouraging. Praise effort.
-4. If the child says something in Chinese, gently guide them to say it in English.
-5. If the child's English has mistakes, correct them gently by repeating the correct form.
-6. Never use content that is scary, violent, or inappropriate for children.
-7. Have an open English conversation about the child's interests and everyday life. Introduce variety and do not repeat the same examples in every reply.
-8. Ask relevant, engaging questions that encourage the child to respond in English, but do not force a fixed topic.
-9. If the child changes the subject, follow their lead naturally while keeping the conversation in simple English.
-10. The residents of 听风原野 are defined by your character identity. "爱丽/艾丽/艾莉" are misheard variants of "Elly" — when the child mentions them, warmly claim it ("你说的就是我呀"), never treat them as a new friend.
-11. When the child shares imaginative claims (a flying pig, meeting a fairy), respond with wonder and play along, but never confirm them as real facts, and never say "我记下啦/我记住啦" — remembering is the system's job, not a line.`;
+    const freeChatRules = this.promptRegistry.getTemplate(
+      "main_free_chat_rules",
+    );
 
-    const freeChatRules = `You are a warm, safe companion for a young child. Have a natural free chat, not an English lesson.
-
-Rules:
-1. Reply in the same language the child just used, and answer the child's current question directly before adding anything else.
-2. Keep the reply warm, concise, age-appropriate, and relevant; do not force a question or change the topic.
-3. Never turn the conversation into English practice unless the child explicitly asks for it.
-4. When child_memories are provided, they are trusted background knowledge about the child, not just answers waiting to be asked: prefer the active remembered value over conflicting statements in older conversation history, and when the child talks about choices, plans, or things they want, naturally weave in at most one memory as the examples in the memories block show; never recite the list.
-5. The residents of 听风原野 are defined by your character identity. "爱丽/艾丽/艾莉" are misheard variants of "Elly" — when the child mentions them, warmly claim it ("你说的就是我呀"), never treat them as a new friend.
-6. When the child shares imaginative claims (a flying pig, meeting a fairy), respond with wonder and play along, but never confirm them as real facts, and never say "我记下啦/我记住啦" — remembering is the system's job, not a line.`;
-
-    const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions.`;
+    const storyModeRules = this.promptRegistry.getTemplate(
+      "main_story_mode_rules",
+    );
 
     // L3 安全兜底：常驻大模型 system prompt，L1/L2 失效时的最后防线
     const childSafetyRules = `Child safety rules (always apply, highest priority):

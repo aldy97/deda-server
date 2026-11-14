@@ -198,21 +198,18 @@ describe("EngagementService", () => {
           deviceId: "d1",
           role: "user",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
           spokeAt: spokeAtOn("2026-11-04"),
         },
         {
           deviceId: "d1",
           role: "user",
           mode: "english_chat",
-          conversationModeKey: null,
           spokeAt: spokeAtOn("2026-11-04", 15),
         },
         {
           deviceId: "d2",
           role: "user",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
           spokeAt: spokeAtOn("2026-11-04", 16),
         },
       ],
@@ -232,7 +229,6 @@ describe("EngagementService", () => {
     const modes = result.series[0].modes;
     expect(modes[0]).toEqual({
       mode: "free_chat",
-      conversationModeKey: "free_chat_casual",
       turns: 2,
       devices: 2,
     });

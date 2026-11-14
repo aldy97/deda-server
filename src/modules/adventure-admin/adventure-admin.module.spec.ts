@@ -7,6 +7,8 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAdminModule } from "./adventure-admin.module";
 import { AdventureAuditService } from "./adventure-audit.service";
@@ -27,15 +29,21 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
  * RedisService 也在假基建里：AdventureModule 现在被管理台导入，
  * 而 AdventureCircuitBreaker 依赖 RedisService（真身由 @Global 的 RedisModule 提供，
  * 这里不加载它，所以必须自己塞一个空壳，否则依赖图不完整、compile 直接失败）。
+ *
+ * PromptRegistryService 同理：真身由 @Global 的 PromptRegistryModule 提供、在
+ * AppModule 注册，本 spec 不加载 AppModule，而 LlmService 注入它。用仓库既有的
+ * PROMPT_REGISTRY_PROVIDER 替身（DB 恒空 → 全部 prompt 回落代码默认值），
+ * 装配测试因此仍然只验依赖图完整性，不引入数据库依赖。
  */
 @Global()
 @Module({
   providers: [
     { provide: PrismaService, useValue: {} },
     { provide: RedisService, useValue: {} },
+    PROMPT_REGISTRY_PROVIDER,
     Reflector,
   ],
-  exports: [PrismaService, RedisService, Reflector],
+  exports: [PrismaService, RedisService, PromptRegistryService, Reflector],
 })
 class FakeInfrastructureModule {}
 

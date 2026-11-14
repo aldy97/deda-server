@@ -115,7 +115,7 @@ async function prepare() {
     });
   }
 
-  // 旅程断言基于 free_chat 顶层模式快照；重置为自由对话默认配置保证可复现
+  // 旅程断言基于 free_chat mode 快照；重置为自由对话默认配置保证可复现
   await prisma.deviceConfig.updateMany({
     where: { deviceId: device.id, isActive: true },
     data: { isActive: false },
@@ -124,7 +124,6 @@ async function prepare() {
     data: {
       deviceId: device.id,
       mode: "free_chat",
-      conversationModeKey: "free_chat_casual",
       language: "bilingual",
       speechRate: "normal",
       isActive: true,

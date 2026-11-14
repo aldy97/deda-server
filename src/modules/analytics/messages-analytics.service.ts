@@ -5,6 +5,7 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { MODE_LABELS } from "@/common/mode-labels";
 
 export interface MessagesQuery {
   startDate?: string;
@@ -13,7 +14,6 @@ export interface MessagesQuery {
   role?: "user" | "assistant";
   status?: "completed" | "failed" | "interrupted";
   mode?: string;
-  conversationModeKey?: string;
   turnId?: string;
   conversationId?: string;
   keyword?: string;
@@ -43,6 +43,17 @@ const DEVICE_SELECT = {
   characterKey: true,
 } as const;
 
+/** 所有可写入的对话模式 key，无论区间内是否有消息都恒返回 */
+const ALL_WRITABLE_MODES = [
+  "free_chat",
+  "english_chat",
+  "english_story",
+  "idiom_story",
+  "sleep_story",
+  "adventure_story",
+  "free_story",
+] as const;
+
 /** 校验可选日期区间（两者都给出时要求 start <= end） */
 function validateOptionalRange(startDate?: string, endDate?: string) {
   if (startDate && endDate && startDate > endDate) {
@@ -70,7 +81,6 @@ const LIST_SELECT = {
   content: true,
   status: true,
   mode: true,
-  conversationModeKey: true,
   cefrLevel: true,
   spokeAt: true,
   createdAt: true,
@@ -117,9 +127,6 @@ export class MessagesAnalyticsService {
     if (query.role) where.role = query.role;
     if (query.status) where.status = query.status;
     if (query.mode) where.mode = query.mode;
-    if (query.conversationModeKey) {
-      where.conversationModeKey = query.conversationModeKey;
-    }
     if (query.turnId) where.turnId = query.turnId;
     if (query.conversationId) where.conversationId = query.conversationId;
     if (query.keyword) {
@@ -153,7 +160,6 @@ export class MessagesAnalyticsService {
         content: row.content,
         status: row.status,
         mode: row.mode,
-        conversationModeKey: row.conversationModeKey,
         cefrLevel: row.cefrLevel,
         spokeAt: row.spokeAt,
         createdAt: row.createdAt,
@@ -174,57 +180,43 @@ export class MessagesAnalyticsService {
   }
 
   /**
-   * 对话模式选项源：配置表全量启用项（含展示名）+ 区间内各模式的消息数。
-   * 供 dashboard 过滤下拉使用；消息数仅作参考，0 也返回（配置存在即可选）。
+   * 对话模式选项源：7 个可写入模式恒返回（含展示名）+ 区间内各模式的消息数。
+   * 供 dashboard 过滤下拉使用；消息数仅作参考，0 也返回。
    */
   async getModes(query: MessagesModesQuery) {
     validateOptionalRange(query.startDate, query.endDate);
 
-    const [categories, groups] = await Promise.all([
-      this.prisma.conversationModeCategory.findMany({
-        where: { isActive: true },
-        orderBy: { sortOrder: "asc" },
-        include: {
-          modes: {
-            where: { isActive: true },
-            orderBy: { sortOrder: "asc" },
-          },
-        },
-      }),
-      this.prisma.message.groupBy({
-        by: ["mode", "conversationModeKey"],
-        where: spokeAtFilter(query.startDate, query.endDate),
-        _count: { _all: true },
-      }),
-    ]);
+    const groups = await this.prisma.message.groupBy({
+      by: ["mode"],
+      where: spokeAtFilter(query.startDate, query.endDate),
+      _count: { _all: true },
+    });
 
-    // 子模式计数按 conversationModeKey；分类计数按顶层 mode 全量（含无子模式的）
-    const subCount = new Map<string, number>();
-    const topCount = new Map<string, number>();
+    const countMap = new Map<string, number>();
     for (const group of groups) {
-      const count = group._count._all;
       if (group.mode) {
-        topCount.set(group.mode, (topCount.get(group.mode) ?? 0) + count);
-      }
-      if (group.conversationModeKey) {
-        subCount.set(
-          group.conversationModeKey,
-          (subCount.get(group.conversationModeKey) ?? 0) + count,
-        );
+        countMap.set(group.mode, group._count._all);
       }
     }
 
+    // 可写入 mode 恒返回（0 条也在，保证筛选器恒可选）；
+    // 区间内实际出现过的 legacy mode（历史数据，永不新写入）追加进来一起排序。
+    const keys = new Set<string>(ALL_WRITABLE_MODES);
+    for (const key of countMap.keys()) {
+      keys.add(key);
+    }
+
     return {
-      categories: categories.map((category) => ({
-        key: category.key,
-        name: category.name,
-        messageCount: topCount.get(category.key) ?? 0,
-        modes: category.modes.map((mode) => ({
-          key: mode.key,
-          name: mode.name,
-          messageCount: subCount.get(mode.key) ?? 0,
-        })),
-      })),
+      modes: Array.from(keys)
+        .map((key) => ({
+          key,
+          name: MODE_LABELS[key] ?? key,
+          messageCount: countMap.get(key) ?? 0,
+        }))
+        .sort(
+          (a, b) =>
+            b.messageCount - a.messageCount || a.key.localeCompare(b.key),
+        ),
     };
   }
 

@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
@@ -48,6 +49,7 @@ export class VendorService {
     private readonly childSafetyService: ChildSafetyService,
     private readonly sleepConfigsService: SleepConfigsService,
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
@@ -141,25 +143,7 @@ export class VendorService {
   }
 
   /**
-   * 自由对话按 conversationModeKey 读取子模式 prompt 模板。
-   */
-  private async resolvePromptTemplate(
-    mode: string | null | undefined,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
-    }
-
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
-  }
-
-  /**
-   * 获取同一设备、同一顶层模式的最近消息历史。
+   * 获取同一设备、同一 mode 的最近消息历史。
    *
    * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
    * 边界结构化存 rawPayload { filler, answer }。
@@ -207,20 +191,9 @@ export class VendorService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
+  /** 故事意图话术：与 llm-adapter.service.ts 共用注册表实现，不再各存一份副本 */
   private storyPrompt(intent: ConversationIntent): string | undefined {
-    switch (intent) {
-      case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response. Begin directly with the story's opening line — no preamble, no 'Here is...', no title, no meta-narration.";
-      case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。直接开始讲故事正文，不要「下面我来讲」之类的开场叙述，不要标题。";
-      case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。直接开始讲故事正文，不要任何开场叙述或标题。";
-      case "adventure_story":
-      case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。直接开始讲故事正文，不要任何开场叙述或标题。";
-      default:
-        return undefined;
-    }
+    return this.promptRegistry.getStoryPrompt(intent);
   }
 
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
@@ -334,17 +307,20 @@ export class VendorService {
     }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
-    // 只有英语/成语/哄睡故事意图才戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置
-    // 戳 free_chat/english_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const mode =
-      storyIntent === "english_story" ||
-      storyIntent === "idiom_story" ||
-      storyIntent === "sleep_story"
-        ? storyIntent
-        : activeConfig?.mode === "english_chat"
-          ? "english_chat"
-          : "free_chat";
+      storyIntent === "adventure_story"
+        ? "free_story"
+        : storyIntent === "english_story" ||
+            storyIntent === "idiom_story" ||
+            storyIntent === "sleep_story" ||
+            storyIntent === "free_story"
+          ? storyIntent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
     if (storyIntent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, dto.asrText);
@@ -367,7 +343,6 @@ export class VendorService {
         content: dto.asrText,
         status: "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         rawPayload: dto as any,
         spokeAt: sourceOccurredAt,
       },
@@ -396,10 +371,7 @@ export class VendorService {
     const childProfile = await this.getChildProfile(device.id);
     const promptTemplate = storyMode
       ? this.storyPrompt(storyIntent)
-      : await this.resolvePromptTemplate(
-          mode,
-          activeConfig?.conversationModeKey,
-        );
+      : undefined;
 
     const promptOptions = {
       childProfile: childProfile
@@ -411,7 +383,6 @@ export class VendorService {
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
     // free_chat 全量注入 5 槽位记忆（含软冷却：传入近 5 条 assistant 原文）；
@@ -530,7 +501,6 @@ export class VendorService {
         content: reply.responseText,
         status: llmFailed ? "failed" : "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         // 边界标注（方案 3）：content 保持播报全文纯净，
         // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
         rawPayload: { filler, answer },
@@ -613,7 +583,6 @@ export class VendorService {
           content: asrText,
           status: "completed",
           mode: "free_chat",
-          conversationModeKey: null,
           rawPayload: { asrText },
           spokeAt: new Date(),
         },
@@ -626,7 +595,6 @@ export class VendorService {
           content: text,
           status: "completed",
           mode: "free_chat",
-          conversationModeKey: null,
           rawPayload: {
             filler: null,
             answer: text,
@@ -711,7 +679,6 @@ export class VendorService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { asrText },
         spokeAt: new Date(),
       },
@@ -724,7 +691,6 @@ export class VendorService {
         content: text,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: text,
@@ -776,7 +742,6 @@ export class VendorService {
             content: asrText,
             status: "completed",
             mode: "adventure_story",
-            conversationModeKey: null,
             rawPayload: { asrText },
             spokeAt: new Date(),
           },
@@ -844,7 +809,6 @@ export class VendorService {
           content: responseText,
           status: "completed",
           mode: "adventure_story",
-          conversationModeKey: null,
           rawPayload: {
             filler: null,
             answer: responseText,
@@ -943,7 +907,6 @@ export class VendorService {
             // failed：这轮没有产出真实回答，不能混进正常对话统计
             status: "failed",
             mode: "free_chat",
-            conversationModeKey: null,
             rawPayload: { filler: null, answer: text, degraded: true },
             spokeAt: new Date(),
           },

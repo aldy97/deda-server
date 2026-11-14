@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { MODE_LABELS } from "@/common/mode-labels";
 import {
   DashboardDto,
   DailyTrendPoint,
@@ -34,22 +35,10 @@ import {
 interface ActiveConfig {
   deviceId: string;
   mode: string;
-  conversationModeKey: string | null;
 }
 
 @Injectable()
 export class LearningStatsService {
-  private static readonly MODE_LABELS: Record<string, string> = {
-    free_chat: "自由对话",
-    english_chat: "英语对话",
-    adventure_story: "每日冒险",
-    english_story: "英语故事",
-    idiom_story: "成语故事",
-    free_story: "自由故事",
-    sleep_story: "哄睡故事",
-    unknown: "其他",
-  };
-
   private readonly metricsCalculator = new ConversationMetricsCalculator();
   private readonly streakCalculator = new StreakCalculator();
   private readonly topicCalculator = new TopicCoverageCalculator();
@@ -119,7 +108,7 @@ export class LearningStatsService {
     }
     const modeUsage = Array.from(modeCounts, ([mode, count]) => ({
       mode,
-      label: LearningStatsService.MODE_LABELS[mode] ?? "其他",
+      label: MODE_LABELS[mode] ?? "其他",
       count,
     })).sort((a, b) => b.count - a.count || a.mode.localeCompare(b.mode));
     const generationStatus = (report?.generationStatus ??
@@ -398,9 +387,7 @@ export class LearningStatsService {
       });
 
       const practiceCount = scoped.length;
-      const topicKeys = new Set(
-        scoped.map((m) => `${m.mode}|${m.conversationModeKey ?? ""}`),
-      );
+      const topicKeys = new Set(scoped.map((m) => m.mode ?? "unknown"));
 
       result.totalDurationMinutes = Math.round(practiceCount * 0.5);
       result.practiceCount = practiceCount;
@@ -491,18 +478,6 @@ export class LearningStatsService {
       msgsByTopicKey.set(key, list);
     }
 
-    // free_chat 子模式名称联查
-    const modeKeys = Array.from(
-      new Set(conversations.map((c) => c.conversationModeKey).filter(Boolean)),
-    ) as string[];
-    const convModes = modeKeys.length
-      ? await this.prisma.conversationMode.findMany({
-          where: { key: { in: modeKeys } },
-          select: { key: true, name: true },
-        })
-      : [];
-    const modeNameByKey = new Map(convModes.map((m) => [m.key, m.name]));
-
     return coverage.topics.map((topic) => {
       const activeConfig = activeConfigs.find(
         (c) =>
@@ -511,20 +486,11 @@ export class LearningStatsService {
             ?.deviceId,
       );
 
-      const isActive =
-        !!activeConfig &&
-        activeConfig.mode === topic.mode &&
-        // free_chat 主题还要匹配到子模式
-        (topic.mode !== "free_chat" ||
-          activeConfig.conversationModeKey === topic.conversationModeKey);
+      const isActive = !!activeConfig && activeConfig.mode === topic.mode;
 
       return {
         id: topic.key,
         mode: topic.mode,
-        conversationModeKey: topic.conversationModeKey,
-        conversationModeName: topic.conversationModeKey
-          ? (modeNameByKey.get(topic.conversationModeKey) ?? null)
-          : null,
         count: topic.count,
         lastSpokeAt: topic.lastSpokeAt.toISOString(),
         isActive,
@@ -828,11 +794,7 @@ export class LearningStatsService {
   }
 
   private formatTopicName(topic: TopicBreakdownItem): string {
-    return (
-      topic.conversationModeName ||
-      LearningStatsService.MODE_LABELS[topic.mode] ||
-      topic.mode
-    );
+    return MODE_LABELS[topic.mode] || topic.mode;
   }
 
   private async getUserDevices(userId: string, deviceId?: string) {
@@ -935,29 +897,23 @@ export class LearningStatsService {
         deviceId: config.deviceId,
         mode: config.mode,
       };
-      if (config.mode === "free_chat" && config.conversationModeKey) {
-        filter.conversationModeKey = config.conversationModeKey;
-      }
       return filter;
     });
   }
 
   private buildTopicKey(conv: any): string {
-    return [conv.mode, conv.conversationModeKey].filter(Boolean).join("|");
+    return conv.mode ?? "unknown";
   }
 
   private resolveTopicName(conv: any): string {
-    if (conv.mode === "free_chat" && conv.conversationModeKey) {
-      return conv.conversationModeKey;
-    }
-    return conv.mode;
+    return conv.mode ?? "unknown";
   }
 
   private toDateString(date: Date): string {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
-  /** 缺省统计语境使用设备当前顶层模式；无配置设备默认 free_chat。 */
+  /** 缺省统计语境使用设备当前 mode；无配置设备默认 free_chat。 */
   private async resolveConfiguredModes(
     deviceInternalIds: string[],
   ): Promise<string[]> {
@@ -975,9 +931,6 @@ export class LearningStatsService {
 
     if (ctx.mode) {
       where.mode = ctx.mode;
-      if (ctx.conversationModeKey) {
-        where.conversationModeKey = ctx.conversationModeKey;
-      }
       return where;
     }
 
@@ -1004,7 +957,7 @@ export class LearningStatsService {
 
   /**
    * 学习动态：事件型卡片流（按日倒序分页）
-   * - study：某日某顶层模式的练习卡，轮数 = 当日 user 消息数
+   * - study：某日某 mode 的练习卡，轮数 = 当日 user 消息数
    * - streak：连续学习 ≥2 天时，卡在该连续段的最后一天
    */
   async getActivities(
@@ -1016,13 +969,7 @@ export class LearningStatsService {
       range?: StatsRange;
     } & StatsContext = {},
   ): Promise<ActivitiesPageDto> {
-    const {
-      page = 1,
-      pageSize = 10,
-      range,
-      mode,
-      conversationModeKey,
-    } = options;
+    const { page = 1, pageSize = 10, range, mode } = options;
     const { internalIds } = await this.getUserDevices(userId, deviceId);
     if (internalIds.length === 0) {
       return { items: [], total: 0, page, pageSize };
@@ -1030,7 +977,6 @@ export class LearningStatsService {
 
     const where = await this.buildContextWhere(internalIds, {
       mode,
-      conversationModeKey,
     });
     const messages = await this.prisma.message.findMany({
       where,

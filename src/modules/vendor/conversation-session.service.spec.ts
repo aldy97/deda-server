@@ -3,6 +3,10 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { ConversationSessionService } from "./conversation-session.service";
+import {
+  PROMPT_REGISTRY_PROVIDER,
+  makePromptRegistry,
+} from "@/modules/prompt-registry/prompt-registry.testing";
 
 type ConversationSessionMock = {
   findUnique: jest.Mock;
@@ -63,6 +67,7 @@ describe("ConversationSessionService", () => {
     jest.useFakeTimers().setSystemTime(now);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         ConversationSessionService,
         {
           provide: PrismaService,
@@ -323,6 +328,7 @@ describe("ConversationSessionService", () => {
       prisma as unknown as PrismaService,
       llmService,
       sleepConfigs as unknown as SleepConfigsService,
+      makePromptRegistry(),
     );
 
     await expect(

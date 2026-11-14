@@ -10,11 +10,6 @@ export class SwitchModeDto {
   @IsIn(DEVICE_MODES)
   mode: string;
 
-  @ApiPropertyOptional({ description: "自由对话子模式 key" })
-  @IsOptional()
-  @IsString()
-  conversationModeKey?: string;
-
   @ApiPropertyOptional({ description: "语言：zh/en/bilingual" })
   @IsOptional()
   @IsString()

@@ -51,15 +51,6 @@ describe("Vendor streaming pipeline (e2e)", () => {
       findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue(undefined),
     },
-    conversationModeCategory: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findUnique: jest.fn().mockResolvedValue(null),
-    },
-    conversationMode: {
-      upsert: jest.fn().mockResolvedValue({}),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
-    },
     adventureEpisode: {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),

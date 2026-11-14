@@ -205,18 +205,16 @@ export class EngagementService {
         deviceId: true,
         spokeAt: true,
         mode: true,
-        conversationModeKey: true,
       },
     });
 
-    // date -> mode|subMode -> { turns, devices }
+    // date -> mode -> { turns, devices }
     const byDate = new Map<
       string,
       Map<
         string,
         {
           mode: string;
-          conversationModeKey: string | null;
           turns: number;
           devices: Set<string>;
         }
@@ -228,23 +226,20 @@ export class EngagementService {
         DEFAULT_REPORT_TIMEZONE,
       );
       const mode = message.mode ?? "unknown";
-      const subKey = message.conversationModeKey ?? null;
-      const groupKey = `${mode}|${subKey ?? ""}`;
 
       let dateBucket = byDate.get(dateKey);
       if (!dateBucket) {
         dateBucket = new Map();
         byDate.set(dateKey, dateBucket);
       }
-      let modeBucket = dateBucket.get(groupKey);
+      let modeBucket = dateBucket.get(mode);
       if (!modeBucket) {
         modeBucket = {
           mode,
-          conversationModeKey: subKey,
           turns: 0,
           devices: new Set<string>(),
         };
-        dateBucket.set(groupKey, modeBucket);
+        dateBucket.set(mode, modeBucket);
       }
       modeBucket.turns += 1;
       modeBucket.devices.add(message.deviceId);
@@ -257,7 +252,6 @@ export class EngagementService {
         modes: Array.from(modes.values())
           .map((bucket) => ({
             mode: bucket.mode,
-            conversationModeKey: bucket.conversationModeKey,
             turns: bucket.turns,
             devices: bucket.devices.size,
           }))

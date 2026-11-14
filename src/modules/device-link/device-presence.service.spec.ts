@@ -112,15 +112,12 @@ describe("DevicePresenceService", () => {
   describe("flush", () => {
     const uuid = knownUuid;
 
-    /**
-     * 冻结时钟。flush() 会拿**真实**的当前日期算 today，并把 date < today-1 的桶
-     * 当作过期直接丢弃（不 upsert）；而本组的 fixture 日期是写死的 2026-11-12。
-     * 两者一撞上，整组 8 例就从 2026-11-14 起全线失效——不是逻辑回归，是日历翻页。
-     * 这里把「现在」钉在 fixture 的那一天（上海时区仍是 11-12），
-     * 与本文件 lifecycle 组用 fake timers 的做法一致；fixture 一行都不用改。
-     */
+    // flush() 用「真实当前日期」算 staleThreshold = today - 1，并回收更早的 bucket，
+    // 而本组用例的时间戳固定在 2026-11-12 / 11-13。这里把系统时间钉在同一时刻，
+    // 否则真实日期一旦跨过 2026-11-14，bucket 会被当成过期回收，整组用例集体变红。
     beforeEach(() => {
-      jest.useFakeTimers().setSystemTime(new Date("2026-11-12T12:00:00Z"));
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date("2026-11-13T10:00:00Z"));
     });
 
     afterEach(() => {

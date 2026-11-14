@@ -27,7 +27,7 @@ describe("MessagesAnalyticsController", () => {
     const service = {
       listMessages: jest.fn(),
       getMessage: jest.fn(),
-      getModes: jest.fn().mockResolvedValue({ categories: [] }),
+      getModes: jest.fn().mockResolvedValue({ modes: [] }),
       getInterruptionRate: jest
         .fn()
         .mockResolvedValue({ interruptionRate: null }),

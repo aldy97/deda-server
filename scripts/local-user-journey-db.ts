@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../src/common/prisma/prisma.service";
 import { LlmService } from "../src/modules/llm/llm.service";
+import { PromptRegistryService } from "../src/modules/prompt-registry/prompt-registry.service";
 import { ParentReportGeneratorService } from "../src/modules/learning-stats/parent-report-generator.service";
 
 const prisma = new PrismaClient();
@@ -53,7 +54,7 @@ async function prepare() {
   if (device.characterKey !== "elly") {
     throw new Error(`Expected elly device, got ${device.characterKey}`);
   }
-  // 旅程断言基于 free_chat 顶层模式快照；历史手动测试可能把设备留在
+  // 旅程断言基于 free_chat mode 快照；历史手动测试可能把设备留在
   // english_chat，这里重置为自由对话默认配置，保证结果可复现。
   await prisma.deviceConfig.updateMany({
     where: { deviceId: device.id, isActive: true },
@@ -63,7 +64,6 @@ async function prepare() {
     data: {
       deviceId: device.id,
       mode: "free_chat",
-      conversationModeKey: "free_chat_casual",
       language: "bilingual",
       speechRate: "normal",
       isActive: true,
@@ -598,9 +598,13 @@ async function generateReport(reportDate: string) {
   const prismaService = new PrismaService();
   await prismaService.$connect();
   try {
+    // 脚本运行在 Nest 容器之外，onModuleInit 不会触发，需显式预载一次，
+    // 否则 admin 在 dashboard 发布的 prompt 覆盖不会生效（只会走代码默认值）
+    const promptRegistry = new PromptRegistryService(prismaService);
+    await promptRegistry.reload();
     const generator = new ParentReportGeneratorService(
       prismaService,
-      new LlmService(config, prismaService),
+      new LlmService(config, prismaService, promptRegistry),
       config,
     );
     await generator.generateDeviceReport(
