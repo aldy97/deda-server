@@ -133,10 +133,17 @@ describe("Adventure recovery sweep (e2e)", () => {
       data: {
         deviceId: `rec-${runId}-${name}`,
         characterKey: "elly",
-        // 刻意用一个又老又固定的时间：analytics-fleet 的断言是全局口径
-        // （按 createdAt desc 取第一页、按 2026-07 的日期窗口聚合），
-        // 并行跑时任何新建的设备都会串进它的结果。落在它的窗口之外就不添乱。
-        createdAt: new Date("2026-01-05T00:00:00Z"),
+        // analytics-fleet 的 e2e 断言是全局口径，并行跑时本套件新建的设备会串进
+        // 它的结果，所以这两个字段刻意卡在它两条断言的夹缝里：
+        // - summary?date=2026-07-11 统计 createdAt < 当日末（Asia/Shanghai，
+        //   即 2026-07-11T16:00:00Z）的设备，故本套件必须**不早于**该瞬时，
+        //   否则 totalDevices 虚高；
+        // - devices 列表按 createdAt desc 断言首位是它的 d2（2026-07-12T00:00:00Z），
+        //   故本套件必须**不晚于** d2，否则抢走首位。
+        // firmwareVersion 给非空值，避免灌大 fleet 的 "unknown" 桶——该桶仅在数量
+        // 打平时才排最后，一旦变大就顶到首位，打红它的固件分布断言。
+        createdAt: new Date("2026-07-11T20:00:00Z"),
+        firmwareVersion: "1.2.3",
       },
     });
     deviceIds.push(device.id);
