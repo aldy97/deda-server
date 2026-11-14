@@ -112,6 +112,21 @@ describe("DevicePresenceService", () => {
   describe("flush", () => {
     const uuid = knownUuid;
 
+    /**
+     * 冻结时钟。flush() 会拿**真实**的当前日期算 today，并把 date < today-1 的桶
+     * 当作过期直接丢弃（不 upsert）；而本组的 fixture 日期是写死的 2026-11-12。
+     * 两者一撞上，整组 8 例就从 2026-11-14 起全线失效——不是逻辑回归，是日历翻页。
+     * 这里把「现在」钉在 fixture 的那一天（上海时区仍是 11-12），
+     * 与本文件 lifecycle 组用 fake timers 的做法一致；fixture 一行都不用改。
+     */
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date("2026-11-12T12:00:00Z"));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     function seenAt(hours: number, minutes = 0, seconds = 0): Date {
       const d = new Date("2026-11-12T00:00:00Z");
       d.setHours(hours, minutes, seconds, 0);
