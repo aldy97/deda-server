@@ -18,6 +18,7 @@ import {
   AdventureReply,
   AdventureService,
 } from "@/modules/adventure/adventure.service";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import {
   ConversationIntent,
   ConversationSessionService,
@@ -52,16 +53,24 @@ export class VendorService {
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
-        const device = await this.prisma.device.findUnique({
-          where: { id: deviceInternalId },
-        });
-        if (!device) {
-          this.logger.warn(
-            `Adventure timeout skipped, device not found: ${deviceInternalId}`,
+        // 这是定时器回调：抛出去没人接，会变成 unhandled rejection 并可能
+        // 拖垮进程。孩子这一轮已经错过了超时兜底，再让服务崩掉是二次伤害。
+        try {
+          const device = await this.prisma.device.findUnique({
+            where: { id: deviceInternalId },
+          });
+          if (!device) {
+            this.logger.warn(
+              `Adventure timeout skipped, device not found: ${deviceInternalId}`,
+            );
+            return;
+          }
+          await this.sendAdventureReply(device, adventureReply);
+        } catch (error) {
+          this.logger.error(
+            `Adventure timeout push failed for device=${deviceInternalId}: ${this.describeError(error)}`,
           );
-          return;
         }
-        await this.sendAdventureReply(device, adventureReply);
       },
     );
   }
@@ -218,10 +227,19 @@ export class VendorService {
     }
 
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
-    const adventureReply = await this.adventureService.handleChildReply(
-      device.id,
-      dto.asrText,
-    );
+    // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
+    // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
+    let adventureReply: AdventureReply | null = null;
+    try {
+      adventureReply = await this.adventureService.handleChildReply(
+        device.id,
+        dto.asrText,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Adventure reply handling failed, degrading to free story for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
+      );
+    }
     if (adventureReply) {
       return this.sendAdventureReply(
         device,
@@ -250,32 +268,40 @@ export class VendorService {
     }
     const storyMode = storyIntent !== "free_chat";
     if (storyMode && storyIntent !== "sleep_story") {
-      const completedToday = await this.adventureService.isCompletedToday(
-        device.id,
-      );
-      if (
-        !completedToday &&
-        (storyIntent === "adventure_story" || storyIntent === "free_story")
-      ) {
-        // 泛化“我想听故事”在今日冒险未完成时优先进入冒险。
-        const startedAdventure = await this.adventureService.startToday(
+      // 整块包住：门禁读失败、开集失败、拦截审计写失败，任何一处抛错都只意味着
+      // 「这轮进不了冒险」，绝不能升级为「这轮没有声音」。
+      try {
+        const completedToday = await this.adventureService.isCompletedToday(
           device.id,
-          true,
         );
-        if (startedAdventure) {
-          await this.conversationSessionService.reset(device.id);
-          return this.sendAdventureReply(
-            device,
-            startedAdventure,
-            dto.asrText,
-            turnId,
+        if (
+          !completedToday &&
+          (storyIntent === "adventure_story" || storyIntent === "free_story")
+        ) {
+          // 泛化“我想听故事”在今日冒险未完成时优先进入冒险。
+          const startedAdventure = await this.adventureService.startToday(
+            device.id,
+            true,
+          );
+          if (startedAdventure) {
+            await this.conversationSessionService.reset(device.id);
+            return this.sendAdventureReply(
+              device,
+              startedAdventure,
+              dto.asrText,
+              turnId,
+            );
+          }
+        }
+        if (completedToday) {
+          await this.adventureService.recordEntryBlocked(
+            device.id,
+            storyIntent === "adventure_story" ? "free_story" : storyIntent,
           );
         }
-      }
-      if (completedToday) {
-        await this.adventureService.recordEntryBlocked(
-          device.id,
-          storyIntent === "adventure_story" ? "free_story" : storyIntent,
+      } catch (error) {
+        this.logger.error(
+          `Adventure gate failed, degrading to free story for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
         );
       }
     }
@@ -546,35 +572,43 @@ export class VendorService {
       );
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "user",
-        content: asrText,
-        status: "completed",
-        mode: "free_chat",
-        rawPayload: { asrText },
-        spokeAt: new Date(),
-      },
-    });
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: text,
-        status: "completed",
-        mode: "free_chat",
-        rawPayload: {
-          filler: null,
-          answer: text,
-          safetyCategory: verdict.category,
-          safetyLayer: verdict.layer,
+    // 话术已经通过 chunk 发出去了，落库只是审计与家长端时间线的素材。
+    // 写库失败绝不能让整轮回复失败——那是把「审计缺失」升级成「孩子沉默」。
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: asrText,
+          status: "completed",
+          mode: "free_chat",
+          rawPayload: { asrText },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
+      });
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: text,
+          status: "completed",
+          mode: "free_chat",
+          rawPayload: {
+            filler: null,
+            answer: text,
+            safetyCategory: verdict.category,
+            safetyLayer: verdict.layer,
+          },
+          spokeAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist safety reply for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     try {
       await this.replyUploader.sendFullReply(reply);
@@ -697,18 +731,26 @@ export class VendorService {
     };
 
     if (asrText) {
-      await this.prisma.message.create({
-        data: {
-          deviceId: device.id,
-          turnId,
-          role: "user",
-          content: asrText,
-          status: "completed",
-          mode: "adventure_story",
-          rawPayload: { asrText },
-          spokeAt: new Date(),
-        },
-      });
+      // best-effort：这次 create 发生在任何 chunk 之前，抛错就等于整轮静音，
+      // 而段落内容此时已经由引擎生成好了，没有理由因为它播不出去。
+      try {
+        await this.prisma.message.create({
+          data: {
+            deviceId: device.id,
+            turnId,
+            role: "user",
+            content: asrText,
+            status: "completed",
+            mode: "adventure_story",
+            rawPayload: { asrText },
+            spokeAt: new Date(),
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to persist adventure user message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
     }
 
     let seq = 0;
@@ -737,8 +779,15 @@ export class VendorService {
     await emit("", true);
 
     // 计时从引导词最后一个 chunk 的上传 ack 后开始，而非 LLM 生成时开始。
+    // 打点失败的后果只是 10s 沉默超时不生效，比整轮失败轻得多。
     if (adventureReply.action === "await_reply") {
-      await this.adventureService.markPromptPlaybackComplete(device.id);
+      try {
+        await this.adventureService.markPromptPlaybackComplete(device.id);
+      } catch (error) {
+        this.logger.error(
+          `Failed to mark adventure playback complete for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
     }
 
     try {
@@ -751,29 +800,137 @@ export class VendorService {
       );
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: responseText,
-        status: "completed",
-        mode: "adventure_story",
-        rawPayload: {
-          filler: null,
-          answer: responseText,
-          interactionResult: adventureReply.result ?? null,
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: responseText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: {
+            filler: null,
+            answer: responseText,
+            interactionResult: adventureReply.result ?? null,
+          },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
-    await this.adventureService.recordPresented(
-      device.id,
-      turnId,
-      adventureReply,
-    );
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure assistant message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+    try {
+      await this.adventureService.recordPresented(
+        device.id,
+        turnId,
+        adventureReply,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to record adventure presentation for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     return reply;
+  }
+
+  /**
+   * L0 兜底话术下行：整条链路都失败时，gateway / controller 调它保证设备端有声音。
+   *
+   * 与 sendSafetyReply 同走 chunk 通道（单 answer chunk + 收尾 + 全量兜底），
+   * 但**每一步都 best-effort**，且这个方法本身承诺永不抛错：它是最后一道闸，
+   * 最后一道闸再抛错就什么都没有了。
+   *
+   * 设备行查不到也照样下行——上传只需要对外 deviceId，4G 未绑定的设备
+   * 恰恰是最需要兜底话术的那一批。查不到就不落库（没有内部 id 可关联）。
+   *
+   * context.degraded=true 供设备端与流量录制区分正常回复与兜底回复。
+   */
+  async sendDegradedReply(
+    externalDeviceId: string,
+    text: string = ADVENTURE_DEGRADED_REPLIES.lastResort,
+    turnId: string = randomUUID(),
+  ): Promise<VendorTextOutDto> {
+    const reply: VendorTextOutDto = {
+      deviceId: externalDeviceId,
+      responseText: text,
+      context: { degraded: true },
+      ttsOptions: {},
+    };
+
+    let device: { id: string; deviceId: string } | null = null;
+    try {
+      device = await this.prisma.device.findUnique({
+        where: { deviceId: externalDeviceId },
+        select: { id: true, deviceId: true },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Degraded reply could not resolve device=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    try {
+      await this.replyUploader.sendChunk({
+        deviceId: externalDeviceId,
+        turnId,
+        seq: 0,
+        source: "answer",
+        delta: text,
+        isFinal: false,
+      });
+      await this.replyUploader.sendChunk({
+        deviceId: externalDeviceId,
+        turnId,
+        seq: 1,
+        source: "answer",
+        delta: "",
+        isFinal: true,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload degraded chunk for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    if (device) {
+      try {
+        await this.prisma.message.create({
+          data: {
+            deviceId: device.id,
+            turnId,
+            role: "assistant",
+            content: text,
+            // failed：这轮没有产出真实回答，不能混进正常对话统计
+            status: "failed",
+            mode: "free_chat",
+            rawPayload: { filler: null, answer: text, degraded: true },
+            spokeAt: new Date(),
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to persist degraded reply for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+        );
+      }
+    }
+
+    try {
+      await this.replyUploader.sendFullReply(reply);
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload full degraded reply for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    return reply;
+  }
+
+  private describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**

@@ -15,6 +15,7 @@ import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 describe("VendorService", () => {
@@ -1809,6 +1810,245 @@ describe("VendorService", () => {
       expect(guidance).toBeTruthy();
       expect(guidance!.content).toContain("绝不附和");
       expect(result.responseText).toContain("是不是和弟弟吵架了呀");
+    });
+  });
+
+  /**
+   * 备选链路（机芯厂 WS）的「永不沉默」。
+   *
+   * 这条链路的每个失败点都直接等于孩子听到静音：gateway 只会 emitError，
+   * 设备端收到 vendor:error 后无话可播。所以要求是——落库/审计失败绝不影响
+   * 已经生成好的内容播出；引擎与门禁失败降级到自由创作；连自由创作都失败时
+   * 还有一个 sendDegradedReply 可以调（gateway/controller 的最后一道闸）。
+   */
+  describe("备选链路的永不沉默", () => {
+    const setupBase = () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-d1",
+        deviceId: "dev-d1",
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "m-1" });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "x" },
+      ]);
+      mockAnswerStream("自由创作的故事");
+    };
+
+    const dto: VendorTextInDto = { deviceId: "dev-d1", asrText: "我想听故事" };
+
+    it("handleChildReply 抛错时降级到自由创作，不向上抛", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockRejectedValue(
+        new Error("engine down"),
+      );
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+      expect(llmService.completeStream).toHaveBeenCalled();
+    });
+
+    it("isCompletedToday 抛错时跳过冒险门禁，仍给出回复", async () => {
+      setupBase();
+      adventureService.isCompletedToday.mockRejectedValue(new Error("db down"));
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+    });
+
+    it("startToday 抛错时降级到自由创作", async () => {
+      setupBase();
+      adventureService.startToday.mockRejectedValue(new Error("engine down"));
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+    });
+
+    it("recordEntryBlocked 抛错不影响本轮回复", async () => {
+      setupBase();
+      adventureService.isCompletedToday.mockResolvedValue(true);
+      adventureService.recordEntryBlocked.mockRejectedValue(
+        new Error("db down"),
+      );
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+    });
+
+    it("安全拦截话术落库失败仍照常播出（L1 是安全闸，不能因为写库失败就沉默）", async () => {
+      setupBase();
+      prisma.message.create.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-d1",
+        asrText: "我不想活了",
+      });
+
+      expect(result.responseText).toMatch(/爸爸妈妈/);
+      expect(
+        uploadedChunks()
+          .map((c) => c.delta)
+          .join(""),
+      ).toContain("陪着你");
+    });
+
+    it("冒险回复落库失败不影响 chunk 播出", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["段落一", "段落二"],
+        action: "await_reply",
+      });
+      prisma.message.create.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("段落一\n段落二");
+      expect(uploadedChunks().map((c) => c.delta)).toEqual([
+        "段落一",
+        "段落二",
+        "",
+      ]);
+    });
+
+    it("recordPresented 抛错不影响已播出的冒险回复", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["段落一"],
+        action: "narrate",
+      });
+      adventureService.recordPresented.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("段落一");
+    });
+
+    it("markPromptPlaybackComplete 抛错不影响本轮回复", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["你要选哪个？"],
+        action: "await_reply",
+      });
+      adventureService.markPromptPlaybackComplete.mockRejectedValue(
+        new Error("db down"),
+      );
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("你要选哪个？");
+    });
+
+    describe("超时监听器", () => {
+      const timeoutListener = () =>
+        adventureService.registerTimeoutListener.mock.calls[0][0] as (
+          deviceId: string,
+          reply: unknown,
+        ) => Promise<void>;
+
+      it("注册在构造函数里", () => {
+        expect(adventureService.registerTimeoutListener).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(typeof timeoutListener()).toBe("function");
+      });
+
+      it("设备查询抛错时不产生未捕获拒绝（定时器里的异常没人接）", async () => {
+        prisma.device.findUnique.mockRejectedValue(new Error("db down"));
+
+        await expect(
+          timeoutListener()("uuid-x", { texts: ["继续吧"], action: "narrate" }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("下行推送与落库抛错时同样不产生未捕获拒绝", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-x",
+          deviceId: "dev-x",
+        });
+        prisma.message.create.mockRejectedValue(new Error("db down"));
+        replyUploader.sendChunk.mockRejectedValue(new Error("ws down"));
+
+        await expect(
+          timeoutListener()("uuid-x", { texts: ["继续吧"], action: "narrate" }),
+        ).resolves.toBeUndefined();
+      });
+    });
+
+    describe("sendDegradedReply（L0 最后一道闸）", () => {
+      it("上传兜底话术并返回同形状信封", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-d1",
+          deviceId: "dev-d1",
+        });
+        prisma.message.create.mockResolvedValue({ id: "m-1" });
+
+        const result = await service.sendDegradedReply("dev-d1");
+
+        expect(result).toEqual({
+          deviceId: "dev-d1",
+          responseText: ADVENTURE_DEGRADED_REPLIES.lastResort,
+          context: { degraded: true },
+          ttsOptions: {},
+        });
+        expect(uploadedChunks().map((c) => c.delta)).toEqual([
+          ADVENTURE_DEGRADED_REPLIES.lastResort,
+          "",
+        ]);
+        expect(uploadedChunks().at(-1)?.isFinal).toBe(true);
+        expect(replyUploader.sendFullReply).toHaveBeenCalled();
+      });
+
+      it("可指定话术（引擎级降级与最后一级降级用不同文案）", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-d1",
+          deviceId: "dev-d1",
+        });
+        prisma.message.create.mockResolvedValue({ id: "m-1" });
+
+        const result = await service.sendDegradedReply(
+          "dev-d1",
+          ADVENTURE_DEGRADED_REPLIES.engine,
+        );
+
+        expect(result.responseText).toBe(ADVENTURE_DEGRADED_REPLIES.engine);
+      });
+
+      it("设备行不存在时仍返回话术：上传只需要对外 deviceId", async () => {
+        prisma.device.findUnique.mockResolvedValue(null);
+
+        const result = await service.sendDegradedReply("dev-unknown");
+
+        expect(result.responseText).toBe(ADVENTURE_DEGRADED_REPLIES.lastResort);
+        expect(uploadedChunks()).toHaveLength(2);
+        expect(prisma.message.create).not.toHaveBeenCalled();
+      });
+
+      it("落库与上传全挂时也返回话术，绝不抛错", async () => {
+        prisma.device.findUnique.mockRejectedValue(new Error("db down"));
+        prisma.message.create.mockRejectedValue(new Error("db down"));
+        replyUploader.sendChunk.mockRejectedValue(new Error("ws down"));
+        replyUploader.sendFullReply.mockRejectedValue(new Error("ws down"));
+
+        await expect(service.sendDegradedReply("dev-d1")).resolves.toEqual({
+          deviceId: "dev-d1",
+          responseText: ADVENTURE_DEGRADED_REPLIES.lastResort,
+          context: { degraded: true },
+          ttsOptions: {},
+        });
+      });
     });
   });
 });

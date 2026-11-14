@@ -50,17 +50,32 @@ VendorService.handleTextIn
 
 | 模型 | 职责 | 关键约束 |
 |---|---|---|
-| `AdventureEpisode` | IP、季、集、前情回顾与发布状态 | `[characterKey, season, episodeNumber]` 唯一 |
-| `AdventureSegment` | 人写旁白与四种交互原语 | `[episodeId, order]` 唯一 |
-| `AdventureProgress` | 每个设备每一集的可变进度、星光、等待起点 | `[deviceId, episodeId]` 唯一；`completedAt` 记录实际完集时间 |
+| `AdventureEpisode` | IP、季、集、发布状态、retire 墓碑与当前版本指针 | `[characterKey, season, episodeNumber]` 唯一；`title`/`recap` 只是当前版本的物化副本 |
+| `AdventureSegment` | 人写旁白与四种交互原语；**当前发布版本**的物化副本 | `[episodeId, order]` 唯一；发布事务按新版本 payload 重写 |
+| `AdventureEpisodeVersion` | 整集内容快照；已发布版本不可变，改动只能派生新版本 | `[episodeId, version]` 唯一；对 episode 是 `onDelete: Restrict`，历史版本永不删除 |
+| `AdventureProgress` | 每个设备每一集的可变进度、星光、等待起点、**锁定版本** | `[deviceId, episodeId]` 唯一；`completedAt` 记录实际完集时间 |
 | `AdventureDailyRecord` | 每日分配档案；跨天续玩保留 `assignedDate` | `[deviceId, assignedDate]` 唯一；`completedDate` 是每日完成门禁 |
 | `AdventureEvent` | 只追加审计历史，不复制 ASR/播报全文 | `eventKey` 唯一；完成事件幂等 |
+| `AdventureContentAuditLog` | 内容操作审计：谁、何时、在哪个环境、做了什么、理由是什么 | 只追加；只有 create/find；**故意不建外键**，被引用实体消失后仍可追溯 |
 
 每日完成与事件在同一事务写入；播报全文仍保存在 `Message`，`AdventureEvent` 只保存事件类型、轮次、段落序号和少量结构化元数据。
 
+进度状态（`AdventureProgress.status` / `AdventureDailyRecord.status` 均为字符串，不是 enum）：
+
+| 状态 | 含义 | 选集时 | 可续玩 |
+|---|---|---|---|
+| `in_progress` | 正在玩 | 视为当前集，续玩 | 是 |
+| `awaiting_reply` | 停在交互点等孩子开口 | 视为当前集，续玩 | 是 |
+| `exited` | 孩子明确拒绝，当天温柔收尾 | 视为当前集，仅明确请求时续玩 | 是 |
+| `completed` | 已完集 | 永久排除 | 否 |
+| `failed_over` | **故障自愈收走**：当日那一集确认坏了，孩子被平移到下一集 | **不排除**（内容修好后可重新分配） | 否，但可重试 |
+| `abandoned` | **admin retire 收走**：该集已下线且孩子跨天仍未听完 | 永久排除 | 否，永久 |
+
+`failed_over` 与 `abandoned` 必须是两个状态：前者是技术故障，内容修好后孩子仍应能拿回那一集；后者是内容方的主动决定，不允许再分配。
+
 ## 4. 状态机与入口
 
-状态：`idle → narrating → awaiting_reply → narrating → … → completed → idle`；明确拒绝时进入 `exited`，之后只能恢复已分配的同一集。
+状态：`idle → narrating → awaiting_reply → narrating → … → completed → idle`；明确拒绝时进入 `exited`，之后只能恢复已分配的同一集；内容故障时进入 `failed_over` 并平移到下一集；内容 retire 且跨天未听完时进入 `abandoned`。
 
 | 场景 | 结果 |
 |---|---|
@@ -70,7 +85,28 @@ VendorService.handleTextIn
 | 今日完成后重听、换一集或泛化故事 | 禁止进入冒险，路由自由创作故事 |
 | 今日完成后明确英语／成语故事 | 尊重明确意图，不进入冒险 |
 | 下一集未发布 | 停止选集，不跳过、不循环 |
+| 下一集已 retire | **跳过它**，选后面的已发布集（retire 不是内容边界，未发布才是） |
 | 全部集已完成 | 返回自由故事，不重播旧集 |
+| 播放途中内容损坏／状态病态／未知异常 | 见 §6.6 故障自愈：平移到下一集，绝不让孩子面对沉默 |
+
+## 4.1 版本锁定（playing 中的故事被 admin 改掉时）
+
+孩子的进度在分配那一刻记下 `episodeVersionId`，此后**只播这个版本快照**：
+
+| 情况 | 引擎行为 |
+|---|---|
+| 无锁定（历史进度） | 读 `adventure_segments` 表，与既有行为完全一致 |
+| 锁定 == `episode.currentVersionId` | 读快照 payload（内容与 segments 表一致，且不依赖两者是否同步） |
+| 锁定 != 当前版本（admin 已发布新版） | 读**被锁定那一版**的 payload：孩子听完自己那一版，段数变少不会被误判完集，交互点被换型也仍按原选项匹配 |
+| 版本行缺失或 payload 结构损坏 | 告警并回落 segments 表，播放不中断 |
+
+快照 payload 不可变，因此进程内做容量上限 200 的缓存，永不失效；`onModuleDestroy` 清空。
+
+retire 一集时，**当天已经被分配到这一集的孩子完全不动**（继续听完他锁定的那一版）；跨天仍未听完的进度由巡检标为 `abandoned`，之后不再分配。
+
+## 4.2 内容不可原地修改
+
+已发布的故事不允许原地编辑，否则玩到一半的孩子会与玩到一半退出的孩子读到不一致的内容。改动一律是「派生新版本 → 发布」：发布事务把旧版本标 `superseded`、新版本标 `published`、重写 `episode.currentVersionId` 与 segments 表物化副本，全部在一次事务内完成。回滚同样是「把历史版本内容派生成一个新版本再发布」，不改写任何历史版本。
 
 ## 5. 交互五类处置（行为契约）
 
@@ -113,6 +149,38 @@ VendorService.handleTextIn
 ### 6.5 设备隔离
 
 - 定时器、progress、上行路由全部按 deviceId 隔离；A 设备的上行不得触发 B 设备的等待取消。
+
+### 6.6 故障自愈（孩子那一轮绝不沉默）
+
+沉默超时只覆盖「孩子不开口」。还有一类更危险的情况：**我方内容或状态坏了**，孩子开口了却没有任何回复。为此有一套分层兜底，任何一层失效都有下一层接住。
+
+| 层 | 触发 | 动作 |
+|---|---|---|
+| L0 | 兜底链路自身也抛错 | 直接返回进程内常量话术：不查库、不调 LLM、`Message` 落库 best-effort |
+| L1 | 冒险引擎任一公开方法抛错 | 返回 `null`，让 vendor 层落到既有自由故事链路（复用现成 prompt，不新造文案） |
+| L2 | 单设备状态病态（见下表） | 修复状态，或平移到下一集 |
+| L3 | 定时巡检（60s） | 扫全体设备的病态进度，逐台自愈，单台异常不影响其余 |
+| L4 | 同一集短时间内反复出事 | **只标记 + 告警**，不自动改写内容、不自动回滚（回滚必须由人授权） |
+
+平移入口是 `AdventureService.recoverToNextEpisode(deviceInternalId, reason)`，契约：
+
+- 今日已完成过一集 → 什么都不做（每日额度是硬门禁，兜底不得绕过它）；今天已经玩成了，就不存在「坏了」这一说；
+- 当前没有在飞的冒险 → 什么都不做；
+- 没有可接管的下一集（后面全未发布／全完成／全 retire）→ 返回 `null`，由上层落到自由对话，**不抛错**；
+- 单轮最多平移一次，不递归（下一集又坏则交给 L0/L1）；
+- 旧集进度标 `failed_over`（不是 `abandoned`）：内容修好后同一集仍可重新分配给这个孩子；
+- 当日 daily 行受 `[deviceId, assignedDate]` 唯一约束，**复用该行改指下一集**；跨天的陈旧 daily 先标 `failed_over` 收口，再为今天新建一行；
+- 写入 `reassigned_after_failure` 事件，payload 带 `reason`、`fromEpisodeId`、`toEpisodeId`、`reusedDaily`，可审计、可在看板复盘。
+
+巡检要覆盖的病态（都是真实代码路径能产生的）：
+
+1. `awaiting_reply` 但 `waitingSince IS NULL`——超时扫描要求 `waitingSince <= now`，这类记录**永远扫不到**，孩子永久卡死；
+2. 等待态但锁定版本里 `nextSegmentOrder - 1` 不是交互点——`currentInteraction` 找不到，上行被忽略；
+3. 锁定版本指向不存在的版本行；
+4. `nextSegmentOrder` 超过锁定版本的段数；
+5. daily 仍 `in_progress` 但 progress 已 `abandoned` / `completed`；
+6. daily `in_progress` 且 `assignedDate` 早于今天、所属集已 retire——retire 卡死；
+7. segments 表与当前版本 payload 不一致（发布事务被打断）。
 
 ## 7. 语音链路与意图路由
 

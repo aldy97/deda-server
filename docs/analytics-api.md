@@ -3,13 +3,20 @@
 > 适用范围：deda-dashboard（内部数据看板），与小程序 C 端接口物理隔离。
 > 实现：deda-server `src/modules/analytics/`，路由前缀 `/analytics/*`。
 > 统一约定：响应信封 `{ code, message, data }`，`code=0` 成功；camelCase；ISO 8601 时间；
-> 日期参数一律 `YYYY-MM-DD`、闭区间、Asia/Shanghai；**所有接口均为 GET**。
+> 日期参数一律 `YYYY-MM-DD`、闭区间、Asia/Shanghai；**分析类接口均为 GET**
+> （写操作只出现在「设备运维」与「冒险内容管理」两节，各自在节首声明）。
 > 口径标注：`estimated` = 估算（每条 user 消息 × 0.5 分钟）；`proxy` = 代理指标；未标注 = 精确计数。
 
 ## 鉴权
 
 管理员 JWT 与小程序 JWT 物理隔离：独立 secret（`ANALYTICS_JWT_SECRET`）、payload 必须带 `scope: "analytics"`。
 一期账号来源为环境变量白名单 `ANALYTICS_ADMIN_USERS`（JSON 数组，scrypt 哈希，格式见 `.env.example`）。
+
+`ANALYTICS_ADMIN_USERS` 里每个账号可带可选的 `scopes` 数组，声明该账号能碰哪些**专项模块**；
+签发时写入 JWT 的 `scopes` 声明，缺省为 `["analytics"]`。目前唯一的专项作用域是
+`adventure-content`（冒险内容管理台）——没有它的账号对 `/analytics/adventure-admin/*`
+**连读都是 403**。本次改动之前签发的 token 没有 `scopes` 字段，会被补成 `["analytics"]`，
+即「重新登录之前拿不到内容权限」。
 
 ```
 GET /analytics/auth/login?username=&password=
@@ -583,6 +590,373 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 - 403 `PROMPT_WRITE_ENABLED=false`（环境级策略拒绝，与单次请求的参数无关）
 - 404 未知 prompt key / 回滚目标版本不存在
 - 409 乐观锁冲突 / 没有待发布的草稿 / `revision` 与当前草稿号不符
+
+## 冒险内容管理（Adventure Studio）
+
+> 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。
+> 实现：deda-server `src/modules/adventure-admin/`，路由前缀 `/analytics/adventure-admin/*`。
+> 挂在这个前缀下是刻意的：dashboard 的 vite proxy 与 nginx 已整段转发 `/analytics`，
+> 新增能力**不需要改任何部署配置**。
+
+内容创作者在这里写「冒险故事」的每一集：草稿 → 校验 → 试播 → 发布 → 出问题回滚 → 彻底不用了下架。
+孩子侧播放引擎（`src/modules/adventure/`）只读**已发布的版本快照**，两者不互相注入服务。
+
+### 两道正交的权限闸
+
+| 闸 | 跟着谁走 | 由什么决定 | 不满足时 |
+| --- | --- | --- | --- |
+| scope | 人 | JWT 的 `scopes` 是否含 `adventure-content` | 读写一律 403 |
+| profile | 环境 | `CONTENT_ADMIN_PROFILE=authoring` | 只读；所有写操作 403 |
+
+两者必须同时满足才能写。即使 prod 的账号白名单被误配成和 staging 一样，prod 依然写不动。
+`CONTENT_ADMIN_PROFILE` **缺省 / 拼错 / 大小写不对一律按 readonly 处理**（fail-safe）：
+漏配的后果是「作者被挡住」，不是「prod 意外可写」。
+
+「写操作」按 HTTP 方法判定，**非 GET/HEAD/OPTIONS 一律视为写**。新增一个 POST 路由时忘记标注，
+后果是它在只读环境被挡住，而不是 prod 上多出一个能改内容的口子。确实不写库的 POST
+（`lint` / `simulate` / `import/preview`）用 `@ContentReadOnly()` 显式豁免——目前只有这三个，
+`export` **不在其中**（它会落一条 `export` 审计）。
+
+### 内容形状
+
+```
+identity = { characterKey: "elly"|"polly", season: 1, episodeNumber: number }
+businessKey = "elly/1/3"        // 人可读、可手输确认，也是破坏性操作 confirmText 的比对目标
+
+content = {
+  title, recap?,
+  segments: [{
+    order,                      // 必须严格 0..n-1 连续，引擎用 order >= segments.length 判完集
+    kind,                       // "narration" | "interaction"
+    text,
+    interactionType?,           // open_question | two_choice | repeat_after_me | reward
+    options?,                   // two_choice 用 choices[{key,text,reply}]；repeat_after_me 用 praise
+    fallbackText?, exitText?,   // 需要孩子开口的三种原语必须有兜底与退出话术
+    rewardStar?
+  }]
+}
+```
+
+身份字段**不进内容哈希**，否则同样的内容在 staging 与 prod 会算出不同的 hash，导入就永远判成 replace。
+
+### 读接口
+
+```
+GET /analytics/adventure-admin/capabilities
+→ { season, characterKeys, interactionTypes, replyWaitingInteractionTypes, segmentKinds,
+    lintThresholds, simulationThresholds, profile, authoring }
+   // 编辑器启动时先拿这个：枚举、阈值、能不能写，全部由服务端说了算，前端不硬编码
+
+GET /analytics/adventure-admin/episodes?characterKey=&published=&includeRetired=&search=&page=&pageSize=
+→ { items: [EpisodeSummary], total }
+   // EpisodeSummary: { id, characterKey, season, episodeNumber, businessKey, title, recap,
+   //   published, retiredAt, currentVersionId, currentVersion, publishedAt,
+   //   hasDraft, draftVersionId, draftVersion, draftUpdatedAt, draftUpdatedBy, createdAt, updatedAt }
+   // 默认不含已 retire 的集；pageSize 最大 200
+
+GET /analytics/adventure-admin/episodes/:episodeId
+→ { summary, content, contentSource: "draft"|"published"|"empty", baseVersionId,
+    baseDraftUpdatedAt, lint, impact }
+   // content 是编辑器该加载的那一份：草稿优先，其次当前发布版，最后是空壳
+   // baseVersionId + baseDraftUpdatedAt 是乐观锁基线（双令牌），存草稿时必须原样带回。
+   //   baseDraftUpdatedAt 是当前草稿行的 updatedAt（ISO 串），没有草稿时为 null。
+   //   之所以要两个：草稿是**可变行**，原地保存后 id 与 version 都不变，只比 id
+   //   检测不到「我加载之后别人往同一行里又存了一次」，那种情况会静默互相覆盖。
+
+GET /analytics/adventure-admin/episodes/:episodeId/versions
+→ [VersionSummary]
+   // { id, version, status: draft|published|superseded|discarded, contentHash, changeNote,
+   //   createdBy, createdByName, publishedAt, publishedBy, supersededById,
+   //   createdAt, updatedAt, title, segmentCount, isCurrent }
+
+GET /analytics/adventure-admin/episodes/:episodeId/versions/:versionId
+→ { meta: VersionSummary, content }
+
+GET /analytics/adventure-admin/episodes/:episodeId/diff?left=&right=
+→ { left, right, titleChanged, recapChanged, added, removed, changed, segmentDiffs }
+
+GET /analytics/adventure-admin/episodes/:episodeId/impact
+→ { devicesPlayingToday,        // 今日已分配且仍在播：retire 不会打断它们
+    devicesStaleCrossDay,      // 跨天陈旧的在播设备：retire 会收走，下次开机换一集
+    devicesPinnedToOlderVersions,  // 仍锁在旧快照上的在播设备：说明历史发布确实造成了并行版本
+    totalDevicesEverStarted, publishedVersionCount }
+
+GET /analytics/adventure-admin/audit?episodeId=&actorUsername=&action=&from=&to=&page=&pageSize=
+→ { items: [{ id, action, entityType, episodeId, episodeVersionId, businessKey,
+              actorUsername, actorDisplayName, profile, reason, detail,
+              sourceBundleHash, createdAt }], total }
+   // action: create | create_draft | update_draft | publish | revert | retire | restore
+   //         | discard_draft | discard | export | import | import_noop | self_check_failed
+```
+
+### 校验与试播（不写库，只读环境同样可用）
+
+```
+POST /analytics/adventure-admin/lint
+body { episodeId?, identity?, content, forPublish? }
+→ LintReport { ok, issues, errors, warnings }
+   // issue: { severity, code, message(中文), businessKey, segmentOrder?, path? }
+   // path 形如 segments[2].options.choices[0].text，前端据此把错误定位到具体表单字段
+   // forPublish=true 额外要求 1..n-1 集都已发布（PREDECESSOR_NOT_PUBLISHED）
+
+POST /analytics/adventure-admin/simulate
+body { identity, content }
+→ { businessKey, recap, beats, totalSpokenChars, estimatedSeconds, awaitsReplyCount,
+    totalStars, problems }
+   // beats: [{ says, stopsAtOrder, waitsForReply, interactionType, starsAwarded,
+   //          choices, praise, outcome }]
+   // 时长估算按 4 字/秒；超过 maxAwaitPoints / maxSessionSeconds 会进 problems
+```
+
+阈值全部可用环境变量覆盖（`ADVENTURE_LINT_*` / `ADVENTURE_SIM_*`，见 `.env.example`），
+`capabilities` 会把生效值回给前端。
+
+### 写接口
+
+所有写操作都要求 `reason`（**至少 8 个字**）：半年后别人（包括你自己）只能靠审计看懂当时为什么这么改。
+破坏性操作额外要求 `confirmText`——原样输入业务键，抄错就是 400 `CONFIRM_TEXT_MISMATCH`。
+理由与确认文本的错误一律由领域层给出，带 `code` 与中文说明，不是 class-validator 的通用 400。
+
+```
+POST /analytics/adventure-admin/episodes
+body { identity, content, reason }
+→ { episodeId, versionId, version, businessKey, contentHash, lint }
+   // 只落草稿，不发布。业务键已被占用 → 400 CONTENT_REJECTED（lint code BUSINESS_KEY_TAKEN）；
+   //   两个人并发抢同一集号、绕过 lint 撞上数据库唯一约束时 → 409 BUSINESS_KEY_TAKEN。
+   // 集号被永久占用（见 discard）。
+
+POST /analytics/adventure-admin/episodes/:episodeId/draft
+body { content, reason, baseVersionId?, baseDraftUpdatedAt?, force? }
+→ { episodeId, versionId, version, businessKey, contentHash, lint, created, draftUpdatedAt }
+   // 乐观锁（双令牌）：baseVersionId 与库里草稿 id 不符，**或** baseDraftUpdatedAt 与库里
+   //   草稿的 updatedAt 不符 → 409 DRAFT_CONFLICT，data 带 currentDraft{id, version,
+   //   updatedBy, updatedAt}，前端提示「谁在你之前改过」。令牌解析不出来也算不符（fail closed）。
+   //   force=true 才覆盖（UI 上是单独的红色按钮）。两个令牌都不带 = 明确不参与并发保护
+   //   （只有导入链路这样：它在 import/preview 阶段有自己更强的闸——目标集存在别人
+   //     未发布且内容不同的草稿时直接判 reject，不静默覆盖）。
+   // 响应里的 draftUpdatedAt 是**下一次保存该带的新令牌**：编辑器必须改用它，
+   //   否则会被自己刚存的那一次顶成 409（自己锁死自己）。
+
+POST /analytics/adventure-admin/episodes/:episodeId/publish
+body { reason }
+→ { episodeId, versionId, version, businessKey, contentHash, segmentCount, lint,
+    impact, selfCheckDrift }
+   // 生成新的 published 快照并切换 currentVersion，旧快照转 superseded（历史不删）。
+   // 已 retire 的集不能直接发布，必须先 restore。
+   // selfCheckDrift: [] = 发布后自检无漂移；非空 = 库里的段与刚发布的内容不一致（只告警，
+   //   不回滚，同时落一条 self_check_failed 审计）；null = 自检本身失败（已记日志）。
+
+POST /analytics/adventure-admin/episodes/:episodeId/revert
+body { targetVersionId, reason, confirmText }
+→ { episodeId, versionId, newVersion, businessKey, revertedToVersionId, revertedToVersion,
+    draftStillPending, lint, impact, selfCheckDrift }
+   // 「快速回滚」= 把目标快照的内容复制成一个**新版本**再发布，历史一行都不改。
+   // 目标必须是 published / superseded；跨集回滚 → 404。
+   // 回滚不动未发布草稿，draftStillPending=true 时前端必须提醒创作者「你的草稿还在」。
+   // 允许对已 retire 的集回滚（先修内容再决定要不要 restore）。
+
+POST /analytics/adventure-admin/episodes/:episodeId/retire
+body { reason, confirmText }
+→ { episodeId, businessKey, retiredAt, impact, staleDailyCount, abandonedProgressCount, message }
+   // 墓碑，不是删除。**当日在播的孩子完全不动**；只把 assignedDate < today 且仍 in_progress
+   // 的当日记录收成 abandoned，对应设备进度也收成 abandoned，下次开机换一集。
+
+POST /analytics/adventure-admin/episodes/:episodeId/restore
+body { reason }
+→ { episodeId, businessKey, abandonedProgressNotRestored, message }
+   // 只撤销墓碑。当初被收成 abandoned 的进度**不会**被拉回来——那些孩子已经换到别的集了，
+   // 硬拉回去等于让他们重听一遍开场。
+
+POST /analytics/adventure-admin/episodes/:episodeId/discard-draft
+body { reason }
+→ { episodeId, businessKey, discardedVersionId, version }
+
+POST /analytics/adventure-admin/episodes/:episodeId/discard
+body { reason, confirmText }
+→ { episodeId, businessKey, discardedDraftCount, message }
+   // 只能作废**从未发布过**的集；发布过的集请走 retire。
+   // 实现为墓碑 + 草稿转 discarded，业务键**永久占用**，不能拿同一个集号重来。
+```
+
+**本节没有任何 DELETE 路由**，服务层也没有 delete 方法（有结构性单测钉住这一点）。
+staging 与 prod 的安全要求一致：内容只能被 retire / discard 成墓碑，不能物理删除——
+审计、版本、以及可能还 pin 在旧快照上的进度都要有可追溯的落点。
+
+### staging → prod 搬运
+
+prod 是只读环境，内容只能在 staging 改好、验证过，再整包搬过去。
+
+```
+POST /analytics/adventure-admin/export
+body { episodeIds?, characterKey?, includeRetired? }
+→ { bundle, bundleHash, confirmToken, episodeCount, skipped: [{ businessKey, reason }] }
+   // 只导**当前已发布快照**（currentVersionId 指向且 status=published）；草稿不进 bundle。
+   // bundle.episodes[] 是扁平形状：{characterKey, season, episodeNumber, title, recap, segments}。
+   // 什么都没导到 → 400 NOTHING_TO_EXPORT，data 带 skipped 说明每一集为什么被跳过。
+   // bundleHash 只由 bundleSchemaVersion + episodes 决定，不含 exportedAt / sourceProfile，
+   //   所以同一份内容在两个环境算出的 hash 一致。
+
+POST /analytics/adventure-admin/import/preview        // dry-run，不写库、不审计
+body { bundle }
+→ { ok, bundleHash, confirmToken, parseErrors, parseWarnings, message,
+    plan: { ok, bundleHash, items, adds, replaces, upToDate, rejects } }
+   // items[]: { businessKey, action: add|replace|already_up_to_date|reject,
+   //            incomingHash, existingHash, episodeId?, reason?, diff? }
+
+POST /analytics/adventure-admin/import
+body { bundle, reason, confirmText /* = confirmToken */, expectedBundleHash? }
+→ { bundleHash, confirmToken, plan, written: [{ businessKey, action, episodeId, versionId, version }],
+    skipped, message }
+```
+
+导入的闸门按顺序全部通过才写，任一不过**整批不写**：
+
+1. `reason` 至少 8 个字；
+2. 服务端**重新解析并重算** bundle（不信客户端传来的 plan / hash）；
+3. `parseErrors` 非空 → 400 `BUNDLE_INVALID`；
+4. `expectedBundleHash` 与重算结果不符 → 409 `BUNDLE_HASH_MISMATCH`（防「预览的是 A、提交的是 B」）；
+5. `confirmText` 不等于本次 `confirmToken` → 400 `CONFIRM_TEXT_MISMATCH`；
+6. `plan.ok` 为假（存在 reject）→ 400 `IMPORT_PLAN_REJECTED`。
+
+会被判 reject 的情况：bundle 内业务键重复；目标集已 retire；目标集有**别人未发布的本地草稿**
+且内容既不等于草稿也不等于当前发布版（错误消息会点名是谁的草稿）；**这一集一段可用段落都没有**
+（bundle 里本来就是空的，或所有段落都因 `order`/`kind`/`text` 非法在解析时被丢弃，见 `parseWarnings`）；
+内容过不了 lint 或会丢段。
+
+拒绝空壳集是刻意的：空壳集自己发布不出去（lint `NO_SEGMENTS` 挡着），但一旦落地就成了
+「目标环境有未发布草稿」，会让**之后每一次正常导入都卡住**，而且拒绝理由指向一个根本没人在写的草稿。
+`already_up_to_date` 不算 reject，只是跳过——这让导入天然幂等：中途断了重跑一遍即可。
+
+导入**只落草稿，永不自动发布**。prod 上的最后一步「让内容面对孩子」必须是人手动点发布，
+搬运工具不该有能力悄悄改变线上播放内容。
+
+### 自愈与兜底（recovery）
+
+孩子那一侧的兜底分五层，越往后越「不依赖前一层还活着」：
+
+| 层 | 触发点 | 行为 |
+| --- | --- | --- |
+| L0 | vendor gateway / controller 的任一异常 | 先发一句降级话术再发错误帧，孩子永远听得到一句话 |
+| L1 | 引擎 `startToday` / `handleChildReply` / `checkTimeout` 抛错 | 记引擎失败 → `recoverToNextEpisode` → 返回下一集或最后一道兜底话术 |
+| L2 | LLM 主链路（流式 / 非流式）抛错 | 零 chunk 才补兜底话术；已播半句只优雅收尾，绝不插话 |
+| L3 | 恢复熔断器 | 10 分钟内 5 次兜底失败 → 标记 tripped + 告警，**不自动改任何内容** |
+| L4 | 定时巡检（默认 60s） | 找出「连孩子开口那一刻都走不通」的静默病态并修成可自愈状态 |
+
+```
+GET  /analytics/adventure-admin/recovery              // 只读，只读环境同样可用
+→ { breaker: { enabled, tripped, failureCount, degraded, trippedAt, windowMs,
+               threshold, recentReasons, error },
+    config: { enabled, sweepIntervalMs, staleAwaitMs, staleAwaitAction,
+              breakerWindowMs, breakerThreshold, breakerTrippedTtlSeconds },
+    sweeps: [SweepReport] /* 最近 20 份，新在前 */,
+    engineFailures: [{ deviceId, phase, reason, recovered, at }] /* 最近 50 条 */ }
+
+POST /analytics/adventure-admin/recovery/sweep        // 写操作：只读环境 403
+body { reason }
+→ { report: SweepReport, audited: boolean }
+
+POST /analytics/adventure-admin/recovery/reset        // 写操作：只读环境 403
+body { reason }
+→ { ok: true, audited: boolean }
+```
+
+`SweepReport`：`{ startedAt, finishedAt, durationMs, skipped, reason, scanned:
+{ progresses, dailyRecords, episodes }, repairs: [{ code, deviceId, ... }],
+alerts: [{ code, detail, ... }], errors: [string] }`。
+
+两个 POST 都会写一条审计（`action` = `recovery_sweep` / `recovery_breaker_reset`，
+`entityType` = `recovery`，`businessKey` = `adventure/recovery`，`episodeId` 为空——
+它们不针对某一集）。`reason` 与内容变更共用同一条规则：至少 8 字，否则 400
+`REASON_REQUIRED`。`detail` 里的 `repairs` / `alerts` 各截断到 50 条，同时带
+`repairCount` / `alertCount` 真实总数。审计写入是尽力而为：动作已经生效时不会因为
+审计失败而把结果丢掉，改为回 `audited: false` 并记 error 日志，由前端显式提示「这次没留痕」。
+
+熔断器是**授权回滚**：它只标记与告警，绝不自动改内容、绝不自动切版本。
+`reset` 是人的动作——确认上游已恢复之后手动解除降级。`degraded: true` 表示
+Redis 不可用，此时熔断器**故意不工作**（宁可漏报，也不能因为读不到计数就把
+所有设备判成故障）。
+
+巡检的安全边界（比「修得全」更重要）：**绝不改写内容**，**绝不调用
+`recoverToNextEpisode`**（那会在孩子不在场时烧掉当日额度），只把病态标成
+`exited` / `abandoned` / `failed_over` 这类「下次孩子开口就能自然恢复」的状态。
+kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + 原因）——
+能被 API 绕过的开关不是开关。
+
+八个 detector：
+
+| code | 动作 |
+| --- | --- |
+| `STALE_AWAITING_REPLY` | 默认 **off**（`ADVENTURE_RECOVERY_STALE_AWAIT_ACTION=off/alert/exit`）。主链路上孩子停在互动点时 `waitingSince` 刻意保持 null，可能一停几小时，改判 exited 会让「我选第二个」掉进意图分类变闲聊 |
+| `AWAITING_NON_INTERACTION` | progress → `exited` + 告警 |
+| `VERSION_ROW_MISSING` / `VERSION_PAYLOAD_UNUSABLE` | **仅告警**：引擎已回落 segments 表，改 pin 等于让孩子中途换版本 |
+| `SEGMENT_ORDER_OVERFLOW` | 等待态 → `exited`；在播态仅告警（`playFrom` 的 isDone 会自然收口） |
+| `DAILY_PROGRESS_STATE_CONFLICT` | daily 镜像 progress 终态；completed 时补 `completedAt`，且 `completedDate` 取进度里的完成日期而不是今天 |
+| `RETIRED_STALE_DAILY` | `assignedDate < today` 且该集已 retire → daily 与 progress 双双 `abandoned` |
+| `SEGMENT_TABLE_DRIFT` | 仅告警（比对 `currentVersionId` 快照与 segments 表的 order/kind/text） |
+| `DAILY_WITHOUT_PLAYABLE_PROGRESS` | 仅告警（下次 `startToday` 自愈） |
+
+环境变量（全部可选，留空用代码内默认值）：
+
+```
+#ADVENTURE_RECOVERY_ENABLED=true
+#ADVENTURE_RECOVERY_SWEEP_INTERVAL_MS=60000
+#ADVENTURE_RECOVERY_STALE_AWAIT_MS=120000
+#ADVENTURE_RECOVERY_STALE_AWAIT_ACTION=off
+#ADVENTURE_BREAKER_WINDOW_MS=600000
+#ADVENTURE_BREAKER_THRESHOLD=5
+#ADVENTURE_BREAKER_TRIPPED_TTL_SECONDS=3600
+```
+
+告警走日志固定标记，便于在 ARMS / 日志系统上直接建规则：
+`ADVENTURE_RECOVERY_BREAKER_TRIPPED`（熔断）、`ADVENTURE_RECOVERY_ALERT`（巡检告警，
+按 code 聚合成一行）、`ADVENTURE_ENGINE_FAILURE`（引擎兜底）。
+
+### 错误码约定
+
+线上形状（信封本身与全站一致，`code` 永远是 HTTP 状态码）：
+
+```
+{ "code": 409,
+  "message": "草稿已被别人改过，请刷新后再试",   // 给人看的中文
+  "data": { "code": "DRAFT_CONFLICT",           // 给代码看的领域码
+            "currentDraft": { ... } } }          // 附带字段，随领域码而定
+```
+
+领域码在 **`data.code`**，不是 `code`。这一点由管理台专属的
+`ContentAdminExceptionFilter` 保证：领域层抛的是
+`new BadRequestException({ message, code, ...附带字段 })`，而全局
+`HttpExceptionFilter` 只取 `message`，会把领域码与附带字段一起吃掉。
+过滤器只挂在 `AdventureAdminController` 上，全站其余路由的响应体逐字不变；
+没有附带字段时 `data` 仍是 `null`，不会多出空壳对象。
+前端**按 `data.code` 分支，不要匹配中文 message**（文案会改，码不会）。
+
+| `data.code` | 状态 | 含义与 `data` 里的附带字段 |
+| --- | --- | --- |
+| `REASON_REQUIRED` / `REASON_TOO_LONG` | 400 | 理由字数不合规（至少 8 字，至多 300 字） |
+| `CONFIRM_TEXT_MISMATCH` | 400 | 确认文本与业务键不符，带 `expected` |
+| `CONTENT_REJECTED` | 400 | 身份 / 禁用词 / 业务键已被占用等 lint 阻断项，带完整 `lint` |
+| `SEGMENT_WOULD_BE_DROPPED` | 400 | 规范化会吃掉段落（缺文本 / 段号非法 / 类型非法），带 `lint` |
+| `PUBLISH_BLOCKED` | 400 | 还有 lint error 未清，带 `lint` |
+| `NO_DRAFT` | 400 | 没有待发布 / 待丢弃的草稿 |
+| `EPISODE_RETIRED` | 400 | 已 retire 的集不能直接发布，先 restore |
+| `DRAFT_IS_ONLY_CONTENT` | 400 | 草稿是这一集唯一的内容，不能丢弃 |
+| `VERSION_NOT_REVERTABLE` | 400 | 回滚目标不是 published / superseded 快照 |
+| `TARGET_VERSION_REQUIRED` | 400 | 回滚没给目标版本（不接受「回上一版」这种相对语义） |
+| `NOT_PUBLISHED` | 400 | 从未发布的集不能 retire |
+| `NOT_RETIRED` | 400 | 没 retire 的集不能 restore |
+| `EPISODE_WAS_PUBLISHED` | 400 | 发布过的集不能 discard，请走 retire |
+| `NOTHING_TO_EXPORT` | 400 | 没有可导出的已发布快照，带 `skipped` |
+| `BUNDLE_REQUIRED` / `BUNDLE_INVALID` | 400 | 没传 bundle / bundle 解析失败（带 `errors`） |
+| `IMPORT_PLAN_REJECTED` | 400 | 导入计划里有 reject，整批不写 |
+| `BUSINESS_KEY_TAKEN` | 409 | 并发抢同一集号、绕过 lint 撞上数据库唯一约束 |
+| `DRAFT_CONFLICT` | 409 | 乐观锁失败（id 或 updatedAt 任一对不上），带 `currentDraft`（可直接拿去刷新编辑器） |
+| `BUNDLE_HASH_MISMATCH` | 409 | 提交的 bundle 与预览时不是同一份，带 `previewedHash` 与 `actualHash` |
+| `ALREADY_RETIRED` | 409 | 已经 retire 过了，不需要重复下架 |
+| （`data` 为 `null`） | 404 | `episodeId` / `versionId` 不存在，或该版本不属于这一集 |
+
+404 只给中文 message、不给领域码（`NotFoundException` 用的是字符串载荷）；
+前端按状态码判断即可。参数校验失败（ValidationPipe）的 `message` 是字符串数组、
+`data` 为 `null`，沿用全站形状。
 
 ## 二期（进行中）
 

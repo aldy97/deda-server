@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmAdapterService } from "./llm-adapter.service";
 import { LlmAdapterController } from "./llm-adapter.controller";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import {
   parseChatCompletionRequest,
   ChatCompletionRequest,
@@ -2332,6 +2333,264 @@ describe("LlmAdapterModule", () => {
         deviceId: null,
         intent: "free_chat",
         intentSource: "no_device",
+      });
+    });
+  });
+
+  /**
+   * 主链路（百度 RTC）的「永不沉默」。
+   *
+   * 这条链路是孩子实际在用的那一条，任何一处未兜住的异常都会让 SSE 中断、
+   * 百度侧收到 500，孩子听到的就是静音。三层要求：
+   * - 冒险引擎/门禁抛错 → 本轮降级到自由创作，绝不整轮失败；
+   * - 冒险内容已生成但落库失败 → 内容照样播出（落库是审计，不是发声前提）；
+   * - 整条流水线抛错或产出空流 → 控制器补一句 L0 兜底话术，
+   *   对百度侧永远是「成功的流式响应」。
+   */
+  describe("永不沉默（主链路兜底）", () => {
+    const deviceRow = { id: "dev-internal-1", deviceId: "dev-1001" };
+    const boundRequest: ChatCompletionRequest = {
+      model: "deda-english-tutor",
+      stream: true,
+      user: "dev-1001",
+      messages: [{ role: "user", content: "我想玩每日冒险" }],
+    };
+
+    const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
+      const out: string[] = [];
+      for await (const c of gen) out.push(c);
+      return out;
+    };
+
+    interface FakeResponse {
+      headers: Record<string, string>;
+      body: string;
+      statusCode: number;
+      jsonBody: unknown;
+      setHeader(k: string, v: string): void;
+      write(s: string): void;
+      end(): void;
+      status(code: number): FakeResponse;
+      json(obj: unknown): FakeResponse;
+    }
+
+    const makeRes = (): FakeResponse => ({
+      headers: {},
+      body: "",
+      statusCode: 200,
+      jsonBody: undefined,
+      setHeader(k, v) {
+        this.headers[k] = v;
+      },
+      write(s) {
+        this.body += s;
+      },
+      end() {
+        return;
+      },
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(obj) {
+        this.jsonBody = obj;
+        return this;
+      },
+    });
+
+    beforeEach(() => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["自由故事"])());
+    });
+
+    describe("引擎与门禁抛错时降级到自由创作", () => {
+      it("handleChildReply 抛错不整轮失败", async () => {
+        adventure.handleChildReply.mockRejectedValue(new Error("engine down"));
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["自由故事"]);
+        expect(llm.completeStream).toHaveBeenCalled();
+      });
+
+      it("isCompletedToday 抛错时跳过门禁，仍给出回复", async () => {
+        adventure.isCompletedToday.mockRejectedValue(new Error("db down"));
+        session.resolveWithSource.mockResolvedValue({
+          intent: "adventure_story",
+          source: "model",
+        });
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["自由故事"]);
+      });
+
+      it("startToday 抛错时降级到自由创作", async () => {
+        session.resolveWithSource.mockResolvedValue({
+          intent: "adventure_story",
+          source: "model",
+        });
+        adventure.startToday.mockRejectedValue(new Error("engine down"));
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["自由故事"]);
+      });
+
+      it("recordEntryBlocked 抛错不影响本轮回复（审计写不进去也不能让孩子沉默）", async () => {
+        session.resolveWithSource.mockResolvedValue({
+          intent: "adventure_story",
+          source: "model",
+        });
+        adventure.isCompletedToday.mockResolvedValue(true);
+        adventure.recordEntryBlocked.mockRejectedValue(new Error("db down"));
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["自由故事"]);
+      });
+    });
+
+    describe("冒险内容已生成时，落库失败绝不影响播出", () => {
+      beforeEach(() => {
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一", "段落二"],
+          action: "await_reply",
+        });
+      });
+
+      it("user/assistant 消息落库抛错，段落仍完整播出", async () => {
+        prisma.message.create.mockRejectedValue(new Error("db down"));
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["段落一", "段落二"]);
+      });
+
+      it("首条消息落库抛错发生在任何 chunk 之前，也照样播出（这是最容易整轮静音的一处）", async () => {
+        prisma.message.create
+          .mockRejectedValueOnce(new Error("db down"))
+          .mockResolvedValue({});
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["段落一", "段落二"]);
+      });
+
+      it("recordPresented 抛错不影响已播出的内容", async () => {
+        adventure.recordPresented.mockRejectedValue(new Error("db down"));
+        const chunks = await collect(service.streamReply(boundRequest));
+        expect(chunks).toEqual(["段落一", "段落二"]);
+      });
+    });
+
+    describe("控制器保证对百度侧永远是成功的流式响应", () => {
+      const callController = async (
+        body: unknown,
+        res: FakeResponse,
+        auth = `Bearer ${VALID_TOKEN}`,
+      ): Promise<void> => {
+        const filter = new OpenAiExceptionFilter();
+        const host = {
+          switchToHttp: () => ({ getResponse: () => res }),
+        } as Parameters<OpenAiExceptionFilter["catch"]>[1];
+        try {
+          await controller.chatCompletions(
+            { headers: { authorization: auth }, body } as never,
+            res as never,
+          );
+        } catch (err) {
+          filter.catch(err, host);
+        }
+      };
+
+      it("首个 chunk 之前抛错时补 L0 兜底话术，而不是回 500", async () => {
+        jest.spyOn(service, "streamReply").mockImplementation(() =>
+          (async function* () {
+            throw new Error("pipeline exploded");
+          })(),
+        );
+        const res = makeRes();
+        await callController(boundRequest, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.jsonBody).toBeUndefined();
+        expect(res.body).toContain(ADVENTURE_DEGRADED_REPLIES.lastResort);
+        expect(res.body).toContain('"finish_reason":"stop"');
+        expect(res.body).toContain("data: [DONE]");
+      });
+
+      it("中途抛错时优雅收尾，不再插入兜底话术（避免与前半句冲突）", async () => {
+        jest.spyOn(service, "streamReply").mockImplementation(() =>
+          (async function* () {
+            yield "从前有座山";
+            throw new Error("mid stream");
+          })(),
+        );
+        const res = makeRes();
+        await callController(boundRequest, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toContain("从前有座山");
+        expect(res.body).not.toContain(ADVENTURE_DEGRADED_REPLIES.lastResort);
+        expect(res.body).toContain('"finish_reason":"stop"');
+        expect(res.body).toContain("data: [DONE]");
+      });
+
+      it("正常返回但零 chunk 时同样补兜底话术：空流对孩子就是沉默", async () => {
+        jest.spyOn(service, "streamReply").mockImplementation(() =>
+          (async function* () {
+            return;
+          })(),
+        );
+        const res = makeRes();
+        await callController(boundRequest, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toContain(ADVENTURE_DEGRADED_REPLIES.lastResort);
+      });
+
+      it("非流式请求抛错时返回同形状信封与兜底文本", async () => {
+        jest
+          .spyOn(service, "completeReply")
+          .mockRejectedValue(new Error("pipeline exploded"));
+        const res = makeRes();
+        await callController({ ...boundRequest, stream: false }, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.jsonBody).toMatchObject({
+          object: "chat.completion",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: ADVENTURE_DEGRADED_REPLIES.lastResort,
+              },
+              finish_reason: "stop",
+            },
+          ],
+        });
+      });
+
+      it("非流式返回空文本时也补兜底话术", async () => {
+        jest.spyOn(service, "completeReply").mockResolvedValue("   ");
+        const res = makeRes();
+        await callController({ ...boundRequest, stream: false }, res);
+
+        expect(res.jsonBody).toMatchObject({
+          choices: [
+            {
+              message: {
+                content: ADVENTURE_DEGRADED_REPLIES.lastResort,
+              },
+            },
+          ],
+        });
+      });
+
+      it("鉴权失败仍然是 401，不被兜底吞掉（调用方是百度，不是孩子）", async () => {
+        const res = makeRes();
+        await callController(boundRequest, res, "Bearer wrong");
+
+        expect(res.statusCode).toBe(401);
+        expect(res.jsonBody).toMatchObject({
+          error: { type: "authentication_error" },
+        });
+      });
+
+      it("请求体非法仍然是 400", async () => {
+        const res = makeRes();
+        await callController({ messages: [] }, res);
+
+        expect(res.statusCode).toBe(400);
       });
     });
   });

@@ -228,12 +228,21 @@ export class LlmAdapterService {
       return;
     }
 
-    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事
+    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
+    // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
+    // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
     if (device) {
-      const adventureReply = await this.adventure.handleChildReply(
-        device.id,
-        asrText,
-      );
+      let adventureReply: AdventureReply | null = null;
+      try {
+        adventureReply = await this.adventure.handleChildReply(
+          device.id,
+          asrText,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Adventure reply handling failed, degrading to free chat for device=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
       if (adventureReply) {
         // 编排顺序上冒险状态机早于 L2：本轮既没做语义安全审查、也没做意图分类，
         // 只有上面的 L1 正则兜着（L1 刻意不收「杀/打/去死」这类气话）。
@@ -350,36 +359,44 @@ export class LlmAdapterService {
     // adventureDeclined 供 filler 情境段使用，避免拖延话术与婉拒播报矛盾。
     let adventureDeclined = false;
     if (device && intent !== "free_chat" && intent !== "sleep_story") {
-      const completedToday = await this.adventure.isCompletedToday(device.id);
-      if (
-        !completedToday &&
-        (intent === "adventure_story" || intent === "free_story")
-      ) {
-        const startedAdventure = await this.adventure.startToday(
-          device.id,
-          true,
-        );
-        if (startedAdventure) {
-          await this.conversationSession.reset(device.id);
-          // 判定审计：本轮 L2 已评估（与冒险接管不同），intent 来自路由结果
-          this.turnDecisions.record({
-            turnId,
-            deviceId: device.id,
-            safety: l2,
-            safetySource: l2SourceOverride,
-            intent,
-            intentSource: intentDecision.source,
-            asrText,
-          });
-          yield* this.emitAdventureReply(device, startedAdventure, asrText);
-          return;
+      // 整块包住：门禁读失败、开集失败、拦截审计写失败，任何一处抛错都只意味着
+      // 「这轮进不了冒险」，绝不能升级为「这轮没有声音」。
+      try {
+        const completedToday = await this.adventure.isCompletedToday(device.id);
+        if (
+          !completedToday &&
+          (intent === "adventure_story" || intent === "free_story")
+        ) {
+          const startedAdventure = await this.adventure.startToday(
+            device.id,
+            true,
+          );
+          if (startedAdventure) {
+            await this.conversationSession.reset(device.id);
+            // 判定审计：本轮 L2 已评估（与冒险接管不同），intent 来自路由结果
+            this.turnDecisions.record({
+              turnId,
+              deviceId: device.id,
+              safety: l2,
+              safetySource: l2SourceOverride,
+              intent,
+              intentSource: intentDecision.source,
+              asrText,
+            });
+            yield* this.emitAdventureReply(device, startedAdventure, asrText);
+            return;
+          }
         }
-      }
-      if (completedToday) {
-        adventureDeclined = true;
-        await this.adventure.recordEntryBlocked(
-          device.id,
-          intent === "adventure_story" ? "free_story" : intent,
+        if (completedToday) {
+          adventureDeclined = true;
+          await this.adventure.recordEntryBlocked(
+            device.id,
+            intent === "adventure_story" ? "free_story" : intent,
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure gate failed, degrading to free story for device=${device.deviceId}: ${this.describeError(error)}`,
         );
       }
     }
@@ -705,40 +722,65 @@ export class LlmAdapterService {
     const turnId = randomUUID();
     const responseText = adventureReply.texts.join("\n");
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "user",
-        content: asrText,
-        status: "completed",
-        mode: "adventure_story",
-        rawPayload: { channel: "baidu-rtc" },
-        spokeAt: new Date(),
-      },
-    });
+    // 段落已经生成好了，落库只是审计。首条 create 发生在任何 chunk 之前，
+    // 一旦抛错整轮就静音——这是本文件最容易让孩子听不到声音的一处，
+    // 所以三次写库全部 best-effort：失败只记日志，内容照常播出。
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: asrText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: { channel: "baidu-rtc" },
+          spokeAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure user message for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     for (const text of adventureReply.texts) {
       yield text;
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: responseText,
-        status: "completed",
-        mode: "adventure_story",
-        rawPayload: {
-          filler: null,
-          answer: responseText,
-          interactionResult: adventureReply.result ?? null,
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: responseText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: {
+            filler: null,
+            answer: responseText,
+            interactionResult: adventureReply.result ?? null,
+          },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
-    await this.adventure.recordPresented(device.id, turnId, adventureReply);
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure assistant message for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+    try {
+      await this.adventure.recordPresented(device.id, turnId, adventureReply);
+    } catch (error) {
+      this.logger.error(
+        `Failed to record adventure presentation for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+  }
+
+  private describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**

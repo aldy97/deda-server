@@ -118,8 +118,13 @@ describe("AdventureService", () => {
             device: { findUnique: jest.fn() },
             adventureEpisode: { findFirst: jest.fn(), findMany: jest.fn() },
             adventureSegment: { findMany: jest.fn() },
+            adventureEpisodeVersion: {
+              findUnique: jest.fn(),
+              findFirst: jest.fn(),
+            },
             adventureDailyRecord: {
               findFirst: jest.fn(),
+              findUnique: jest.fn().mockResolvedValue(null),
               create: jest.fn(),
               update: jest.fn(),
             },
@@ -133,6 +138,7 @@ describe("AdventureService", () => {
               findMany: jest.fn(),
               create: jest.fn(),
               update: jest.fn(),
+              upsert: jest.fn(),
             },
           },
         },
@@ -183,6 +189,12 @@ describe("AdventureService", () => {
       }),
     );
     prisma.adventureProgress.findMany.mockResolvedValue([]);
+    // 版本固定：默认无 pin、无版本行 → 走既有 segments 表读路径，旧用例行为不变。
+    prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(null);
+    prisma.adventureEpisodeVersion.findFirst.mockResolvedValue(null);
+    prisma.adventureProgress.upsert.mockImplementation((args) =>
+      Promise.resolve({ ...baseProgress, ...args.create }),
+    );
     prisma.adventureDailyRecord.findFirst.mockImplementation(async (args) => {
       const progress = await prisma.adventureProgress.findFirst({
         where: { deviceId: args.where.deviceId },
@@ -866,5 +878,757 @@ describe("AdventureService", () => {
     );
     service.onModuleDestroy();
     jest.useRealTimers();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 内容版本固定（pinning）、retired 语义、故障重分配
+  // ---------------------------------------------------------------------------
+
+  const today = (() => {
+    const now = new Date();
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    return `${now.getFullYear()}-${mm}-${dd}`;
+  })();
+
+  /** v1：孩子被分配时锁定的版本，内容与 segments 表原样一致 */
+  const v1Payload = {
+    title: episode.title,
+    recap: "v1 的前情回顾。",
+    segments: segments.map((segment) => ({ ...segment })),
+  };
+
+  /** admin 发布 v2 之后 segments 表的样子：只剩 2 段，交互点也被改掉 */
+  const v2Segments = [
+    {
+      id: "n0",
+      episodeId: "ep1",
+      order: 0,
+      kind: "narration",
+      text: "新版第一段。",
+    },
+    {
+      id: "n1",
+      episodeId: "ep1",
+      order: 1,
+      kind: "narration",
+      text: "新版第二段（全剧终）。",
+    },
+  ];
+
+  const v1Row = {
+    id: "v1",
+    episodeId: "ep1",
+    version: 1,
+    status: "superseded",
+    payload: v1Payload,
+  };
+
+  /** 让 isCompletedToday 返回 false，同时让 findCurrentDaily 返回指定行 */
+  const stubDaily = (row: unknown) => {
+    prisma.adventureDailyRecord.findFirst.mockImplementation((args) =>
+      Promise.resolve(args?.where?.completedDate ? null : row),
+    );
+  };
+
+  const ep2 = {
+    ...episode,
+    id: "ep2",
+    episodeNumber: 2,
+    title: "第二集",
+    recap: "第二集的前情回顾。",
+    published: true,
+    retiredAt: null,
+    currentVersionId: null,
+  };
+
+  describe("version pinning", () => {
+    it("keeps playing the pinned version after the live content was replaced", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(v2Segments);
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        nextSegmentOrder: 3,
+      });
+
+      const reply = await service.startToday("dev-uuid-1");
+
+      expect(reply.texts).toEqual([segments[3].text, segments[4].text]);
+      expect(reply.action).toBe("await_reply");
+      expect(reply.texts).not.toContain(v2Segments[0].text);
+    });
+
+    it("does not prematurely complete a pinned episode whose live table shrank", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(v2Segments);
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        nextSegmentOrder: 3,
+      });
+
+      const reply = await service.startToday("dev-uuid-1");
+
+      // 未固定版本时 nextSegmentOrder(3) >= 表内段数(2) 会被误判完集
+      expect(reply.action).not.toBe("completed");
+      expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
+    });
+
+    it("still matches the pinned two_choice options after the live version became open_question", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(
+        segments.map((segment) =>
+          segment.order === 2
+            ? { ...segment, interactionType: "open_question", options: null }
+            : segment,
+        ),
+      );
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply.texts[0]).toBe("好呀，我们去森林！");
+      expect(llm.complete).not.toHaveBeenCalled();
+    });
+
+    it("uses the pinned version's fallback text on silence timeout", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(
+        segments.map((segment) =>
+          segment.order === 4
+            ? { ...segment, fallbackText: "新版本的兜底话术。" }
+            : segment,
+        ),
+      );
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        status: "awaiting_reply",
+        nextSegmentOrder: 5,
+        waitingSince: new Date(Date.now() - 60000),
+      });
+
+      const reply = await service.checkTimeout("dev-uuid-1");
+
+      expect(reply.texts[0]).toBe(segments[4].fallbackText);
+    });
+
+    it("reads the segment table for legacy progress without a pinned version", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: null,
+        nextSegmentOrder: 3,
+      });
+
+      const reply = await service.startToday("dev-uuid-1");
+
+      expect(reply.texts[0]).toBe(segments[3].text);
+      expect(prisma.adventureEpisodeVersion.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the segment table when the pinned version row is gone", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(null);
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "ghost-version",
+        nextSegmentOrder: 3,
+      });
+
+      const reply = await service.startToday("dev-uuid-1");
+
+      expect(reply.texts[0]).toBe(segments[3].text);
+    });
+
+    it("pins the current version and takes the recap from the version payload on assignment", async () => {
+      const published = {
+        ...episode,
+        recap: "episode 行上遗留的旧 recap",
+        currentVersionId: "v2",
+        retiredAt: null,
+      };
+      prisma.adventureEpisode.findMany.mockResolvedValue([published]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue({
+        id: "v2",
+        episodeId: "ep1",
+        version: 2,
+        status: "published",
+        payload: { ...v1Payload, recap: "v2 的前情回顾。" },
+      });
+
+      const reply = await service.startToday("dev-uuid-1");
+
+      expect(reply.texts[0]).toBe("v2 的前情回顾。");
+      expect(prisma.adventureProgress.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ episodeVersionId: "v2" }),
+        }),
+      );
+    });
+  });
+
+  describe("retired episodes", () => {
+    it("skips a retired episode and assigns the next published one", async () => {
+      const retired = { ...episode, retiredAt: new Date() };
+      prisma.adventureEpisode.findMany.mockResolvedValue([retired, ep2]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureProgress.findMany.mockResolvedValue([]);
+
+      await service.startToday("dev-uuid-1");
+
+      expect(prisma.adventureDailyRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ episodeId: "ep2" }),
+        }),
+      );
+    });
+
+    it("still treats an unpublished episode as a hard boundary and never skips it", async () => {
+      const draft = { ...episode, published: false, retiredAt: null };
+      prisma.adventureEpisode.findMany.mockResolvedValue([draft, ep2]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureProgress.findMany.mockResolvedValue([]);
+
+      expect(await service.startToday("dev-uuid-1")).toBeNull();
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+
+    it("does not resume an abandoned progress and falls through to selection", async () => {
+      stubDaily({ ...baseDaily, status: "in_progress" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        status: "abandoned",
+      });
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureEpisode.findMany.mockResolvedValue([
+        { ...episode, retiredAt: new Date() },
+        ep2,
+      ]);
+      prisma.adventureProgress.findMany.mockResolvedValue([
+        { episodeId: "ep1", status: "abandoned" },
+      ]);
+
+      await service.startToday("dev-uuid-1");
+
+      expect(prisma.adventureDailyRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ episodeId: "ep2" }),
+        }),
+      );
+    });
+
+    it("keeps a failed_over episode retryable while excluding completed and abandoned ones", async () => {
+      const ep3 = { ...ep2, id: "ep3", episodeNumber: 3 };
+      prisma.adventureEpisode.findMany.mockResolvedValue([episode, ep2, ep3]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureProgress.findMany.mockResolvedValue([
+        { episodeId: "ep1", status: "completed" },
+        { episodeId: "ep2", status: "failed_over" },
+      ]);
+      stubDaily(null);
+
+      await service.startToday("dev-uuid-1");
+
+      expect(prisma.adventureDailyRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ episodeId: "ep2" }),
+        }),
+      );
+    });
+
+    it("resets an existing failed_over progress instead of violating the unique constraint", async () => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([episode, ep2]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureProgress.findMany.mockResolvedValue([
+        { episodeId: "ep1", status: "completed" },
+      ]);
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        id: "prog-stale",
+        episodeId: "ep2",
+        status: "failed_over",
+        nextSegmentOrder: 4,
+        stars: 3,
+      });
+      stubDaily(null);
+
+      await service.startToday("dev-uuid-1");
+
+      expect(prisma.adventureProgress.create).not.toHaveBeenCalled();
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "prog-stale" },
+          data: expect.objectContaining({
+            status: "in_progress",
+            nextSegmentOrder: 0,
+            stars: 0,
+            offTopicCount: 0,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe("recoverToNextEpisode", () => {
+    const brokenEp1 = { ...episode, id: "ep1" };
+
+    beforeEach(() => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([brokenEp1, ep2]);
+      prisma.adventureProgress.findMany.mockResolvedValue([]);
+      prisma.adventureSegment.findMany.mockResolvedValue(segments);
+      prisma.adventureEvent.create.mockClear();
+      prisma.adventureDailyRecord.create.mockClear();
+      prisma.adventureDailyRecord.update.mockClear();
+    });
+
+    it("moves the child to the next episode within the same day", async () => {
+      stubDaily({ ...baseDaily, assignedDate: today, episodeId: "ep1" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        episodeId: "ep1",
+        status: "in_progress",
+        nextSegmentOrder: 3,
+      });
+
+      const reply = await service.recoverToNextEpisode(
+        "dev-uuid-1",
+        "payload_corrupt",
+      );
+
+      expect(reply.texts[0]).toBe(ep2.recap);
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "failed_over" }),
+        }),
+      );
+      // 当日 daily 行复用（受 @@unique([deviceId, assignedDate]) 约束，不能再 create）
+      expect(prisma.adventureDailyRecord.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "daily-1" },
+          data: expect.objectContaining({
+            episodeId: "ep2",
+            status: "in_progress",
+          }),
+        }),
+      );
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+
+    it("records an auditable event for the reassignment", async () => {
+      stubDaily({ ...baseDaily, assignedDate: today, episodeId: "ep1" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        episodeId: "ep1",
+        status: "in_progress",
+      });
+
+      await service.recoverToNextEpisode("dev-uuid-1", "payload_corrupt");
+
+      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            eventType: "reassigned_after_failure",
+            payload: expect.objectContaining({ reason: "payload_corrupt" }),
+          }),
+        }),
+      );
+    });
+
+    it("does nothing when today's episode is already completed", async () => {
+      prisma.adventureDailyRecord.findFirst.mockImplementation((args) =>
+        Promise.resolve(
+          args?.where?.completedDate
+            ? { ...baseDaily, status: "completed", completedDate: today }
+            : null,
+        ),
+      );
+
+      expect(
+        await service.recoverToNextEpisode("dev-uuid-1", "payload_corrupt"),
+      ).toBeNull();
+      expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+
+    it("closes a stale cross-day daily and assigns a fresh one for today", async () => {
+      stubDaily({ ...baseDaily, assignedDate: "2026-10-29", episodeId: "ep1" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        episodeId: "ep1",
+        status: "in_progress",
+        nextSegmentOrder: 3,
+      });
+      prisma.adventureDailyRecord.create.mockImplementation((args) =>
+        Promise.resolve({ ...baseDaily, ...args.data }),
+      );
+
+      const reply = await service.recoverToNextEpisode(
+        "dev-uuid-1",
+        "stale_broken",
+      );
+
+      expect(prisma.adventureDailyRecord.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "daily-1" },
+          data: expect.objectContaining({ status: "failed_over" }),
+        }),
+      );
+      expect(prisma.adventureDailyRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            episodeId: "ep2",
+            assignedDate: today,
+            status: "in_progress",
+          }),
+        }),
+      );
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+
+    it("returns null instead of throwing when no next episode is available", async () => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([brokenEp1]);
+      stubDaily({ ...baseDaily, assignedDate: today, episodeId: "ep1" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        episodeId: "ep1",
+        status: "in_progress",
+      });
+
+      expect(
+        await service.recoverToNextEpisode("dev-uuid-1", "payload_corrupt"),
+      ).toBeNull();
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+
+    it("returns null when there is no adventure in flight", async () => {
+      stubDaily(null);
+      prisma.adventureProgress.findUnique.mockResolvedValue(null);
+
+      expect(
+        await service.recoverToNextEpisode("dev-uuid-1", "payload_corrupt"),
+      ).toBeNull();
+    });
+  });
+
+  describe("defensive guards", () => {
+    it("ignores a non-interaction segment when locating the awaited interaction point", async () => {
+      prisma.adventureSegment.findMany.mockResolvedValue(
+        segments.map((segment) =>
+          segment.order === 2
+            ? { ...segment, kind: "narration", interactionType: null }
+            : segment,
+        ),
+      );
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      expect(await service.handleChildReply("dev-uuid-1", "森林")).toBeNull();
+      expect(llm.complete).not.toHaveBeenCalled();
+    });
+
+    it("keeps recovering other devices when one device's timeout handling throws", async () => {
+      prisma.adventureProgress.findMany.mockResolvedValue([
+        { deviceId: "dev-bad" },
+        { deviceId: "dev-uuid-1" },
+      ]);
+      prisma.adventureDailyRecord.findFirst.mockImplementation((args) => {
+        if (args?.where?.deviceId === "dev-bad") {
+          return Promise.reject(new Error("db exploded"));
+        }
+        return Promise.resolve(args?.where?.completedDate ? null : baseDaily);
+      });
+      prisma.adventureProgress.findUnique.mockImplementation((args) =>
+        Promise.resolve(
+          args.where.deviceId_episodeId.deviceId === "dev-uuid-1"
+            ? {
+                ...baseProgress,
+                status: "awaiting_reply",
+                nextSegmentOrder: 3,
+                waitingSince: new Date(Date.now() - 60000),
+              }
+            : null,
+        ),
+      );
+
+      const recovered = await service.sweepTimeouts();
+
+      expect(recovered.map((item) => item.deviceId)).toContain("dev-uuid-1");
+    });
+  });
+
+  /**
+   * L2 兜底：引擎自己抛错时，绝不让异常冒到对话入口（那等于孩子听到沉默），
+   * 而是先把当日这一集换成下一集；换不动就返回 null，让上层继续降级到
+   * 自由创作与 L0 话术。「今天已经完成过一集则不换」由 recoverToNextEpisode
+   * 的既有门禁保证——每日额度是硬约束，兜底不得绕过它。
+   */
+  describe("引擎异常兜底", () => {
+    type PrivateEngine = {
+      startTodayInternal: (
+        deviceId: string,
+        explicit?: boolean,
+      ) => Promise<unknown>;
+      handleChildReplyInternal: (
+        deviceId: string,
+        asrText: string,
+      ) => Promise<unknown>;
+      checkTimeoutInternal: (deviceId: string) => Promise<unknown>;
+    };
+
+    beforeEach(() => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([
+        { ...episode, id: "ep1" },
+        ep2,
+      ]);
+      prisma.adventureProgress.findMany.mockResolvedValue([]);
+      prisma.adventureSegment.findMany.mockResolvedValue(segments);
+      prisma.adventureEvent.create.mockClear();
+      stubDaily({ ...baseDaily, assignedDate: today, episodeId: "ep1" });
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        ...baseProgress,
+        episodeId: "ep1",
+        status: "in_progress",
+        nextSegmentOrder: 3,
+      });
+    });
+
+    const failInternals = (reason = "boom") => {
+      const internals = service as unknown as PrivateEngine;
+      jest
+        .spyOn(internals, "startTodayInternal")
+        .mockRejectedValue(new Error(reason));
+      jest
+        .spyOn(internals, "handleChildReplyInternal")
+        .mockRejectedValue(new Error(reason));
+      jest
+        .spyOn(internals, "checkTimeoutInternal")
+        .mockRejectedValue(new Error(reason));
+    };
+
+    it("startToday 内部抛错时平移到下一集，而不是把异常抛给对话入口", async () => {
+      failInternals();
+
+      const reply = await service.startToday("dev-uuid-1", true);
+
+      expect(reply).not.toBeNull();
+      expect(reply.texts[0]).toBe(ep2.recap);
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "failed_over" }),
+        }),
+      );
+    });
+
+    it("handleChildReply 内部抛错时同样平移到下一集", async () => {
+      failInternals();
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply).not.toBeNull();
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+
+    it("checkTimeout 内部抛错时同样平移到下一集", async () => {
+      failInternals();
+
+      const reply = await service.checkTimeout("dev-uuid-1");
+
+      expect(reply).not.toBeNull();
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+
+    it("连换集都失败时返回 null，绝不向上抛（上层继续降级到自由创作/L0）", async () => {
+      failInternals();
+      jest
+        .spyOn(service, "recoverToNextEpisode")
+        .mockRejectedValue(new Error("db down"));
+
+      expect(await service.startToday("dev-uuid-1", true)).toBeNull();
+      expect(await service.handleChildReply("dev-uuid-1", "森林")).toBeNull();
+      expect(await service.checkTimeout("dev-uuid-1")).toBeNull();
+    });
+
+    it("今天已经完成过一集时不做平移：每日额度是硬门禁，兜底不得绕过", async () => {
+      failInternals();
+      prisma.adventureDailyRecord.findFirst.mockImplementation((args) =>
+        Promise.resolve(
+          args?.where?.completedDate
+            ? {
+                ...baseDaily,
+                status: "completed",
+                completedDate: args.where.completedDate,
+              }
+            : null,
+        ),
+      );
+
+      expect(await service.startToday("dev-uuid-1", true)).toBeNull();
+      expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+    });
+
+    it("没有下一集可接管时返回 null，不抛错", async () => {
+      failInternals();
+      prisma.adventureEpisode.findMany.mockResolvedValue([
+        { ...episode, id: "ep1" },
+      ]);
+
+      expect(await service.startToday("dev-uuid-1", true)).toBeNull();
+    });
+
+    it("抛错时向失败监听器上报 phase / reason / recovered", async () => {
+      failInternals("payload exploded");
+      const reports: unknown[] = [];
+      service.registerFailureListener((report) => {
+        reports.push(report);
+      });
+
+      await service.startToday("dev-uuid-1", true);
+      await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reports).toHaveLength(2);
+      expect(reports[0]).toMatchObject({
+        deviceInternalId: "dev-uuid-1",
+        phase: "start_today",
+        recovered: true,
+      });
+      expect((reports[0] as { reason: string }).reason).toContain(
+        "payload exploded",
+      );
+      expect((reports[0] as { at: string }).at).toBeTruthy();
+      expect(reports[1]).toMatchObject({
+        phase: "handle_reply",
+        recovered: true,
+      });
+    });
+
+    it("换集失败时上报 recovered=false，让后台知道这台设备已经降到最后一级", async () => {
+      failInternals();
+      jest
+        .spyOn(service, "recoverToNextEpisode")
+        .mockRejectedValue(new Error("db down"));
+      const reports: Array<{ recovered: boolean; phase: string }> = [];
+      service.registerFailureListener((report) => {
+        reports.push(report);
+      });
+
+      await service.checkTimeout("dev-uuid-1");
+
+      expect(reports).toEqual([
+        expect.objectContaining({ phase: "check_timeout", recovered: false }),
+      ]);
+    });
+
+    it("监听器自己抛错不影响兜底结果（上报是尽力而为）", async () => {
+      failInternals();
+      service.registerFailureListener(() => {
+        throw new Error("listener down");
+      });
+
+      const reply = await service.startToday("dev-uuid-1", true);
+
+      expect(reply).not.toBeNull();
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+
+    it("未注册监听器时兜底照常工作", async () => {
+      failInternals();
+
+      const reply = await service.startToday("dev-uuid-1", true);
+
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+  });
+
+  /**
+   * @@unique([deviceId, assignedDate]) 决定了一个设备一天只能有一行 daily。
+   * 既有实现无条件 create，于是只要当天已经存在一行**非 completed** 的 daily
+   * （进度被 retired/abandoned 收走、被 failed_over 收走、或进度行丢失），
+   * 下一次 startToday 就撞唯一约束抛错——孩子从此再也进不去冒险，
+   * 而且这是永久性的：那行 daily 不会自己消失。这里验复用而非新建。
+   */
+  describe("当日 daily 行复用", () => {
+    beforeEach(() => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([
+        { ...episode, id: "ep1" },
+        ep2,
+      ]);
+      prisma.adventureProgress.findMany.mockResolvedValue([
+        { episodeId: "ep1", status: "abandoned" },
+      ]);
+      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+      prisma.adventureSegment.findMany.mockResolvedValue(segments);
+      prisma.adventureEvent.create.mockClear();
+      prisma.adventureDailyRecord.create.mockClear();
+      prisma.adventureDailyRecord.update.mockClear();
+      // findCurrentDaily（status=in_progress）查不到行，才会走到开新集分支
+      stubDaily(null);
+    });
+
+    it("当天已有被收走的 daily 行时复用改指下一集，而不是撞唯一约束", async () => {
+      prisma.adventureDailyRecord.findUnique.mockResolvedValue({
+        ...baseDaily,
+        id: "daily-today",
+        assignedDate: today,
+        episodeId: "ep1",
+        status: "abandoned",
+      });
+
+      const reply = await service.startToday("dev-uuid-1", true);
+
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+      expect(prisma.adventureDailyRecord.update).toHaveBeenCalledWith({
+        where: { id: "daily-today" },
+        data: { episodeId: "ep2", status: "in_progress" },
+      });
+      expect(reply.texts[0]).toBe(ep2.recap);
+    });
+
+    it("当天没有 daily 行时照常新建（既有行为不回归）", async () => {
+      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
+      prisma.adventureDailyRecord.create.mockImplementation((args) =>
+        Promise.resolve({ ...baseDaily, ...args.data }),
+      );
+
+      await service.startToday("dev-uuid-1", true);
+
+      expect(prisma.adventureDailyRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deviceId: "dev-uuid-1",
+            episodeId: "ep2",
+            assignedDate: today,
+            status: "in_progress",
+          }),
+        }),
+      );
+      expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
+    });
+
+    it("当天 daily 行已是 completed 时不覆盖：宁可不写，也不抹掉孩子的完集记录", async () => {
+      prisma.adventureDailyRecord.findUnique.mockResolvedValue({
+        ...baseDaily,
+        id: "daily-today",
+        assignedDate: today,
+        episodeId: "ep1",
+        status: "completed",
+        completedDate: today,
+      });
+
+      await service.startToday("dev-uuid-1", true);
+
+      expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
+      expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
   });
 });

@@ -52,8 +52,12 @@ jobs:
 
       - run: npm run test
 
-      # e2e 使用独立 PostgreSQL；LLM 与外部服务保持 mock，禁止 forceExit 掩盖泄漏
-      - run: npm run test:e2e
+      # e2e 使用独立 PostgreSQL；LLM 与外部服务保持 mock，禁止 forceExit 掩盖泄漏。
+      # --runInBand：所有 e2e 套件共用同一个库，而 analytics-fleet 仍有两条全局口径断言
+      # （date 窗口内的全表设备计数、devices 列表按 createdAt desc 取首位），并行 worker
+      # 各自新建设备行就会互相打红（925d740 收敛过一轮，这两条仍在）。共享库下串行是
+      # 唯一的确定性口径；串行时各套件 afterAll 自清，互不可见。
+      - run: npm run test:e2e -- --runInBand
 
   # 部署必须在 ci 全绿后才执行；PR 与 push main 的运行中该 job 直接跳过
   deploy:
