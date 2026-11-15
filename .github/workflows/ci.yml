@@ -59,12 +59,25 @@ jobs:
       # 唯一的确定性口径；串行时各套件 afterAll 自清，互不可见。
       - run: npm run test:e2e -- --runInBand
 
-  # 部署必须在 ci 全绿后才执行；PR 与 push main 的运行中该 job 直接跳过
-  deploy:
+  # 部署必须在 ci 全绿后才执行；PR 事件、以及 push 到非目标分支时，这两个 job 直接跳过。
+  # deploy-staging.yml / deploy-prod.yml 自身都不带 push 触发，所以「push 就部署」
+  # 只有经由下面两个 job 才走得通。
+  deploy-staging:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
     uses: ./.github/workflows/deploy-staging.yml
     secrets: inherit
     concurrency:
       group: deploy-staging
+      cancel-in-progress: false
+
+  # production 环境在仓库 Settings → Environments 里配了 required reviewers：
+  # ci 全绿后仍需人工批准才真正部署，审批与部署日志都在该 environment 下留痕。
+  deploy-prod:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-prod.yml
+    secrets: inherit
+    concurrency:
+      group: deploy-prod
       cancel-in-progress: false

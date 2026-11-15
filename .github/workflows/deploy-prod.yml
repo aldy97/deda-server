@@ -1,8 +1,10 @@
 name: Deploy Production
 
+# 不自带 push 触发：push main 的部署统一由 ci.yml 的 deploy-prod job 在 ci 全绿后
+# 调用，否则生产部署会绕过测试闸口（口径由 src/common/workflows/ci-deploy-gate.spec.ts 钉住）。
+# 保留 workflow_dispatch 供人工补部署与回滚演练。
 on:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
