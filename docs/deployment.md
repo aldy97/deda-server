@@ -37,13 +37,20 @@ feature/xxx  ──PR──▶  staging  ──PR(发布)──▶  main
 
 | 分支 | 说明 | 触发 | 环境 |
 | --- | --- | --- | --- |
-| `feature/*` | 从 `staging` 切出；新 PR 默认 base 即 staging | PR → CI | — |
-| `staging` | 集成分支，merge 即部署 | push/merge → Deploy Staging | `https://staging.valleyletters.com` |
-| `main` | 发布分支，只接受来自 staging 的 PR | push/merge → Deploy Production | `https://valleyletters.com`（HTTPS） |
+| `feature/*` | 从 `staging` 切出；新 PR 默认 base 即 staging | PR → CI（不部署） | — |
+| `staging` | 集成分支，merge 即部署 | push → ci.yml `deploy-staging` → deploy-staging.yml | `https://staging.valleyletters.com` |
+| `main` | 发布分支，只接受来自 staging 的 PR | push → ci.yml `deploy-prod` → deploy-prod.yml（人工批准后执行） | `https://valleyletters.com`（HTTPS） |
 
 - 两个分支的 push/PR 都会跑 CI（lint + tsc + build + 单测 + e2e）。
+- **部署只有一个入口**：`deploy-staging.yml` / `deploy-prod.yml` 自身都不带 `push` 触发，只能被
+  ci.yml 里 `needs: ci` 的 job 调用（或手动 `workflow_dispatch`）。「ci 没全绿就部署」这条路在配置
+  层面不存在；口径由 `src/common/workflows/ci-deploy-gate.spec.ts` 钉住，改坏即 CI 红。
+- **生产人工审批已开启**：`deploy-prod.yml` 声明 `environment: production`，仓库 Settings →
+  Environments → `production` 已配 required reviewers。ci 全绿后 workflow 停在等待批准，
+  审批动作与部署日志都留痕在该 environment 下。
+- 两个部署 job 各自成 concurrency 组且 `cancel-in-progress: false`：新部署不会取消进行中的部署
+  （取消等于把服务器留在半部署状态），只会排队；staging 与 prod 互不阻塞。
 - **hotfix 规则**：紧急修复可走 `hotfix/xxx → main` 的 PR，合并后必须把 main 回合（back-merge）到 staging，否则下次发布会把 hotfix 冲掉。
-- 生产发布如需人工确认：GitHub 仓库 Settings → Environments → `production` → 开启 Required reviewers。
 - 建议给 `main` 和 `staging` 配分支保护（要求 PR 合入 + CI 通过），防止直接 push 绕过流程触发生产部署。
 
 ## 3. 服务器一次性初始化
@@ -128,11 +135,21 @@ find /opt/deda/backups -name '*.sql.gz' -mtime +7 -delete
 
 ```bash
 chmod +x /opt/deda/backup.sh
-# crontab -e：每天凌晨 3:17（避开整点）执行
-17 3 * * * /opt/deda/backup.sh >> /opt/deda/backups/backup.log 2>&1
+# crontab -e：每天凌晨 3:47（避开整点；03:17 那一格是 certbot 续期，别撞）
+47 3 * * * /opt/deda/backup.sh >> /opt/deda/backups/backup.log 2>&1
 ```
 
 恢复演练（建议每月一次）：`gunzip -c <备份> | docker exec -i deda-postgres-prod psql -U deda deda`。
+
+服务器实态（2026-11-15 核对）：
+
+- cron 三条：`03:17 周一` certbot 续期、`03:47 每天` backup.sh、`04:07 周日` prune-images.sh。
+- **`ossutil` 同步行仍注释着**（脚本内 `TODO(oss)`）。备份只落在 `/opt/deda/backups/`，与数据库
+  同一块盘——磁盘故障或误删时备份一起没，**目前不构成异地备份**。装好 ossutil、配好凭证后
+  取消该行注释才算闭环。
+- 脚本对「prod postgres 容器不存在」静默跳过：prod 上线前每日 cron 不报错，但**也不产生任何
+  dump**（`/opt/deda/backups/` 里只有 backup.log）。prod 首次部署后必须回来确认次日有 `.sql.gz`。
+- 本地保留 7 天（`find -mtime +7 -delete`）。
 
 生产部署加固（2026-11-13 起生效）：
 
@@ -179,6 +196,82 @@ app 容器挂载的是**父目录** `/opt/deda/dashboard`（只读），而非�
 
 注意：静态壳本身无鉴权（内部工具约定），数据接口仍走 `/analytics/*` 的 JWT 鉴权。
 
+## 6.2 prod 首次上线 runbook（截至 2026-11-15 尚未执行）
+
+prod 侧已就位：nginx（容器 `deda-nginx-prod`，compose 项目名 `deda-prod`）、双域名证书、DNS、
+备案、mosquitto 配置（`/opt/deda/mosquitto-prod/`）、`/opt/deda/env/.env.prod`。
+**app / postgres / redis / mosquitto 都还没起**——所以现在 `https://valleyletters.com/api/docs`
+返回 502 是预期状态，不是故障。
+
+### 0. 前置检查（ECS 上）
+
+```bash
+# 项目名必须是 deda-prod。漏了 -p 会落到默认项目名 docker，容器 label 变成
+# com.docker.compose.project=docker，此后 compose 认不出这些容器，还会与 staging
+# 抢容器名和卷名（2026-11-14 踩过：nginx 被错投到 prod 项目上，只能删了重建）。
+docker ps -a --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
+
+# 错项目名留下的孤儿卷，确认 SIZE=0B 且 LINKS=0 后再删
+docker volume ls | grep -E 'docker_(postgres|redis)-data'
+
+# 安全组（阿里云控制台，不是本机）：1884 必须放行，prod MQTT 靠它；1883 归 staging
+```
+
+### 1. 触发部署
+
+合并 `staging → main` 的发布 PR。ci.yml 全绿后 `deploy-prod` 调用 deploy-prod.yml，
+**停在 `production` environment 等人工批准**。批准后流水线自动完成：build → SSH 直传镜像 →
+同步 compose → 部署前 `backup.sh` → `up -d` → 回环健康检查（`127.0.0.1:3000/api/docs`）→
+写 `.last-good-tag`；健康检查不过则自动回滚。
+
+`up -d` 会拉起 prod 全套（app / postgres / redis / mosquitto）。nginx 若因配置差异被重建，
+**staging 域名会跟着闪断 1–2 秒**——同一个 nginx 容器服务两个域名。
+
+### 2. 首次部署特有的三件事
+
+- **库是从零建的**：migration 由容器 CMD 执行（`prisma migrate deploy` 成功后才 `node dist/src/main`），
+  空库上会顺序跑完全部 **31** 个 migration。其中 4 个含 `DROP COLUMN`（最后一个是
+  `20261113141812_remove_conversation_mode_key`）——空库上无害，但**不要**为了省事把 staging 的
+  dump 灌进 prod：那会让破坏性迁移作用在真实数据上，还会把 staging 的设备、对话、孩子档案
+  带进生产。prod 数据从零开始。
+- **没有可回滚的历史版本**：`.last-good-tag` 首部署前不存在，健康检查失败时自动回滚无处可回，
+  流水线直接 exit 1。这是设计（宁可停下，也别把服务器留在未知状态），需人工上机排查。
+- **内容只读**：prod compose 刻意不设 `CONTENT_ADMIN_PROFILE`，内容管理台在 prod 一律只读
+  （fail-safe，缺省与拼错都按 readonly 处理）。内容要在 staging 创作验证后，用管理台的导入功能搬过去。
+
+### 3. 上线后验证
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://valleyletters.com/api/docs    # 期望 200（此前 502）
+curl -sS -o /dev/null -w '%{http_code}\n' https://valleyletters.com/dashboard/  # 期望 200
+docker logs --tail 50 deda-server-prod
+docker exec deda-postgres-prod psql -U deda deda -c 'select count(*) from "_prisma_migrations"'  # 期望 31
+ls -la /opt/deda/backups/    # 次日确认 backup.sh 真的产出了 .sql.gz（见 §5 实态）
+```
+
+`/opt/deda/dashboard/prod/` 里目前是 2026-11-07 的旧构建：`/dashboard/` 能打开但内容是旧的，
+需要 deda-dashboard 仓库补一次 prod 投递（产物由那边的流水线负责，本仓库只 `mkdir -p`）。
+
+### 4. 同机双栈的内存预算
+
+ECS 2 vCPU / 3623 MiB，staging 与 prod 同机。护栏口径由
+`src/common/workflows/compose-env-gate.spec.ts` 钉住，改坏即 CI 红：
+
+| 容器 | memory limit | NODE_OPTIONS |
+| --- | --- | --- |
+| `deda-server-prod` | 1536M | `--max-old-space-size=1024` |
+| `deda-postgres-prod` | 512M | — |
+| `deda-redis-prod` | 128M | — |
+| `deda-server-staging` | 1G | `--max-old-space-size=768` |
+
+- limit 是**上限不是预留**：实测五个容器稳态合计约 160 MiB。设 limit 是防止任一进程失控时
+  把邻居挤进 swap。prod 整栈 limit 之和 2.5 GiB。
+- `--max-old-space-size` 必须明显小于容器 limit（脚本要求至少留 128M）。Node 按**宿主机**总内存
+  推算老生代上限、不看 cgroup limit，不限定就会在 GC 触发前把容器撑爆被 OOM kill
+  （退出码 137，日志里看不到 JS 堆溢出记录，极易误判成「容器莫名重启」）。
+- `deda-redis-prod` 未配 `maxmemory`：触顶是被 kill 而不是淘汰键。当前只放熔断标记、设备状态
+  TTL 等小键，若日后当缓存用，128M 要同步上调。
+
 ## 7. 故障排查
 
 | 症状 | 排查 |
@@ -189,3 +282,5 @@ app 容器挂载的是**父目录** `/opt/deda/dashboard`（只读），而非�
 | staging/prod 串数据 | 不可能共用库；确认 `-p` 项目名与 `--env-file` 没写错 |
 | 磁盘满 | `docker system df`；`docker image prune -a` 清理旧镜像 |
 | `/dashboard` 突然 404（ENOENT stat index.html） | 容器内 `ls /opt/deda/dashboard/staging` 为空而宿主机有文件 → 挂载失效（多因 compose 挂了子目录且流水线删建目录）；确认 compose 挂的是父目录后 `up -d --force-recreate app` |
+| env 文件里改了值，容器里却不生效 | `docker/docker-compose.yml` 的 `environment` 是**白名单**，没列进去的键不会进容器且不报错。`docker exec deda-server-prod env \| grep <KEY>` 验证；缺了就补进白名单（口径见 `src/common/workflows/compose-env-gate.spec.ts`） |
+| 容器反复重启、退出码 137、日志里没有 JS 堆溢出 | OOM kill。`docker inspect <容器> -f '{{.State.OOMKilled}} {{.State.ExitCode}}'` 确认；再看 `NODE_OPTIONS` 的 `--max-old-space-size` 是否小于该容器的 memory limit（见 §6.2 第 4 节） |
