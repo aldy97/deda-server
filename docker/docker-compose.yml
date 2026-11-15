@@ -44,7 +44,7 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       # Analytics Dashboard 管理员鉴权
       ANALYTICS_JWT_SECRET: ${ANALYTICS_JWT_SECRET:-}
-      ANALYTICS_JWT_EXPIRES_IN: ${ANALYTICS_JWT_EXPIRES_IN:-}
+      ANALYTICS_JWT_EXPIRES_IN: ${ANALYTICS_JWT_EXPIRES_IN:-7d}
       ANALYTICS_ADMIN_USERS: ${ANALYTICS_ADMIN_USERS:-[]}
       # ARMS 应用监控（可选；不配 LicenseKey 则探针不加载，服务原样启动）
       ARMS_APP_NAME: ${ARMS_APP_NAME:-}

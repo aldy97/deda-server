@@ -34,6 +34,23 @@ export function normalizeScopes(scopes?: string[] | null): string[] {
   return [...new Set(["analytics", ...list])];
 }
 
+/** dashboard 管理员 token 的默认有效期，与小程序侧 JWT_EXPIRES_IN 的 7d 口径一致 */
+const ANALYTICS_TOKEN_TTL_FALLBACK = "7d";
+
+/**
+ * 解析 ANALYTICS_JWT_EXPIRES_IN。
+ *
+ * docker-compose.yml 写的是 `${ANALYTICS_JWT_EXPIRES_IN:-}`：服务器 .env 没配时
+ * 传进容器的是**空串**而不是 undefined。空串是 falsy，`|| "7d"` 本来也能兜住，
+ * 但「空串等于未配置」必须是一条被测试钉住的显式契约——在此之前这里静默回落
+ * 成 12h，从容器外面完全看不出来。显式配置的值一律原样尊重，不做白名单校验
+ * （非法值由 jsonwebtoken 自己报错，不该在这一层被吞掉）。
+ */
+export function resolveAnalyticsTokenTtl(raw?: string | null): string {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  return trimmed || ANALYTICS_TOKEN_TTL_FALLBACK;
+}
+
 export interface AdminInfo {
   username: string;
   displayName: string;

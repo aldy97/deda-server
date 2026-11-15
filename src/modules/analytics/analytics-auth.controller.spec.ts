@@ -6,6 +6,7 @@ import { scryptSync } from "crypto";
 import {
   AnalyticsAuthService,
   normalizeScopes,
+  resolveAnalyticsTokenTtl,
 } from "./analytics-auth.service";
 import { ANALYTICS_JWT_SERVICE } from "./analytics-auth.service";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
@@ -261,5 +262,50 @@ describe("AnalyticsJwtStrategy scopes", () => {
         scopes: ["", "adventure-content", null as unknown as string],
       }),
     ).resolves.toMatchObject({ scopes: ["adventure-content"] });
+  });
+});
+
+describe("resolveAnalyticsTokenTtl", () => {
+  const SEVEN_DAYS = 7 * 24 * 60 * 60;
+
+  /**
+   * 不只断言返回的字符串，而是拿它真签一个 token 再解出 exp - iat。
+   * 字符串相等证明不了「有效期真的是一周」，jsonwebtoken 对非法值会抛或忽略。
+   */
+  async function signedLifetimeSeconds(raw: string | undefined) {
+    const jwt = new JwtService({
+      secret: SECRET,
+      signOptions: { expiresIn: resolveAnalyticsTokenTtl(raw) },
+    });
+    const payload = jwt.decode(await jwt.signAsync({ sub: "admin" })) as {
+      exp: number;
+      iat: number;
+    };
+    return payload.exp - payload.iat;
+  }
+
+  it("未配置时回落 7 天", async () => {
+    expect(resolveAnalyticsTokenTtl(undefined)).toBe("7d");
+    expect(await signedLifetimeSeconds(undefined)).toBe(SEVEN_DAYS);
+  });
+
+  it("compose 透传空串时回落 7 天，而不是 12h", async () => {
+    // docker-compose.yml 的 ${ANALYTICS_JWT_EXPIRES_IN:-} 在服务器 .env 未配时
+    // 传给容器的是空串。空串是 falsy，`|| "12h"` 会静默吞掉它——这条是回归守卫。
+    expect(resolveAnalyticsTokenTtl("")).toBe("7d");
+    expect(await signedLifetimeSeconds("")).toBe(SEVEN_DAYS);
+  });
+
+  it("纯空白配置视同未配置", () => {
+    expect(resolveAnalyticsTokenTtl("   ")).toBe("7d");
+  });
+
+  it("显式配置的值原样生效，不被默认值覆盖", async () => {
+    expect(resolveAnalyticsTokenTtl("1h")).toBe("1h");
+    expect(await signedLifetimeSeconds("1h")).toBe(60 * 60);
+  });
+
+  it("显式配置的更长周期同样生效", () => {
+    expect(resolveAnalyticsTokenTtl("30d")).toBe("30d");
   });
 });
