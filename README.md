@@ -196,6 +196,19 @@ npx prisma migrate dev --name init
 npx prisma generate
 ```
 
+初始化之后不用再手动 `prisma generate`：仓库带了 husky 的 `post-merge` / `post-checkout`
+钩子（共用逻辑在 `.husky/lib/prisma-generate-if-stale.sh`），`git pull`、切分支、
+`git worktree add` 之后会自动比较 Prisma Client 与 `src/prisma/schema.prisma` 的新旧，
+**只在 client 陈旧或缺失时才重新生成**，否则静默通过、零开销。
+
+- 钩子**只生成 client，绝不碰数据库**。拉下来新的 migration 仍需自己跑
+  `npx prisma migrate deploy --schema=src/prisma/schema.prisma`。
+- 依赖没装的环境（新 worktree、刚 clone）会自动跳过，不报错。
+- 临时跳过一次：`HUSKY=0 git checkout <branch>`。
+- CI 与 Docker 镜像各自显式生成（`.github/workflows/ci.yml`、`docker/Dockerfile`），
+  不依赖这个钩子。
+- 钩子行为由 `src/common/workflows/prisma-generate-hooks.spec.ts` 钉住。
+
 ### 5. 启动开发服务
 
 ```bash

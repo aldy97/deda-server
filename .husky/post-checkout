@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# 参数：<旧 HEAD> <新 HEAD> <分支标志>。标志为 1 才是分支切换（git switch /
+# git checkout <branch> / git worktree add）；0 是 git checkout -- <file> 这类
+# 文件级检出，与 schema 无关，直接放过。
+# 逻辑与 post-merge 共用，见 lib/prisma-generate-if-stale.sh。
+[ "${3:-0}" = "1" ] || exit 0
+sh "$(dirname "$0")/lib/prisma-generate-if-stale.sh"
