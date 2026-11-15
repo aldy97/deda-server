@@ -10,6 +10,7 @@ import { ConfigService } from "@nestjs/config";
 import { ClientApiService } from "./client-api.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
+import { VOICE_RECONCILE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   DEFAULT_PROVISION_WINDOW_SECONDS,
@@ -35,6 +36,7 @@ describe("ClientApiService", () => {
     zRemRangeByScore: jest.Mock;
   };
   let configValues: Record<string, string | undefined>;
+  let voiceReconcile: { onInstanceRegistered: jest.Mock };
 
   const createService = async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -46,6 +48,7 @@ describe("ClientApiService", () => {
         },
         { provide: PrismaService, useValue: prisma },
         { provide: RedisService, useValue: redis },
+        { provide: VOICE_RECONCILE_PORT, useValue: voiceReconcile },
       ],
     }).compile();
     return module.get(ClientApiService);
@@ -74,6 +77,9 @@ describe("ClientApiService", () => {
     configValues = {
       DEVICE_LOGIN_MAC_KEY: TEST_MAC_KEY,
       LLM_ADAPTER_API_KEY: TEST_LLM_API_KEY,
+    };
+    voiceReconcile = {
+      onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
     };
     service = await createService();
   });
@@ -250,6 +256,83 @@ describe("ClientApiService", () => {
       expect(record.authorization).toBeUndefined();
       expect(record.authorization_Role).toBe("role-only");
       expect(record.authorization_TTS).toBe("tts-only");
+    });
+  });
+
+  describe("botStart voice reconcile hook", () => {
+    const startDto = {
+      mac: MAC,
+      appid: "baidu-app-1",
+      instanceid: "9223372036854775806",
+      authorization_Role: "baidu-role-auth",
+      authorization_TTS: "baidu-tts-auth",
+    };
+
+    it("reconciles voice after registering a new instance", async () => {
+      await service.botStart(startDto);
+
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
+        MAC,
+        startDto.instanceid,
+      );
+    });
+
+    it("passes the normalized mac to the hook", async () => {
+      await service.botStart({ ...startDto, mac: "AA:BB:CC:DD:EE:FF" });
+
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
+        MAC,
+        startDto.instanceid,
+      );
+    });
+
+    it("reconciles again on a repeated start (signature refresh)", async () => {
+      await service.botStart(startDto);
+      await service.botStart({
+        ...startDto,
+        authorization_Role: "rotated-role-auth",
+      });
+
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(2);
+    });
+
+    it("still resolves when the hook rejects (protocol 4.2 requires 200)", async () => {
+      voiceReconcile.onInstanceRegistered.mockRejectedValue(
+        new Error("redis down"),
+      );
+
+      await expect(service.botStart(startDto)).resolves.toBeUndefined();
+      expect(redisStore.get(botCurrentKey(MAC))).toBe(startDto.instanceid);
+    });
+
+    it("still resolves when the hook returns a deferred outcome", async () => {
+      voiceReconcile.onInstanceRegistered.mockResolvedValue({
+        applied: "deferred",
+        reason: "empty_catalog",
+      });
+
+      await expect(service.botStart(startDto)).resolves.toBeUndefined();
+    });
+
+    it("does not reconcile when the device has not logged in", async () => {
+      prisma.device.findUnique.mockResolvedValue(null);
+
+      await expect(service.botStart(startDto)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(voiceReconcile.onInstanceRegistered).not.toHaveBeenCalled();
+    });
+
+    it("does not reconcile when reviving an ended instance", async () => {
+      await service.botStart(startDto);
+      await service.botStop({ mac: MAC, instanceid: startDto.instanceid });
+      voiceReconcile.onInstanceRegistered.mockClear();
+
+      await expect(service.botStart(startDto)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(voiceReconcile.onInstanceRegistered).not.toHaveBeenCalled();
     });
   });
 

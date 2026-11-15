@@ -36,6 +36,7 @@ import { LlmAdapterModule } from "./modules/llm-adapter/llm-adapter.module";
 import { ClientApiModule } from "./modules/client-api/client-api.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
 import { TurnDecisionModule } from "./modules/turn-decision/turn-decision.module";
+import { BaiduAgentModule } from "./modules/baidu-agent/baidu-agent.module";
 
 /**
  * deda-dashboard SPA 静态托管（备案期间 staging 直连 :3001/dashboard 的承载方式；
@@ -100,6 +101,7 @@ const staticImports = existsSync(dashboardDistPath)
     ClientApiModule,
     AnalyticsModule,
     TurnDecisionModule,
+    BaiduAgentModule,
     ...staticImports,
   ],
 })
