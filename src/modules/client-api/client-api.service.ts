@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -11,6 +12,10 @@ import { ConfigService } from "@nestjs/config";
 import { createHash, timingSafeEqual } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
+import {
+  VOICE_RECONCILE_PORT,
+  VoiceReconcilePort,
+} from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   PROVISION_RECENT_KEY,
@@ -71,6 +76,8 @@ export class ClientApiService {
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @Inject(VOICE_RECONCILE_PORT)
+    private readonly voiceReconcile: VoiceReconcilePort,
   ) {
     this.macKey = this.configService.get<string>("DEVICE_LOGIN_MAC_KEY");
     if (!this.macKey) {
@@ -131,6 +138,7 @@ export class ClientApiService {
    * - 同实例重复 start → 更新控制鉴权信息，仍 200；
    * - 已结束实例被延迟 start 复活 → 409；
    * - 新实例登记为当前实例（旧实例不再当前，但不自动停止云端实例）。
+   * - 登记成功后追平音色/语速期望值，追平结果不影响本接口的 200 响应。
    */
   async botStart(dto: BotStartDto): Promise<void> {
     const mac = this.normalizeMac(dto.mac);
@@ -159,32 +167,55 @@ export class ClientApiService {
         JSON.stringify(updated),
         BOT_INSTANCE_TTL_SECONDS,
       );
-      return;
+    } else {
+      const record: BotInstanceRecord = {
+        instanceid: dto.instanceid,
+        appid: dto.appid,
+        authorization: dto.authorization,
+        authorization_Role: dto.authorization_Role,
+        authorization_TTS: dto.authorization_TTS,
+        roleSignedAt: now,
+        ttsSignedAt: now,
+        cloudNode: dto.cloud_node ?? "cn",
+        lang: dto.lang ?? "zh",
+        status: "active",
+        startedAt: now,
+      };
+      await this.redis.setValue(
+        key,
+        JSON.stringify(record),
+        BOT_INSTANCE_TTL_SECONDS,
+      );
+      await this.redis.setValue(
+        botCurrentKey(mac),
+        dto.instanceid,
+        BOT_INSTANCE_TTL_SECONDS,
+      );
     }
 
-    const record: BotInstanceRecord = {
-      instanceid: dto.instanceid,
-      appid: dto.appid,
-      authorization: dto.authorization,
-      authorization_Role: dto.authorization_Role,
-      authorization_TTS: dto.authorization_TTS,
-      roleSignedAt: now,
-      ttsSignedAt: now,
-      cloudNode: dto.cloud_node ?? "cn",
-      lang: dto.lang ?? "zh",
-      status: "active",
-      startedAt: now,
-    };
-    await this.redis.setValue(
-      key,
-      JSON.stringify(record),
-      BOT_INSTANCE_TTL_SECONDS,
-    );
-    await this.redis.setValue(
-      botCurrentKey(mac),
-      dto.instanceid,
-      BOT_INSTANCE_TTL_SECONDS,
-    );
+    await this.reconcileVoice(mac, dto.instanceid);
+  }
+
+  /**
+   * start 登记完成后追平音色/语速期望值。
+   *
+   * 重复 start 也要追平：那是签名续签的唯一时机，此前 deferred 的期望值
+   * 只有在这里才可能变成 live。
+   *
+   * 协议 4.2 要求 start 幂等返回 {"code":200}，因此追平失败绝不上抛——
+   * 否则设备会按协议 6.2 对同一实例反复重试。onInstanceRegistered 自身
+   * 已保证不抛，这里的 try/catch 是对该响应契约的第二层保险。
+   */
+  private async reconcileVoice(mac: string, instanceId: string): Promise<void> {
+    try {
+      await this.voiceReconcile.onInstanceRegistered(mac, instanceId);
+    } catch (error) {
+      this.logger.warn(
+        `voice reconcile hook failed, mac=${mac}, instanceId=${instanceId}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**

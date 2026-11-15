@@ -91,6 +91,79 @@
 
 前端对齐：提交 `mode` 字段即可（`free_chat` / `english_chat`）；mode 已平级化，不再有子模式概念，小程序侧原切换页（switch-mode / choose-free-chat-mode）已下线。
 
+## 音色/语速配置
+
+### 查询设备当前音色/语速
+
+`GET /device-configs/:deviceId/voice`
+
+成功返回 **200**。
+
+请求：JWT Bearer header，`:deviceId` 为业务 deviceId（十二位小写 MAC）。
+
+响应 `data` 字段：
+
+| 字段           | 类型               | 说明                                                         |
+| -------------- | ------------------ | ------------------------------------------------------------ |
+| deviceId       | string             | 设备业务 ID                                                  |
+| vcn            | string \| null     | 当前期望音色 timbreId；未设置时为 null                       |
+| speechRate     | string \| null     | 当前期望语速档位（`slow` / `normal` / `fast`）；未设置时为 null |
+| spd            | number \| null     | speechRate 对应的 spd 倍数；未设置或映射缺失时为 null        |
+| catalog        | array              | 可用音色列表，每项 `{ timbreId, name, language }`；目录为空时返回 `[]` |
+| available      | boolean            | 音色切换是否可用（`VOICE_CATALOG_JSON` 非空 且 目录内有至少一个 TRAINED 音色） |
+| canApplyLive   | boolean            | 当前能否实时下发到活跃实例；false 时 POST 必然返回 `applied="deferred"` |
+| reason         | string \| null     | `available=false` 或 `canApplyLive=false` 的原因（取值见 `VoiceApplyBlockReason`） |
+
+### 设置音色/语速
+
+`POST /device-configs/:deviceId/voice`
+
+成功返回 **201**（与同 controller 的 `/mode`、`/apply` 一致，Nest `@Post` 默认状态码）。
+
+请求体（JSON）：
+
+| 字段       | 类型   | 必填 | 说明                                                    |
+| ---------- | ------ | ---- | ------------------------------------------------------- |
+| vcn        | string | 否   | 百度 timbreId（音色 ID）                                |
+| speechRate | string | 否   | 语速档位：`slow` / `normal` / `fast`                    |
+
+**至少提供一个字段，否则返回 400**。
+
+响应 `data` 字段：
+
+| 字段       | 类型               | 说明                                                         |
+| ---------- | ------------------ | ------------------------------------------------------------ |
+| deviceId   | string             | 设备业务 ID                                                  |
+| vcn        | string \| null     | 设置的音色 ID（与入参一致）                                  |
+| speechRate | string \| null     | 设置的语速档位（与入参一致）                                 |
+| spd        | number \| null     | speechRate 映射后的 spd 倍数                                 |
+| applied    | string             | `live` / `deferred` / `noop`（见下方语义）                   |
+| reason     | string \| null     | `applied !== "live"` 时的原因（取值见 `VoiceApplyBlockReason`） |
+
+### applied 三种取值语义
+
+| 取值       | 含义                                                   |
+| ---------- | ------------------------------------------------------ |
+| `live`     | 已对当前活跃百度实例调用 switchSceneRole 并收到 2xx    |
+| `deferred` | 期望值已落库，但本次未下发；等下一轮设备 start 后自动追平 |
+| `noop`     | 无需操作（期望值为空）。POST 至少带一个字段、且 `speechRate` 有 `normal` 兜底，因此 POST 实际不会返回 `noop`；该取值只出现在设备 start 后的追平路径 |
+
+### 错误口径
+
+| 状态码 | 条件                                                         |
+| ------ | ------------------------------------------------------------ |
+| 400    | `vcn` 和 `speechRate` 都未提供；`vcn` 不在音色目录内（目录为空时任何 `vcn` 都算不在）；`speechRate` 不是 `slow`/`normal`/`fast`；请求体含未声明字段 |
+| 401    | 未提供 JWT 或 token 无效/过期                                |
+| 403    | 当前用户未绑定该设备                                         |
+
+### 前端对齐
+
+- 小程序进入音色设置页先调 `GET /device-configs/:deviceId/voice`，用 `catalog` 渲染音色列表、用 `vcn`/`speechRate` 回填当前选中项。
+- 提交时调 `POST /device-configs/:deviceId/voice`，传入用户选择的 `vcn` 和/或 `speechRate`。
+- `applied="deferred"` 且 `reason` 非空时，应展示文案提示用户「将在下次对话开始时生效」。
+- `available=false` 时隐藏或禁用音色选择 UI（当前目录为空，不展示空列表）。
+- 字段命名 camelCase，响应信封 `{ code, message, data }`，`code=0` 为成功。
+
 ## 百度 RTC 直连主链路（当前主链路，2026-11 起）
 
 语音对话主链路：**设备 ⇄ 百度 RTC 云（ASR + TTS + 传输）⇄ 本服务 LLM 适配层**。机芯厂（智安芯）只负责机芯/固件与 MQTT 设备管理，不在语音链路上。
