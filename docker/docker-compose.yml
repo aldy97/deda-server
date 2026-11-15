@@ -19,11 +19,19 @@ services:
     container_name: deda-server
     restart: always
     # 端口由各环境 override 文件声明（compose 对 ports 是并集合并，不能放 base）
+    # 注意：这里是白名单，不是「自动继承 env 文件」。--env-file 只做 ${VAR} 替换，
+    # 不会把变量注入容器；代码读了但没列在这里的键，在容器里永远是 undefined，
+    # 且不会报错——env 文件里写了也白写。新增环境变量时必须同步补到这里。
+    # 口径由 src/common/workflows/compose-env-gate.spec.ts 钉住。
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       APP_NAME: ${APP_NAME:-deda-server}
       APP_PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Node 按宿主机总内存推算 V8 老生代上限，不看 cgroup limit。不显式限定堆，
+      # 容器会在 GC 触发前就被 OOM kill（退出码 137，日志里没有 JS 堆溢出记录）。
+      # 数值由各环境 override 给定，base 只负责把变量透传进来。
+      NODE_OPTIONS: ${NODE_OPTIONS:-}
       DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/${DB_NAME:-deda}?schema=public
       REDIS_URL: redis://redis:6379/${REDIS_DB:-0}
       # 微信小程序
@@ -36,6 +44,7 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       # Analytics Dashboard 管理员鉴权
       ANALYTICS_JWT_SECRET: ${ANALYTICS_JWT_SECRET:-}
+      ANALYTICS_JWT_EXPIRES_IN: ${ANALYTICS_JWT_EXPIRES_IN:-}
       ANALYTICS_ADMIN_USERS: ${ANALYTICS_ADMIN_USERS:-[]}
       # ARMS 应用监控（可选；不配 LicenseKey 则探针不加载，服务原样启动）
       ARMS_APP_NAME: ${ARMS_APP_NAME:-}
@@ -49,8 +58,10 @@ services:
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-zhianxin/event/report}
+      MQTT_STATUS_TTL_SECONDS: ${MQTT_STATUS_TTL_SECONDS:-}
       # LLM 适配层与主模型
       LLM_ADAPTER_API_KEY: ${LLM_ADAPTER_API_KEY:-}
+      LLM_ADAPTER_FILLER: ${LLM_ADAPTER_FILLER:-}
       # 机芯厂设备侧接口（client-api）：设备上线共享密钥与认领窗口
       DEVICE_LOGIN_MAC_KEY: ${DEVICE_LOGIN_MAC_KEY:-}
       PROVISION_CLAIM_WINDOW_SEC: ${PROVISION_CLAIM_WINDOW_SEC:-120}
@@ -88,6 +99,32 @@ services:
       LLM_COST_SYNC_ENABLED: ${LLM_COST_SYNC_ENABLED:-false}
       LLM_COST_SYNC_INTERVAL_MINUTES: ${LLM_COST_SYNC_INTERVAL_MINUTES:-360}
       LLM_COST_SYNC_LOOKBACK_DAYS: ${LLM_COST_SYNC_LOOKBACK_DAYS:-3}
+      # 微信订阅消息推送与哄睡提醒模板
+      PUSH_NOTIFICATIONS_ENABLED: ${PUSH_NOTIFICATIONS_ENABLED:-}
+      WECHAT_TMPL_SLEEP_REMINDER: ${WECHAT_TMPL_SLEEP_REMINDER:-}
+      # 内容管理台写开关与发布确认码。
+      # CONTENT_ADMIN_PROFILE 刻意不在此转发：只有 staging override 写死 authoring，
+      # prod 不设即只读（fail-safe），转发进来会让 env 文件误配一次就能写生产内容。
+      PROMPT_WRITE_ENABLED: ${PROMPT_WRITE_ENABLED:-}
+      PROMPT_PUBLISH_CONFIRM_CODE: ${PROMPT_PUBLISH_CONFIRM_CODE:-}
+      # 冒险内容治理阈值。以下一律留空即回落代码内默认值（adventure.constants.ts），
+      # 只有需要按环境收紧时才在 env 文件里写值。
+      ADVENTURE_BREAKER_WINDOW_MS: ${ADVENTURE_BREAKER_WINDOW_MS:-}
+      ADVENTURE_BREAKER_THRESHOLD: ${ADVENTURE_BREAKER_THRESHOLD:-}
+      ADVENTURE_BREAKER_TRIPPED_TTL_SECONDS: ${ADVENTURE_BREAKER_TRIPPED_TTL_SECONDS:-}
+      ADVENTURE_RECOVERY_ENABLED: ${ADVENTURE_RECOVERY_ENABLED:-}
+      ADVENTURE_RECOVERY_SWEEP_INTERVAL_MS: ${ADVENTURE_RECOVERY_SWEEP_INTERVAL_MS:-}
+      ADVENTURE_RECOVERY_STALE_AWAIT_MS: ${ADVENTURE_RECOVERY_STALE_AWAIT_MS:-}
+      ADVENTURE_RECOVERY_STALE_AWAIT_ACTION: ${ADVENTURE_RECOVERY_STALE_AWAIT_ACTION:-}
+      ADVENTURE_LINT_MAX_TITLE_CHARS: ${ADVENTURE_LINT_MAX_TITLE_CHARS:-}
+      ADVENTURE_LINT_MAX_NARRATION_CHARS: ${ADVENTURE_LINT_MAX_NARRATION_CHARS:-}
+      ADVENTURE_LINT_MAX_INTERACTION_CHARS: ${ADVENTURE_LINT_MAX_INTERACTION_CHARS:-}
+      ADVENTURE_LINT_MAX_STARS_PER_EPISODE: ${ADVENTURE_LINT_MAX_STARS_PER_EPISODE:-}
+      ADVENTURE_LINT_MIN_CHOICE_KEY_CHARS: ${ADVENTURE_LINT_MIN_CHOICE_KEY_CHARS:-}
+      ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS: ${ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS:-}
+      ADVENTURE_LINT_FORBIDDEN_WORDS: ${ADVENTURE_LINT_FORBIDDEN_WORDS:-}
+      ADVENTURE_SIM_MAX_AWAIT_POINTS: ${ADVENTURE_SIM_MAX_AWAIT_POINTS:-}
+      ADVENTURE_SIM_MAX_SESSION_SECONDS: ${ADVENTURE_SIM_MAX_SESSION_SECONDS:-}
     depends_on:
       - postgres
       - redis

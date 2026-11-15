@@ -22,6 +22,9 @@ services:
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
     environment:
       DASHBOARD_DIST_PATH: /opt/deda/dashboard/prod
+      # 容器 limit 1536M，堆留 1024M：Node 按宿主内存（3623MiB）推算老生代上限，
+      # 不限定就会在 GC 前把容器撑到 limit 被 OOM kill。余量给 Buffer/代码段/ARMS 探针。
+      NODE_OPTIONS: --max-old-space-size=1024
     deploy:
       resources:
         limits:
@@ -34,11 +37,23 @@ services:
     ports:
       # 仅回环：服务器上排查/备份用，不对公网暴露
       - '127.0.0.1:5432:5432'
+    deploy:
+      resources:
+        limits:
+          # 与 staging 同机，必须封顶：postgres 默认 shared_buffers 按宿主内存算，
+          # 连接数涨上来会一路吃到把邻居（staging app）挤进 swap 甚至 OOM。
+          memory: 512M
 
   redis:
     container_name: deda-redis-prod
     ports:
       - '127.0.0.1:6379:6379'
+    deploy:
+      resources:
+        limits:
+          # 当前只放熔断标记、设备状态 TTL 等小键；若日后当缓存用需同步上调，
+          # 否则 redis 会在触顶时被 kill（未配 maxmemory，不会自己淘汰）。
+          memory: 128M
 
   nginx:
     container_name: deda-nginx-prod
