@@ -6,6 +6,7 @@ import { AnalyticsAuthController } from "./analytics-auth.controller";
 import {
   ANALYTICS_JWT_SERVICE,
   AnalyticsAuthService,
+  resolveAnalyticsTokenTtl,
 } from "./analytics-auth.service";
 import { AnalyticsJwtStrategy } from "./strategies/analytics-jwt.strategy";
 import { OverviewController } from "./overview.controller";
@@ -77,8 +78,9 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
             configService.get<string>("ANALYTICS_JWT_SECRET") ||
             "dev-analytics-jwt-secret",
           signOptions: {
-            expiresIn:
-              configService.get<string>("ANALYTICS_JWT_EXPIRES_IN") || "12h",
+            expiresIn: resolveAnalyticsTokenTtl(
+              configService.get<string>("ANALYTICS_JWT_EXPIRES_IN"),
+            ),
           },
         }),
     },
