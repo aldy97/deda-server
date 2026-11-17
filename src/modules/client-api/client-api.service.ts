@@ -13,6 +13,8 @@ import { createHash, timingSafeEqual } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import {
+  DEVICE_DEFAULT_LANG,
+  LoginVoiceField,
   VOICE_RECONCILE_PORT,
   VoiceReconcilePort,
 } from "@/modules/baidu-agent/baidu-agent.types";
@@ -98,9 +100,14 @@ export class ClientApiService {
 
   /**
    * 设备上线：校验密码 → upsert Device（幂等，重复上线仅更新登记）→
-   * 写入认领窗口。返回归一化 MAC 与三方 LLM API KEY 供 controller 组装响应。
+   * 写入认领窗口 → 算出本轮要下发给固件的初始音色。
+   * 返回归一化 MAC、三方 LLM API KEY 与音色字段供 controller 组装响应。
    */
-  async loginMac(dto: LoginMacDto): Promise<{ mac: string; apiKey: string }> {
+  async loginMac(dto: LoginMacDto): Promise<{
+    mac: string;
+    apiKey: string;
+    loginVoice: LoginVoiceField | null;
+  }> {
     const mac = this.normalizeMac(dto.mac);
 
     if (!this.macKey || !this.verifyPassword(mac, dto.password)) {
@@ -114,7 +121,7 @@ export class ClientApiService {
       throw new InternalServerErrorException("llm api key not configured");
     }
 
-    await this.prisma.device.upsert({
+    const device = await this.prisma.device.upsert({
       where: { deviceId: mac },
       create: { deviceId: mac, macAddress: mac },
       update: { macAddress: mac },
@@ -128,8 +135,51 @@ export class ClientApiService {
       now - this.provisionWindowMs,
     );
 
+    const loginVoice = await this.resolveLoginVoice(device, mac);
+
     this.logger.log(`loginMac ok, mac=${mac}`);
-    return { mac, apiKey: this.llmApiKey };
+    return { mac, apiKey: this.llmApiKey, loginVoice };
+  }
+
+  /**
+   * 算出上线响应体里要下发给固件的音色字段；永不抛错、永不影响 200 响应。
+   *
+   * 协议 3.2 节的响应体没有这个字段，它是我方与机芯厂 2026-11-17 约定的扩展：
+   * 固件解析后在创建百度实例时拼进 tts 配置，于是本轮**第一句话**就是目标音色，
+   * 且不依赖设备签名有效期（1800 秒）与实例是否已登记。
+   *
+   * TODO(Q11): 字段名待机芯厂书面确认（对方原话只说「加一个音色id的参数」）。
+   * TODO(Q14): 老固件对 data 内未知字段的容忍度待确认；在此之前该字段只在解析
+   *   成功时出现，而默认配置下（音色目录为空、无 IP 默认音色）永不出现。
+   */
+  private async resolveLoginVoice(
+    device: { id: string; characterKey: string | null },
+    mac: string,
+  ): Promise<LoginVoiceField | null> {
+    try {
+      const resolution = await this.voiceReconcile.resolveInitialVoice({
+        deviceInternalId: device.id,
+        characterKey: device.characterKey ?? null,
+        lang: DEVICE_DEFAULT_LANG,
+      });
+
+      if (resolution.status === "ready") {
+        return resolution.field;
+      }
+      if (resolution.status === "blocked") {
+        this.logger.warn(
+          `loginMac voice not dispatched: reason=${resolution.reason}, mac=${mac}`,
+        );
+      }
+      return null;
+    } catch (error) {
+      this.logger.warn(
+        `loginMac voice dispatch failed, mac=${mac}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -142,7 +192,7 @@ export class ClientApiService {
    */
   async botStart(dto: BotStartDto): Promise<void> {
     const mac = this.normalizeMac(dto.mac);
-    await this.assertDeviceRegistered(mac);
+    const device = await this.assertDeviceRegistered(mac);
 
     const now = new Date().toISOString();
     const key = botInstanceKey(mac, dto.instanceid);
@@ -160,7 +210,7 @@ export class ClientApiService {
         roleSignedAt: now,
         ttsSignedAt: now,
         cloudNode: dto.cloud_node ?? "cn",
-        lang: dto.lang ?? "zh",
+        lang: dto.lang ?? DEVICE_DEFAULT_LANG,
       };
       await this.redis.setValue(
         key,
@@ -177,7 +227,7 @@ export class ClientApiService {
         roleSignedAt: now,
         ttsSignedAt: now,
         cloudNode: dto.cloud_node ?? "cn",
-        lang: dto.lang ?? "zh",
+        lang: dto.lang ?? DEVICE_DEFAULT_LANG,
         status: "active",
         startedAt: now,
       };
@@ -193,7 +243,10 @@ export class ClientApiService {
       );
     }
 
-    await this.reconcileVoice(mac, dto.instanceid);
+    // 不 await：出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS（默认 5000ms），
+    // 而协议 4.2 要求本接口幂等快速返回 {"code":200}。等追平完成再响应会把
+    // 一次慢调用放大成设备的多轮重试（协议 6.2）。
+    void this.reconcileVoice(mac, dto.instanceid, device.id);
   }
 
   /**
@@ -202,13 +255,25 @@ export class ClientApiService {
    * 重复 start 也要追平：那是签名续签的唯一时机，此前 deferred 的期望值
    * 只有在这里才可能变成 live。
    *
-   * 协议 4.2 要求 start 幂等返回 {"code":200}，因此追平失败绝不上抛——
-   * 否则设备会按协议 6.2 对同一实例反复重试。onInstanceRegistered 自身
-   * 已保证不抛，这里的 try/catch 是对该响应契约的第二层保险。
+   * 本方法由 botStart 以 fire-and-forget 方式触发，因此绝不允许未捕获的
+   * rejection 冒泡：协议 4.2 要求 start 幂等返回 {"code":200}，追平失败也不能
+   * 影响该响应。onInstanceRegistered 自身已保证不抛，这里的 try/catch 是对
+   * 该响应契约的第二层保险。
+   *
+   * 代价：追平结果无法再从 HTTP 响应观察，只能看日志或
+   * GET /device-configs/:deviceId/voice 的 applied/reason 字段。
    */
-  private async reconcileVoice(mac: string, instanceId: string): Promise<void> {
+  private async reconcileVoice(
+    mac: string,
+    instanceId: string,
+    deviceInternalId: string,
+  ): Promise<void> {
     try {
-      await this.voiceReconcile.onInstanceRegistered(mac, instanceId);
+      await this.voiceReconcile.onInstanceRegistered(
+        mac,
+        instanceId,
+        deviceInternalId,
+      );
     } catch (error) {
       this.logger.warn(
         `voice reconcile hook failed, mac=${mac}, instanceId=${instanceId}, error=${
@@ -279,7 +344,12 @@ export class ClientApiService {
     );
   }
 
-  private async assertDeviceRegistered(mac: string): Promise<void> {
+  /**
+   * 校验设备已上线登记（协议 4.1/5.1：未上线返回 401）。
+   * 返回查到的 Device 投影，供调用方复用——追平钩子需要内部 id，
+   * 否则每轮 start 会为同一个 id 多查一次库。
+   */
+  private async assertDeviceRegistered(mac: string): Promise<{ id: string }> {
     const device = await this.prisma.device.findUnique({
       where: { deviceId: mac },
       select: { id: true },
@@ -287,6 +357,7 @@ export class ClientApiService {
     if (!device) {
       throw new UnauthorizedException("device not registered");
     }
+    return device;
   }
 
   private async readInstance(key: string): Promise<BotInstanceRecord | null> {

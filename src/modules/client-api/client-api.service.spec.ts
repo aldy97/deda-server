@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -10,7 +11,10 @@ import { ConfigService } from "@nestjs/config";
 import { ClientApiService } from "./client-api.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
-import { VOICE_RECONCILE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
+import {
+  DEVICE_DEFAULT_LANG,
+  VOICE_RECONCILE_PORT,
+} from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   DEFAULT_PROVISION_WINDOW_SECONDS,
@@ -36,7 +40,10 @@ describe("ClientApiService", () => {
     zRemRangeByScore: jest.Mock;
   };
   let configValues: Record<string, string | undefined>;
-  let voiceReconcile: { onInstanceRegistered: jest.Mock };
+  let voiceReconcile: {
+    onInstanceRegistered: jest.Mock;
+    resolveInitialVoice: jest.Mock;
+  };
 
   const createService = async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -57,7 +64,9 @@ describe("ClientApiService", () => {
   beforeEach(async () => {
     prisma = {
       device: {
-        upsert: jest.fn().mockResolvedValue({ id: "device-uuid-1" }),
+        upsert: jest
+          .fn()
+          .mockResolvedValue({ id: "device-uuid-1", characterKey: "elly" }),
         findUnique: jest.fn().mockResolvedValue({ id: "device-uuid-1" }),
       },
     };
@@ -80,6 +89,7 @@ describe("ClientApiService", () => {
     };
     voiceReconcile = {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
+      resolveInitialVoice: jest.fn().mockResolvedValue({ status: "none" }),
     };
     service = await createService();
   });
@@ -91,7 +101,11 @@ describe("ClientApiService", () => {
         password: GOLDEN_PASSWORD,
       });
 
-      expect(result).toEqual({ mac: MAC, apiKey: TEST_LLM_API_KEY });
+      expect(result).toEqual({
+        mac: MAC,
+        apiKey: TEST_LLM_API_KEY,
+        loginVoice: null,
+      });
       expect(prisma.device.upsert).toHaveBeenCalledWith({
         where: { deviceId: MAC },
         create: { deviceId: MAC, macAddress: MAC },
@@ -157,6 +171,77 @@ describe("ClientApiService", () => {
       await service.loginMac({ mac: MAC, password: GOLDEN_PASSWORD });
       expect(prisma.device.upsert).toHaveBeenCalledTimes(2);
       expect(redis.zAdd).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("loginMac initial voice dispatch", () => {
+    const login = () =>
+      service.loginMac({ mac: MAC, password: GOLDEN_PASSWORD });
+
+    it("passes the upserted device id, its characterKey and the default lang", async () => {
+      await login();
+
+      expect(voiceReconcile.resolveInitialVoice).toHaveBeenCalledWith({
+        deviceInternalId: "device-uuid-1",
+        characterKey: "elly",
+        lang: DEVICE_DEFAULT_LANG,
+      });
+    });
+
+    it("returns the ready field so the controller can spread it into data", async () => {
+      voiceReconcile.resolveInitialVoice.mockResolvedValue({
+        status: "ready",
+        timbreId: "1000063",
+        field: { key: "timbreId", value: "1000063" },
+      });
+
+      const result = await login();
+
+      expect(result.loginVoice).toEqual({ key: "timbreId", value: "1000063" });
+    });
+
+    it("returns no field when nothing is desired", async () => {
+      voiceReconcile.resolveInitialVoice.mockResolvedValue({ status: "none" });
+
+      expect((await login()).loginVoice).toBeNull();
+    });
+
+    it("returns no field and records the reason when the resolution is blocked", async () => {
+      jest.spyOn(Logger.prototype, "warn").mockImplementation();
+      voiceReconcile.resolveInitialVoice.mockResolvedValue({
+        status: "blocked",
+        reason: "empty_catalog",
+      });
+
+      const result = await login();
+
+      expect(result.loginVoice).toBeNull();
+      expect(Logger.prototype.warn).toHaveBeenCalledWith(
+        expect.stringContaining("empty_catalog"),
+      );
+      jest.restoreAllMocks();
+    });
+
+    it("still onboards the device when the voice resolution throws", async () => {
+      voiceReconcile.resolveInitialVoice.mockRejectedValue(
+        new Error("catalog exploded"),
+      );
+
+      await expect(login()).resolves.toEqual({
+        mac: MAC,
+        apiKey: TEST_LLM_API_KEY,
+        loginVoice: null,
+      });
+      expect(prisma.device.upsert).toHaveBeenCalledTimes(1);
+      expect(redis.zAdd).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not resolve a voice when credentials are rejected", async () => {
+      await expect(
+        service.loginMac({ mac: MAC, password: "0".repeat(32) }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(voiceReconcile.resolveInitialVoice).not.toHaveBeenCalled();
     });
   });
 
@@ -272,10 +357,13 @@ describe("ClientApiService", () => {
       await service.botStart(startDto);
 
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
+      // 第三个参数是 bot/start 401 校验时已经查到的 Device.id，避免重复查询
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
+        "device-uuid-1",
       );
+      expect(prisma.device.findUnique).toHaveBeenCalledTimes(1);
     });
 
     it("passes the normalized mac to the hook", async () => {
@@ -284,7 +372,25 @@ describe("ClientApiService", () => {
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
+        "device-uuid-1",
       );
+    });
+
+    it("does not wait for the reconcile to settle before resolving (protocol 4.2 latency)", async () => {
+      let release: () => void = () => undefined;
+      voiceReconcile.onInstanceRegistered.mockReturnValue(
+        new Promise((resolve) => {
+          release = () => resolve({ applied: "live" });
+        }),
+      );
+
+      // 出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS(5000)；bot/start 必须
+      // 先返回 200，否则设备会按协议 6.2 重试，把一次慢调用放大成多次。
+      await expect(service.botStart(startDto)).resolves.toBeUndefined();
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
+      expect(redisStore.get(botCurrentKey(MAC))).toBe(startDto.instanceid);
+
+      release();
     });
 
     it("reconciles again on a repeated start (signature refresh)", async () => {
