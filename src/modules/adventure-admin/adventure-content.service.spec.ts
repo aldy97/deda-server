@@ -276,16 +276,26 @@ describe("AdventureContentService", () => {
       expect(audit.record).not.toHaveBeenCalled();
     });
 
-    it("refuses to persist a draft containing a forbidden word", async () => {
-      query.checkContent.mockResolvedValue(errorReport("FORBIDDEN_WORD"));
+    /**
+     * 禁用词属于内容级问题：草稿对孩子不可见，发布时会按发布标准重新判一次
+     * （见 publish 里的 FORBIDDEN_WORD 用例）。在落草稿这一步硬拦，等于作者
+     * 没法把写到一半的稿子停下来。身份级错误仍然拦——那不是「没写完」，
+     * 是「这一行写坏了」。
+     */
+    it("lets a forbidden word live on as a draft because only publishing gates child safety", async () => {
+      const report = errorReport("FORBIDDEN_WORD");
+      query.checkContent.mockResolvedValue(report);
+      tx.adventureEpisode.create = jest
+        .fn()
+        .mockResolvedValue({ ...episodeRow, id: "ep-new" });
+      prisma.adventureEpisode.create = tx.adventureEpisode.create;
 
-      await expect(
-        service.createEpisode(identity, content, actor, {
-          reason: "新建一集的初稿内容",
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      const result = await service.createEpisode(identity, content, actor, {
+        reason: "初稿里有个词待会儿再改",
+      });
 
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adventureEpisode.create).toHaveBeenCalledTimes(1);
+      expect(result.lint).toBe(report);
     });
 
     it("lets purely structural problems live on as a draft and returns the report for the editor", async () => {
@@ -540,6 +550,15 @@ describe("AdventureContentService", () => {
           reason: "二选一的选项还没填完",
         }),
       ).resolves.toBeDefined();
+
+      // 禁用词是内容级：即使报告里它仍是 error 严重度，草稿闸口也按 code 放行。
+      // 这条断言守的是「阻断按 code 判，不按 severity 判」这个口径本身。
+      query.checkContent.mockResolvedValue(errorReport("FORBIDDEN_WORD"));
+      await expect(
+        service.saveDraft("ep1", content, actor, {
+          reason: "这个词我先留着，发布前一定改",
+        }),
+      ).resolves.toBeDefined();
     });
 
     it("reports NotFound for an unknown episode", async () => {
@@ -655,6 +674,27 @@ describe("AdventureContentService", () => {
         service.publish("ep1", actor, { reason: "段号断了一格必须拦住" }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
+    });
+
+    /**
+     * 儿童安全的唯一闸口就是这里。草稿阶段禁用词已经降级放行，所以发布必须
+     * (a) 按发布标准重新校验、(b) 拦住禁用词。这两条一旦有一条松掉，
+     * 含禁用词的内容就能直达孩子。
+     */
+    it("re-lints at the publish standard and refuses to publish a forbidden word that the draft let through", async () => {
+      query.checkContent.mockResolvedValue(errorReport("FORBIDDEN_WORD"));
+
+      await expect(
+        service.publish("ep1", actor, { reason: "草稿能存不等于能发出去" }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        "ep1",
+        expect.anything(),
+        expect.objectContaining({ forPublish: true }),
+      );
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
     });
