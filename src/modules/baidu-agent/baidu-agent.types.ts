@@ -229,11 +229,29 @@ export interface VoiceReconcilePort {
    * 设备 start 登记成功后的追平入口；永不抛错。
    * 协议 4.2 要求 start 幂等返回 {"code":200}，追平失败绝不能影响该响应，
    * 否则设备会按协议 6.2 做无意义重试。
+   *
+   * @param deviceInternalId 可选。调用方（bot/start）已经查过 Device，
+   *   传入即免去本方法内的重复查询；不传则自行按 mac 查。
    */
   onInstanceRegistered(
     mac: string,
     instanceId: string,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
+  /**
+   * 计算设备上线（loginMac）时应下发给固件的初始音色；永不抛错。
+   *
+   * 与 switchSceneRole 追平互补：这里决定「固件创建百度实例时用哪个音色」，
+   * 因此本轮第一句话就是目标音色，且不依赖设备签名有效期（1800 秒）
+   * 与实例是否活跃。机芯厂 2026-11-17 确认由固件解析该字段后拼进创建实例请求。
+   */
+  resolveInitialVoice(params: {
+    deviceInternalId: string;
+    /** Device.characterKey（elly / polly），用于回落 IP 默认音色 */
+    characterKey: string | null;
+    /** 实例语种，取 DEVICE_DEFAULT_LANG */
+    lang: string;
+  }): Promise<InitialVoiceResolution>;
   /** 语速档位 → spd 倍数；映射未配置时返回 null */
   resolveSpd(speechRate: string | null): number | null;
 }
@@ -246,19 +264,82 @@ export const SPEECH_RATES = ["slow", "normal", "fast"] as const;
 export type SpeechRate = (typeof SPEECH_RATES)[number];
 
 /**
+ * 设备默认语种。
+ *
+ * 机芯厂 2026-11-17 书面确认：固件 bot/start 上报的 lang 取值就是 `zh`，
+ * 与《设备端接口文档》4.1 节「默认 zh」一致。loginMac 响应体的 lang、
+ * bot/start 缺省回填、上线音色解析三处共用此常量，避免口径漂移。
+ */
+export const DEVICE_DEFAULT_LANG = "zh";
+
+/**
  * 实例语种（机芯厂文档 4.1 的 lang，如 zh）→ 音色 language（timbres 接口枚举）。
  *
  * 依据：timbres 响应参数 language 取值为 chinese/english/japanese，
  * 且 switchSceneRole 明确「不可跨语言互切角色」，因此必须按语种过滤音色。
+ * `zh` 一侧已由机芯厂 2026-11-17 确认；`en`/`ja` 仍是由两页文档取值域推得。
  *
- * TODO(Q1): 该映射由两页文档的取值域推得，未经机芯厂/百度确认；
- * 未确认前保持严格策略——映射不到的语种一律返回空目录（fail-closed）。
+ * TODO(Q1): en/ja 映射未经确认；映射不到的语种一律返回空目录（fail-closed）。
  */
 export const TIMBRE_LANGUAGE_BY_LANG: Readonly<Record<string, string>> = {
   zh: "chinese",
   en: "english",
   ja: "japanese",
 };
+
+/**
+ * 设备上线（loginMac）时下发给固件的音色载荷形态。
+ *
+ * - `timbreId`：只下发裸音色 id。严格对应机芯厂 2026-11-17 的原话
+ *   「响应体里面加一个音色id的参数，我解析后在创建百度实例的时候拼接进去」，
+ *   由固件自行拼 tts 串。**代价：语速传不过去**，只能事后靠 switchSceneRole。
+ * - `tts`：下发完整配置串（形如 `DEFAULT{"vcn":"1000063","spd":0.8}`）。
+ *   百度文档明确 switchSceneRole 的 tts 取值等价于创建实例接口的 tts_url，
+ *   固件「拼接」退化为「原样填入」，音色与语速一次到位。
+ *
+ * TODO(Q12): 两种形态选哪种需机芯厂确认；确认前默认走 timbreId（有据可依的那一种），
+ * 确认后只改 LOGIN_VOICE_PAYLOAD_FORMAT 配置，无需改代码。
+ */
+export const LOGIN_VOICE_PAYLOAD_FORMATS = ["timbreId", "tts"] as const;
+export type LoginVoicePayloadFormat =
+  (typeof LOGIN_VOICE_PAYLOAD_FORMATS)[number];
+export const DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT: LoginVoicePayloadFormat =
+  "timbreId";
+
+/**
+ * loginMac 响应体 `data` 内承载音色的字段名，按载荷形态取。
+ *
+ * TODO(Q11): 字段名未经机芯厂书面确认（对方只说了「加一个音色id的参数」）。
+ * 确认前不改；确认后只改本表，响应体组装与固件解析自动对齐。
+ * TODO(Q14): 老固件对 data 内新增未知字段的容忍度未确认（忽略 or 报错）。
+ * 因此本字段只在解析成功时出现，且默认配置下（音色目录为空）永不出现。
+ */
+export const LOGIN_VOICE_FIELD_BY_FORMAT: Readonly<
+  Record<LoginVoicePayloadFormat, string>
+> = {
+  timbreId: "timbreId",
+  tts: "tts",
+};
+
+/** 已按载荷形态组装好、可直接展开进 loginMac 响应体 data 的一个键值对 */
+export interface LoginVoiceField {
+  key: string;
+  value: string;
+}
+
+/**
+ * 上线初始音色的解析结果。
+ *
+ * - `none`：没有可下发的音色期望值（正常态）。不下发字段，
+ *   固件沿用百度互动应用自身的默认 tts。只配了语速、没配音色也归此类——
+ *   创建实例时无法只表达 spd（见 TODO(Q12)）。
+ * - `blocked`：有期望值但不可下发（fail-closed），带可归因 reason。
+ * - `ready`：可下发，`field` 已按 LOGIN_VOICE_PAYLOAD_FORMAT 组装完毕。
+ */
+export type InitialVoiceResolution =
+  | { status: "none" }
+  | { status: "blocked"; reason: VoiceApplyBlockReason }
+  | { status: "ready"; timbreId: string; field: LoginVoiceField };
 
 /**
  * DeviceConfig.payload 中保存音色期望值的键。
