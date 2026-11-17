@@ -7,6 +7,8 @@ services:
   app:
     container_name: deda-server-dev
     restart: 'no'
+    ports:
+      - '3000:3000'
     # 本地开发不构建镜像，直接挂载源码并用 ts-node 热重载
     build: false
     image: node:20-alpine
@@ -30,3 +32,12 @@ services:
   nginx:
     container_name: deda-nginx-dev
     restart: 'no'
+
+  postgres:
+    ports:
+      # 仅回环：方便本机 Prisma Studio / 排查，不对公网暴露
+      - '127.0.0.1:5432:5432'
+
+  redis:
+    ports:
+      - '127.0.0.1:6379:6379'

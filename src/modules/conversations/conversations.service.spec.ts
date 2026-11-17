@@ -53,7 +53,6 @@ describe("ConversationsService", () => {
     content,
     status: "completed",
     mode: "english_chat",
-    conversationModeKey: null,
     spokeAt,
     ...extra,
   });
@@ -160,7 +159,7 @@ describe("ConversationsService", () => {
       );
     });
 
-    it("should filter by conversationModeKey", async () => {
+    it("should filter by mode", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         { device: { id: "device-uuid-001", deviceId: "dev-001" } },
       ]);
@@ -169,14 +168,14 @@ describe("ConversationsService", () => {
 
       await service.list("user-001", {
         deviceId: "dev-001",
-        conversationModeKey: "free_chat_casual",
+        mode: "english_chat",
       });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
             deviceId: { in: ["device-uuid-001"] },
-            conversationModeKey: "free_chat_casual",
+            mode: "english_chat",
           },
         }),
       );

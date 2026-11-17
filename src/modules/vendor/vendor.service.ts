@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
 import { VendorTextOutDto } from "./dto/vendor-text-out.dto";
@@ -17,10 +18,12 @@ import {
   AdventureReply,
   AdventureService,
 } from "@/modules/adventure/adventure.service";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import {
   ConversationIntent,
   ConversationSessionService,
 } from "./conversation-session.service";
+import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
@@ -46,19 +49,28 @@ export class VendorService {
     private readonly childSafetyService: ChildSafetyService,
     private readonly sleepConfigsService: SleepConfigsService,
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
-        const device = await this.prisma.device.findUnique({
-          where: { id: deviceInternalId },
-        });
-        if (!device) {
-          this.logger.warn(
-            `Adventure timeout skipped, device not found: ${deviceInternalId}`,
+        // 这是定时器回调：抛出去没人接，会变成 unhandled rejection 并可能
+        // 拖垮进程。孩子这一轮已经错过了超时兜底，再让服务崩掉是二次伤害。
+        try {
+          const device = await this.prisma.device.findUnique({
+            where: { id: deviceInternalId },
+          });
+          if (!device) {
+            this.logger.warn(
+              `Adventure timeout skipped, device not found: ${deviceInternalId}`,
+            );
+            return;
+          }
+          await this.sendAdventureReply(device, adventureReply);
+        } catch (error) {
+          this.logger.error(
+            `Adventure timeout push failed for device=${deviceInternalId}: ${this.describeError(error)}`,
           );
-          return;
         }
-        await this.sendAdventureReply(device, adventureReply);
       },
     );
   }
@@ -131,25 +143,7 @@ export class VendorService {
   }
 
   /**
-   * 自由对话按 conversationModeKey 读取子模式 prompt 模板。
-   */
-  private async resolvePromptTemplate(
-    mode: string | null | undefined,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
-    }
-
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
-  }
-
-  /**
-   * 获取同一设备、同一顶层模式的最近消息历史。
+   * 获取同一设备、同一 mode 的最近消息历史。
    *
    * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
    * 边界结构化存 rawPayload { filler, answer }。
@@ -197,25 +191,29 @@ export class VendorService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
+  /** 故事意图话术：与 llm-adapter.service.ts 共用注册表实现，不再各存一份副本 */
   private storyPrompt(intent: ConversationIntent): string | undefined {
-    switch (intent) {
-      case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
-      case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
-      case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。";
-      case "adventure_story":
-      case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。";
-      default:
-        return undefined;
-    }
+    return this.promptRegistry.getStoryPrompt(intent);
   }
 
   async handleTextIn(dto: VendorTextInDto): Promise<VendorTextOutDto> {
     // 4G 状态下设备可能尚未被家长绑定，先确保 Device 记录存在
     const device = await this.ensureDeviceExists(dto.deviceId);
+
+    // 打断推断（方案 A）：新一轮开始即判定上一轮 assistant 回复是否仍在
+    // 估算播放窗口内；fire-and-forget，失败只记日志，不阻塞本轮首音
+    void markPreviousReplyInterrupted(this.prisma, device.id).catch(
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Interruption marking failed for deviceId=${dto.deviceId}: ${message}`,
+        );
+      },
+    );
+
+    // 一轮问答一个 turnId：安全/意图/filler/主回答/消息落库共用，
+    // llm_usage_logs 据此把同轮多次 LLM 调用串成链路（模型监控对照视角）
+    const turnId = randomUUID();
 
     // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const l1Verdict = this.childSafetyService.checkL1(dto.asrText);
@@ -224,73 +222,105 @@ export class VendorService {
         device,
         l1Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
         dto.asrText,
+        turnId,
       );
     }
 
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
-    const adventureReply = await this.adventureService.handleChildReply(
-      device.id,
-      dto.asrText,
-    );
+    // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
+    // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
+    let adventureReply: AdventureReply | null = null;
+    try {
+      adventureReply = await this.adventureService.handleChildReply(
+        device.id,
+        dto.asrText,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Adventure reply handling failed, degrading to free story for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
+      );
+    }
     if (adventureReply) {
-      return this.sendAdventureReply(device, adventureReply, dto.asrText);
+      return this.sendAdventureReply(
+        device,
+        adventureReply,
+        dto.asrText,
+        turnId,
+      );
     }
 
     // L2 安全分类与意图路由并行：小模型一次调用，补 L1 语义盲区
     const [storyIntent, l2Verdict] = await Promise.all([
-      this.conversationSessionService.resolve(device.id, dto.asrText),
-      this.childSafetyService.classifyL2(dto.asrText),
+      this.conversationSessionService.resolve(device.id, dto.asrText, turnId),
+      this.childSafetyService.classifyL2(dto.asrText, device.id, turnId),
     ]);
     if (l2Verdict.blocked) {
       return this.sendSafetyReply(
         device,
         l2Verdict as SafetyVerdict & { category: BlockedSafetyCategory },
         dto.asrText,
+        turnId,
       );
     }
     // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
     if (storyIntent === "sleep_config") {
-      return this.sendSleepConfigReply(device, dto.asrText);
+      return this.sendSleepConfigReply(device, dto.asrText, turnId);
     }
     const storyMode = storyIntent !== "free_chat";
     if (storyMode && storyIntent !== "sleep_story") {
-      const completedToday = await this.adventureService.isCompletedToday(
-        device.id,
-      );
-      if (
-        !completedToday &&
-        (storyIntent === "adventure_story" || storyIntent === "free_story")
-      ) {
-        // 泛化“我想听故事”在今日冒险未完成时优先进入冒险。
-        const startedAdventure = await this.adventureService.startToday(
+      // 整块包住：门禁读失败、开集失败、拦截审计写失败，任何一处抛错都只意味着
+      // 「这轮进不了冒险」，绝不能升级为「这轮没有声音」。
+      try {
+        const completedToday = await this.adventureService.isCompletedToday(
           device.id,
-          true,
         );
-        if (startedAdventure) {
-          await this.conversationSessionService.reset(device.id);
-          return this.sendAdventureReply(device, startedAdventure, dto.asrText);
+        if (
+          !completedToday &&
+          (storyIntent === "adventure_story" || storyIntent === "free_story")
+        ) {
+          // 泛化“我想听故事”在今日冒险未完成时优先进入冒险。
+          const startedAdventure = await this.adventureService.startToday(
+            device.id,
+            true,
+          );
+          if (startedAdventure) {
+            await this.conversationSessionService.reset(device.id);
+            return this.sendAdventureReply(
+              device,
+              startedAdventure,
+              dto.asrText,
+              turnId,
+            );
+          }
         }
-      }
-      if (completedToday) {
-        await this.adventureService.recordEntryBlocked(
-          device.id,
-          storyIntent === "adventure_story" ? "free_story" : storyIntent,
+        if (completedToday) {
+          await this.adventureService.recordEntryBlocked(
+            device.id,
+            storyIntent === "adventure_story" ? "free_story" : storyIntent,
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure gate failed, degrading to free story for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
         );
       }
     }
 
     const activeConfig = await this.resolveActiveConfig(device.id);
-    // 只有英语/成语/哄睡故事意图才戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置
-    // 戳 free_chat/english_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const mode =
-      storyIntent === "english_story" ||
-      storyIntent === "idiom_story" ||
-      storyIntent === "sleep_story"
-        ? storyIntent
-        : activeConfig?.mode === "english_chat"
-          ? "english_chat"
-          : "free_chat";
+      storyIntent === "adventure_story"
+        ? "free_story"
+        : storyIntent === "english_story" ||
+            storyIntent === "idiom_story" ||
+            storyIntent === "sleep_story" ||
+            storyIntent === "free_story"
+          ? storyIntent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
     if (storyIntent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, dto.asrText);
@@ -302,8 +332,8 @@ export class VendorService {
       mode,
     );
 
-    // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
-    const turnId = randomUUID();
+    // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）。
+    // turnId 复用函数顶部生成的轮次 ID（安全/意图日志已带上同一 ID）。
     const sourceOccurredAt = new Date();
     await this.prisma.message.create({
       data: {
@@ -313,7 +343,6 @@ export class VendorService {
         content: dto.asrText,
         status: "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         rawPayload: dto as any,
         spokeAt: sourceOccurredAt,
       },
@@ -342,10 +371,7 @@ export class VendorService {
     const childProfile = await this.getChildProfile(device.id);
     const promptTemplate = storyMode
       ? this.storyPrompt(storyIntent)
-      : await this.resolvePromptTemplate(
-          mode,
-          activeConfig?.conversationModeKey,
-        );
+      : undefined;
 
     const promptOptions = {
       childProfile: childProfile
@@ -357,10 +383,10 @@ export class VendorService {
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
     };
 
-    // 只在非故事主回答中注入相关记忆；filler 和故事模式不使用。
+    // free_chat 全量注入 5 槽位记忆（含软冷却：传入近 5 条 assistant 原文）；
+    // filler 和故事模式不使用此块（故事模式走 buildPreferenceBlock 轻量偏好块）。
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
@@ -369,7 +395,10 @@ export class VendorService {
       try {
         memoryPrompt = await this.childMemoriesService.buildPromptBlock(
           device.id,
-          dto.asrText,
+          history
+            .filter((message) => message.role === "assistant")
+            .slice(-5)
+            .map((message) => message.content),
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -393,7 +422,12 @@ export class VendorService {
       });
     }
     if (memoryPrompt.text) {
-      extraSystem.push({ role: "system", content: memoryPrompt.text });
+      // 记忆块贴尾注入（本轮 user 之前）：头部主 system + 历史构成稳定前缀，
+      // DeepSeek 上下文缓存按前缀命中；块在尾部，注入与否/内容变化都不击穿缓存
+      baseMessages.splice(baseMessages.length - 1, 0, {
+        role: "system",
+        content: memoryPrompt.text,
+      });
     }
     const messages: LlmMessage[] = [...extraSystem, ...baseMessages];
 
@@ -408,10 +442,21 @@ export class VendorService {
     let answer = "";
     if (streamEnabled) {
       ({ responseText, llmFailed, filler, answer } =
-        await this.generateStreamReply(dto, turnId, messages, recentFillers));
+        await this.generateStreamReply(
+          dto,
+          turnId,
+          messages,
+          recentFillers,
+          device.id,
+        ));
     } else {
       try {
-        const llmResult = await this.llmService.complete({ messages });
+        const llmResult = await this.llmService.complete({
+          scene: "chat_main",
+          deviceId: device.id,
+          turnId,
+          messages,
+        });
         responseText = llmResult.text;
       } catch (error) {
         llmFailed = true;
@@ -456,7 +501,6 @@ export class VendorService {
         content: reply.responseText,
         status: llmFailed ? "failed" : "completed",
         mode,
-        conversationModeKey: activeConfig?.conversationModeKey ?? null,
         // 边界标注（方案 3）：content 保持播报全文纯净，
         // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
         rawPayload: { filler, answer },
@@ -488,8 +532,9 @@ export class VendorService {
     device: { id: string; deviceId: string },
     verdict: SafetyVerdict & { category: BlockedSafetyCategory },
     asrText: string,
+    // 由 handleTextIn 传入轮次 ID，与 L2 安全日志同轮；缺省自动生成（超时监听器等无轮次场景）
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const text = this.childSafetyService.cannedReply(verdict.category);
     this.logger.warn(
       `Child safety ${verdict.layer} blocked deviceId=${device.deviceId} ` +
@@ -527,37 +572,43 @@ export class VendorService {
       );
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "user",
-        content: asrText,
-        status: "completed",
-        mode: "free_chat",
-        conversationModeKey: null,
-        rawPayload: { asrText },
-        spokeAt: new Date(),
-      },
-    });
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: text,
-        status: "completed",
-        mode: "free_chat",
-        conversationModeKey: null,
-        rawPayload: {
-          filler: null,
-          answer: text,
-          safetyCategory: verdict.category,
-          safetyLayer: verdict.layer,
+    // 话术已经通过 chunk 发出去了，落库只是审计与家长端时间线的素材。
+    // 写库失败绝不能让整轮回复失败——那是把「审计缺失」升级成「孩子沉默」。
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: asrText,
+          status: "completed",
+          mode: "free_chat",
+          rawPayload: { asrText },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
+      });
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: text,
+          status: "completed",
+          mode: "free_chat",
+          rawPayload: {
+            filler: null,
+            answer: text,
+            safetyCategory: verdict.category,
+            safetyLayer: verdict.layer,
+          },
+          spokeAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist safety reply for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     try {
       await this.replyUploader.sendFullReply(reply);
@@ -581,8 +632,8 @@ export class VendorService {
   private async sendSleepConfigReply(
     device: { id: string; deviceId: string },
     asrText: string,
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const result = await this.sleepVoiceConfigService.handle(
       device.id,
       asrText,
@@ -628,7 +679,6 @@ export class VendorService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { asrText },
         spokeAt: new Date(),
       },
@@ -641,7 +691,6 @@ export class VendorService {
         content: text,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: {
           filler: null,
           answer: text,
@@ -671,8 +720,8 @@ export class VendorService {
     device: { id: string; deviceId: string },
     adventureReply: AdventureReply,
     asrText?: string,
+    turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
-    const turnId = randomUUID();
     const responseText = adventureReply.texts.join("\n");
     const reply: VendorTextOutDto = {
       deviceId: device.deviceId,
@@ -682,19 +731,26 @@ export class VendorService {
     };
 
     if (asrText) {
-      await this.prisma.message.create({
-        data: {
-          deviceId: device.id,
-          turnId,
-          role: "user",
-          content: asrText,
-          status: "completed",
-          mode: "adventure_story",
-          conversationModeKey: null,
-          rawPayload: { asrText },
-          spokeAt: new Date(),
-        },
-      });
+      // best-effort：这次 create 发生在任何 chunk 之前，抛错就等于整轮静音，
+      // 而段落内容此时已经由引擎生成好了，没有理由因为它播不出去。
+      try {
+        await this.prisma.message.create({
+          data: {
+            deviceId: device.id,
+            turnId,
+            role: "user",
+            content: asrText,
+            status: "completed",
+            mode: "adventure_story",
+            rawPayload: { asrText },
+            spokeAt: new Date(),
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to persist adventure user message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
     }
 
     let seq = 0;
@@ -723,8 +779,15 @@ export class VendorService {
     await emit("", true);
 
     // 计时从引导词最后一个 chunk 的上传 ack 后开始，而非 LLM 生成时开始。
+    // 打点失败的后果只是 10s 沉默超时不生效，比整轮失败轻得多。
     if (adventureReply.action === "await_reply") {
-      await this.adventureService.markPromptPlaybackComplete(device.id);
+      try {
+        await this.adventureService.markPromptPlaybackComplete(device.id);
+      } catch (error) {
+        this.logger.error(
+          `Failed to mark adventure playback complete for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
     }
 
     try {
@@ -737,30 +800,137 @@ export class VendorService {
       );
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: responseText,
-        status: "completed",
-        mode: "adventure_story",
-        conversationModeKey: null,
-        rawPayload: {
-          filler: null,
-          answer: responseText,
-          interactionResult: adventureReply.result ?? null,
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: responseText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: {
+            filler: null,
+            answer: responseText,
+            interactionResult: adventureReply.result ?? null,
+          },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
-    await this.adventureService.recordPresented(
-      device.id,
-      turnId,
-      adventureReply,
-    );
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure assistant message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+    try {
+      await this.adventureService.recordPresented(
+        device.id,
+        turnId,
+        adventureReply,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to record adventure presentation for deviceId=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     return reply;
+  }
+
+  /**
+   * L0 兜底话术下行：整条链路都失败时，gateway / controller 调它保证设备端有声音。
+   *
+   * 与 sendSafetyReply 同走 chunk 通道（单 answer chunk + 收尾 + 全量兜底），
+   * 但**每一步都 best-effort**，且这个方法本身承诺永不抛错：它是最后一道闸，
+   * 最后一道闸再抛错就什么都没有了。
+   *
+   * 设备行查不到也照样下行——上传只需要对外 deviceId，4G 未绑定的设备
+   * 恰恰是最需要兜底话术的那一批。查不到就不落库（没有内部 id 可关联）。
+   *
+   * context.degraded=true 供设备端与流量录制区分正常回复与兜底回复。
+   */
+  async sendDegradedReply(
+    externalDeviceId: string,
+    text: string = ADVENTURE_DEGRADED_REPLIES.lastResort,
+    turnId: string = randomUUID(),
+  ): Promise<VendorTextOutDto> {
+    const reply: VendorTextOutDto = {
+      deviceId: externalDeviceId,
+      responseText: text,
+      context: { degraded: true },
+      ttsOptions: {},
+    };
+
+    let device: { id: string; deviceId: string } | null = null;
+    try {
+      device = await this.prisma.device.findUnique({
+        where: { deviceId: externalDeviceId },
+        select: { id: true, deviceId: true },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Degraded reply could not resolve device=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    try {
+      await this.replyUploader.sendChunk({
+        deviceId: externalDeviceId,
+        turnId,
+        seq: 0,
+        source: "answer",
+        delta: text,
+        isFinal: false,
+      });
+      await this.replyUploader.sendChunk({
+        deviceId: externalDeviceId,
+        turnId,
+        seq: 1,
+        source: "answer",
+        delta: "",
+        isFinal: true,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload degraded chunk for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    if (device) {
+      try {
+        await this.prisma.message.create({
+          data: {
+            deviceId: device.id,
+            turnId,
+            role: "assistant",
+            content: text,
+            // failed：这轮没有产出真实回答，不能混进正常对话统计
+            status: "failed",
+            mode: "free_chat",
+            rawPayload: { filler: null, answer: text, degraded: true },
+            spokeAt: new Date(),
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to persist degraded reply for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+        );
+      }
+    }
+
+    try {
+      await this.replyUploader.sendFullReply(reply);
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload full degraded reply for deviceId=${externalDeviceId}: ${this.describeError(error)}`,
+      );
+    }
+
+    return reply;
+  }
+
+  private describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**
@@ -789,6 +959,7 @@ export class VendorService {
     turnId: string,
     messages: LlmMessage[],
     recentFillers: string[] = [],
+    deviceInternalId?: string,
   ): Promise<{
     responseText: string;
     llmFailed: boolean;
@@ -824,7 +995,12 @@ export class VendorService {
 
     const pump = (async () => {
       try {
-        const answerStream = this.llmService.completeStream({ messages });
+        const answerStream = this.llmService.completeStream({
+          scene: "chat_main",
+          deviceId: deviceInternalId,
+          turnId,
+          messages,
+        });
         for await (const delta of answerStream) {
           buffered.push(delta);
           wake();
@@ -842,6 +1018,9 @@ export class VendorService {
     let fillerText = "";
     try {
       const fillerStream = this.llmService.completeStream({
+        scene: "filler",
+        deviceId: deviceInternalId,
+        turnId,
         messages: this.llmService.buildFillerPrompt(dto.asrText, recentFillers),
         model: this.llmService.smallModelName,
         maxTokens: 60,

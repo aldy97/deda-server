@@ -8,7 +8,13 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { LlmService, LlmMessage } from "@/modules/llm/llm.service";
+import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
+import {
+  LlmService,
+  LlmMessage,
+  LlmUpstreamError,
+} from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import {
   ConversationIntent,
@@ -24,11 +30,24 @@ import {
   BlockedSafetyCategory,
   ChildSafetyService,
 } from "@/modules/vendor/child-safety.service";
+import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
+import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 
-/** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默 */
-const UPSTREAM_FALLBACK_TEXT =
-  "Sorry, I didn't catch that. Can you say it again?";
+/** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默。
+ *  按设备角色 keyed，为 Polly 等后续批次预留判断余地；
+ *  角色文案未上线前一律回落 elly 文案 */
+const UPSTREAM_FALLBACK_TEXTS: Record<string, string> = {
+  elly: "小象 Elly 刚刚走神啦，再说一次好不好呀？",
+};
+const DEFAULT_UPSTREAM_FALLBACK_TEXT = UPSTREAM_FALLBACK_TEXTS.elly;
+
+function resolveUpstreamFallbackText(characterKey?: string | null): string {
+  return (
+    (characterKey != null && UPSTREAM_FALLBACK_TEXTS[characterKey]) ||
+    DEFAULT_UPSTREAM_FALLBACK_TEXT
+  );
+}
 
 /** 历史轮数上限：防爆上下文（最近 10 轮一问一答） */
 const MAX_HISTORY_TURNS = 10;
@@ -45,22 +64,39 @@ const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
 const MAC_PATTERN =
   /^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$/;
 
-/** 故事类意图 → 顶层模式快照（对齐老链路 handleTextIn 的 mode 决策） */
+/** 故事类意图 → 落库 mode 快照（对齐老链路 handleTextIn 的 mode 决策） */
 const STORY_INTENTS: ConversationIntent[] = [
   "english_story",
   "idiom_story",
   "sleep_story",
+  "free_story",
 ];
+
+/**
+ * 哄睡实际能提供的内容类型。儿歌 / 催眠曲内容源尚未接入，
+ * storyPrompt 的 sleep_story 分支恒出故事，故此处恒为 story。
+ */
+const SERVED_SLEEP_CONTENT_TYPE = "story";
+
+/**
+ * 「家长配了什么 vs 实际播了什么」的降级证据，落在本轮 assistant 的
+ * Message.rawPayload 里（JSON 列，无需 migration），供运营看板与排查使用。
+ */
+type SleepContentDegradation = {
+  requested: string;
+  served: string;
+  reason: string;
+};
 
 /**
  * LLM 适配服务：承接百度 RTC 的 OpenAI 兼容回调。
  *
  * 编排（对齐 vendor 老链路 handleTextIn，老 WS 链路保持冻结作备份）：
- * Bearer 鉴权 → 设备解析（header 优先，fallback user 字段=设备 MAC）
+ * Bearer 鉴权 → 设备解析（header 优先，其次 deviceid，fallback user 字段）
  * → L1 安全闸 → 冒险等待态接管 → L2 分类 + 意图路由并行
  * → sleep_config 确定性短链路 → 冒险每日门禁/开集
  * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
- * → filler（小模型打哈哈）+ 主模型流（后台泵并发）→ assistant 落库。
+ * → 流式 filler（小模型打哈哈，头部校验后即播）→ 主模型流 → assistant 落库。
  *
  * 与老链路的原理性降级（已确认接受）：
  * - 冒险 10s 沉默超时推送：新链路无服务器推送通道，交互点无限期等孩子
@@ -86,6 +122,8 @@ export class LlmAdapterService {
     private readonly sleepConfigs: SleepConfigsService,
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
+    private readonly turnDecisions: TurnDecisionRecorder,
+    private readonly promptRegistry: PromptRegistryService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -129,6 +167,25 @@ export class LlmAdapterService {
 
     const device = await this.resolveDevice(req, deviceHint);
 
+    // turnId 在一切 LLM 调用之前生成：safety_l2 / intent_classify /
+    // chat_main / filler / memory_extract 全程贯穿，dashboard 按轮次串联
+    // 调用链路（实机事故：turnId 生成过晚且未传入主流，链路只剩 1 条）
+    const turnId = randomUUID();
+
+    // 打断推断（方案 A）：新一轮开始即判定上一轮 assistant 回复是否仍在
+    // 估算播放窗口内；fire-and-forget，失败只记日志，不阻塞本轮首音
+    if (device) {
+      void markPreviousReplyInterrupted(this.prisma, device.id).catch(
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Interruption marking failed for device=${device.deviceId}: ${message}`,
+          );
+        },
+      );
+    }
+
     // L1 安全闸：显式敏感词零延迟拦截，优先于冒险状态机与一切 LLM 调用
     const verdict = this.childSafety.checkL1(asrText);
     if (
@@ -143,24 +200,63 @@ export class LlmAdapterService {
         verdict.category as BlockedSafetyCategory,
       );
       if (device) {
-        await this.persistTurn(device.id, asrText, canned, "completed", {
-          filler: null,
-          answer: canned,
-          safetyCategory: verdict.category,
-          safetyLayer: "L1",
-        });
+        await this.persistTurn(
+          device.id,
+          asrText,
+          canned,
+          "completed",
+          {
+            filler: null,
+            answer: canned,
+            safetyCategory: verdict.category,
+            safetyLayer: "L1",
+          },
+          turnId,
+        );
       }
+      // 判定审计：L1 拦截轮不走意图路由，intent 记 null + not_routed，
+      // 不能落成 free_chat——那会把拦截轮混进闲聊分母，意图分布就成了假数据
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device?.id ?? null,
+        safety: verdict,
+        intent: null,
+        intentSource: "not_routed",
+        asrText,
+      });
       yield canned;
       return;
     }
 
-    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事
+    // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
+    // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
+    // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
     if (device) {
-      const adventureReply = await this.adventure.handleChildReply(
-        device.id,
-        asrText,
-      );
+      let adventureReply: AdventureReply | null = null;
+      try {
+        adventureReply = await this.adventure.handleChildReply(
+          device.id,
+          asrText,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Adventure reply handling failed, degrading to free chat for device=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
       if (adventureReply) {
+        // 编排顺序上冒险状态机早于 L2：本轮既没做语义安全审查、也没做意图分类，
+        // 只有上面的 L1 正则兜着（L1 刻意不收「杀/打/去死」这类气话）。
+        // 如实记 not_evaluated / adventure_takeover 让看板暴露这块盲区，
+        // 而不是伪装成「L2 判 safe」。
+        this.turnDecisions.record({
+          turnId,
+          deviceId: device.id,
+          safety: null,
+          safetySource: "not_evaluated",
+          intent: null,
+          intentSource: "adventure_takeover",
+          asrText,
+        });
         yield* this.emitAdventureReply(device, adventureReply, asrText);
         return;
       }
@@ -169,12 +265,21 @@ export class LlmAdapterService {
     // L2 语义安全分类与意图路由并行（同老链路 Promise.all）：
     // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
     // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
-    const [l2, intent] = await Promise.all([
-      this.safeClassifyL2(asrText),
+    const [l2, intentDecision] = await Promise.all([
+      this.safeClassifyL2(asrText, device?.id, turnId),
       device
-        ? this.safeResolveIntent(device.id, asrText)
-        : Promise.resolve<ConversationIntent>("free_chat"),
+        ? this.safeResolveIntent(device.id, asrText, turnId)
+        : // 匿名链路没有会话状态可依赖，恒定 free_chat；来源单独标记，
+          // 不能与「小模型判出的 free_chat」混成一桶
+          Promise.resolve<TurnIntentDecision>({
+            intent: "free_chat",
+            source: "no_device",
+          }),
     ]);
+    const intent = intentDecision.intent;
+    // safeClassifyL2 的外层 catch 连 verdict 都拿不到，此时记 l2_fail_open，
+    // 与「本轮根本没做 L2」的 not_evaluated 严格区分
+    const l2SourceOverride = l2 ? undefined : ("l2_fail_open" as const);
 
     if (
       l2?.blocked &&
@@ -186,13 +291,29 @@ export class LlmAdapterService {
         l2.category as BlockedSafetyCategory,
       );
       if (device) {
-        await this.persistTurn(device.id, asrText, canned, "completed", {
-          filler: null,
-          answer: canned,
-          safetyCategory: l2.category,
-          safetyLayer: "L2",
-        });
+        await this.persistTurn(
+          device.id,
+          asrText,
+          canned,
+          "completed",
+          {
+            filler: null,
+            answer: canned,
+            safetyCategory: l2.category,
+            safetyLayer: "L2",
+          },
+          turnId,
+        );
       }
+      // 判定审计：L2 拦截轮同样没走到意图路由
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device?.id ?? null,
+        safety: l2,
+        intent: null,
+        intentSource: "not_routed",
+        asrText,
+      });
       yield canned;
       return;
     }
@@ -220,50 +341,96 @@ export class LlmAdapterService {
         },
       );
       yield result.replyText;
+      // 判定审计：短链路也是一轮完整判定，intentSource 透传会话服务的成因
+      this.turnDecisions.record({
+        turnId,
+        deviceId: device.id,
+        safety: l2,
+        safetySource: l2SourceOverride,
+        intent,
+        intentSource: intentDecision.source,
+        asrText,
+      });
       return;
     }
 
     // 冒险每日门禁（对齐老链路）：故事类意图（除哄睡）在今日已完成时记
     // entry_blocked；未完成时 adventure_story/free_story 优先进入冒险。
+    // adventureDeclined 供 filler 情境段使用，避免拖延话术与婉拒播报矛盾。
+    let adventureDeclined = false;
     if (device && intent !== "free_chat" && intent !== "sleep_story") {
-      const completedToday = await this.adventure.isCompletedToday(device.id);
-      if (
-        !completedToday &&
-        (intent === "adventure_story" || intent === "free_story")
-      ) {
-        const startedAdventure = await this.adventure.startToday(
-          device.id,
-          true,
-        );
-        if (startedAdventure) {
-          await this.conversationSession.reset(device.id);
-          yield* this.emitAdventureReply(device, startedAdventure, asrText);
-          return;
+      // 整块包住：门禁读失败、开集失败、拦截审计写失败，任何一处抛错都只意味着
+      // 「这轮进不了冒险」，绝不能升级为「这轮没有声音」。
+      try {
+        const completedToday = await this.adventure.isCompletedToday(device.id);
+        if (
+          !completedToday &&
+          (intent === "adventure_story" || intent === "free_story")
+        ) {
+          const startedAdventure = await this.adventure.startToday(
+            device.id,
+            true,
+          );
+          if (startedAdventure) {
+            await this.conversationSession.reset(device.id);
+            // 判定审计：本轮 L2 已评估（与冒险接管不同），intent 来自路由结果
+            this.turnDecisions.record({
+              turnId,
+              deviceId: device.id,
+              safety: l2,
+              safetySource: l2SourceOverride,
+              intent,
+              intentSource: intentDecision.source,
+              asrText,
+            });
+            yield* this.emitAdventureReply(device, startedAdventure, asrText);
+            return;
+          }
         }
-      }
-      if (completedToday) {
-        await this.adventure.recordEntryBlocked(
-          device.id,
-          intent === "adventure_story" ? "free_story" : intent,
+        if (completedToday) {
+          adventureDeclined = true;
+          await this.adventure.recordEntryBlocked(
+            device.id,
+            intent === "adventure_story" ? "free_story" : intent,
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure gate failed, degrading to free story for device=${device.deviceId}: ${this.describeError(error)}`,
         );
       }
     }
 
-    // mode 决策对齐老链路：故事类意图戳对应模式；adventure_story/free_story
-    // 走到这里说明冒险未真正开始（被门禁拦截或无集可播），按设备配置戳
-    // english_chat/free_chat，避免污染学习统计的冒险计数。
+    // 故事意图落同名 mode（含 free_story）；adventure_story 走到这里说明
+    // 冒险未真正开始（被门禁拦截或无集可播），统一落 free_story；
+    // 其余（free_chat 意图）按设备配置兜底 english_chat/free_chat。
     const activeConfig = device
       ? await this.resolveActiveConfig(device.id)
       : null;
-    const mode = STORY_INTENTS.includes(intent)
-      ? intent
-      : activeConfig?.mode === "english_chat"
-        ? "english_chat"
-        : "free_chat";
+    const mode =
+      intent === "adventure_story"
+        ? "free_story"
+        : STORY_INTENTS.includes(intent)
+          ? intent
+          : activeConfig?.mode === "english_chat"
+            ? "english_chat"
+            : "free_chat";
 
-    // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）
+    // 故事类回合判定（含被门禁拦截后走自由创作的 adventure/free_story）：
+    // 主模型 maxTokens 分档与 filler 情境共用
+    const isStoryTurn =
+      STORY_INTENTS.includes(intent) ||
+      intent === "adventure_story" ||
+      intent === "free_story";
+
+    // 哄睡语音指令持久化内容偏好（一律落库，家长端可见；失败不阻塞本轮）。
+    // 读取放在写入之后，拿到的是本轮生效的 contentType。
+    let sleepContentDegraded: SleepContentDegradation | null = null;
     if (device && intent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, asrText);
+      sleepContentDegraded = await this.resolveSleepContentDegradation(
+        device.id,
+      );
     }
 
     // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史。
@@ -278,7 +445,6 @@ export class LlmAdapterService {
     }
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
-    const turnId = randomUUID();
     const sourceOccurredAt = new Date();
     if (device) {
       await this.prisma.message.create({
@@ -289,7 +455,6 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           rawPayload: { channel: "baidu-rtc" },
           spokeAt: sourceOccurredAt,
         },
@@ -316,17 +481,34 @@ export class LlmAdapterService {
         });
     }
 
-    // 只在非故事主回答中注入相关记忆（同老链路口径）
+    // 记忆注入：free_chat 全量注入 5 槽位（含软冷却）；其余意图（故事/英语角等）
+    // 注入轻量偏好块，保证「Elly 懂我」跨模式连续；favorite_story_type 透出
+    // 给故事话术主动选题（均对齐「不增加 LLM 调用」的确定性口径）
     let memoryPrompt: { text: string; memoryIds: string[] } = {
       text: "",
       memoryIds: [],
     };
-    if (device && intent === "free_chat") {
+    let favoriteStoryType: string | null = null;
+    if (device) {
       try {
-        memoryPrompt = await this.childMemories.buildPromptBlock(
-          device.id,
-          asrText,
-        );
+        if (intent === "free_chat") {
+          memoryPrompt = await this.childMemories.buildPromptBlock(
+            device.id,
+            history
+              .filter((message) => message.role === "assistant")
+              .slice(-5)
+              .map((message) => message.content),
+          );
+        } else {
+          const preference = await this.childMemories.buildPreferenceBlock(
+            device.id,
+          );
+          memoryPrompt = {
+            text: preference.text,
+            memoryIds: preference.memoryIds,
+          };
+          favoriteStoryType = preference.favoriteStoryType;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn(
@@ -335,17 +517,39 @@ export class LlmAdapterService {
       }
     }
 
+    // 孩子档案：主模型 prompt 与 filler 情境共用，提前于串行 filler 取
+    const childProfile = device ? await this.getChildProfile(device.id) : null;
+
+    // 流式 filler：小模型流式生成，头部缓冲校验通过立即外发（首音提前到
+    // TTFT，不再等整句生成完），原文注入主模型 handoff，从结构上杜绝
+    // 「主模型重复 filler 已说的内容」。身份/偏好问句走确定性模板；
+    // 头部违规（孩子名开头/人设名出现）重试一次，仍违规或失败回落模板池
+    // （不再静默无 filler——缺失轮完全没有防死空气缓冲）。
+    const fillerEnabled =
+      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
+    let fillerText = "";
+    if (fillerEnabled) {
+      for await (const chunk of this.streamFiller({
+        asrText,
+        recentFillers,
+        intent,
+        adventureDeclined,
+        device,
+        childProfile,
+        turnId,
+      })) {
+        fillerText += chunk;
+        yield chunk;
+      }
+    }
+
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
     // 孩子档案注入称呼/年龄上下文（均对齐老链路）
-    const childProfile = device ? await this.getChildProfile(device.id) : null;
     const promptTemplate = STORY_INTENTS.includes(intent)
-      ? this.storyPrompt(intent)
+      ? this.storyPrompt(intent, favoriteStoryType)
       : intent === "adventure_story" || intent === "free_story"
-        ? this.storyPrompt(intent)
-        : await this.resolvePromptTemplate(
-            mode,
-            activeConfig?.conversationModeKey,
-          );
+        ? this.storyPrompt(intent, favoriteStoryType)
+        : undefined;
 
     const built = this.llmService.buildEnglishTutorPrompt(asrText, history, {
       childProfile: childProfile
@@ -353,101 +557,86 @@ export class LlmAdapterService {
             name: childProfile.name,
             birthday: childProfile.birthday,
             englishName: childProfile.englishName,
+            gender: childProfile.gender,
           }
         : undefined,
       promptTemplate,
       mode,
-      conversationModeKey: activeConfig?.conversationModeKey ?? undefined,
+      characterKey: device?.characterKey,
     });
     const messages: LlmMessage[] = [
       ...baiduSystem,
       ...(emotionalHarmGuidance ? [emotionalHarmGuidance] : []),
-      ...(memoryPrompt.text
-        ? [{ role: "system" as const, content: memoryPrompt.text }]
-        : []),
       ...built,
     ];
+    if (memoryPrompt.text) {
+      // 记忆块贴尾注入（本轮 user 之前）：头部保持 DeepSeek 前缀缓存命中
+      messages.splice(messages.length - 1, 0, {
+        role: "system" as const,
+        content: memoryPrompt.text,
+      });
+    }
+    if (fillerText) {
+      // handoff（方案 B）：filler 原文作为独立 system 消息贴在记忆块之后、
+      // 本轮 user 之前——离生成点最近，recency 最强；且移出头部后主 prompt
+      // 跨轮稳定，DeepSeek 前缀缓存命中率反而提升
+      messages.splice(
+        messages.length - 1,
+        0,
+        this.llmService.buildFillerHandoffMessage(fillerText),
+      );
+    }
 
-    // 双模型流式（对齐老链路 generateStreamReply）：大模型流后台泵入缓冲，
-    // filler（小模型打哈哈）先行外发，filler 结束后按序 drain 大模型缓冲。
-    // 新链路没有 seq 双通道，filler 直接作为 SSE 流前导 chunk，TTS 天然按序
-    // 播报。filler 失败静默跳过；大模型失败且无任何产出时回落兜底话术。
-    const fillerEnabled =
-      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
-
-    const buffered: string[] = [];
-    let pumpDone = false;
-    let pumpFailure: unknown = null;
-    let notify: (() => void) | null = null;
-    const wake = () => {
-      const fn = notify;
-      notify = null;
-      fn?.();
-    };
-    const pump = (async () => {
+    // 主模型流式：filler（如有）已在上游逐 chunk 外发，主模型随后按流
+    // 直出。大模型失败时：零输出且错误可重试 → 重试一次（filler 播报
+    // 时长天然掩盖重试延迟）；answer 最终为空 → 无论 filler 是否已播都
+    // 播兜底话术，不让孩子面对沉默。
+    let answerText = "";
+    let llmFailed = false;
+    const maxAttempts = 2; // 初次 + 一次重试，有上限不死循环
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const stream = this.llmService.completeStream({
+          scene: "chat_main",
+          deviceId: device?.id,
+          turnId,
           messages,
-          maxTokens: 200,
+          // 故事类回合内容长（讲故事+释义），200 会截断残句（实机案例：
+          // 成语故事结尾「别做井」）；自由对话规则约束 1-3 句，200 足够。
+          maxTokens: isStoryTurn ? 800 : 200,
           thinking: { type: "disabled" },
         });
         for await (const chunk of stream) {
-          buffered.push(chunk);
-          wake();
+          answerText += chunk;
+          yield chunk;
         }
+        llmFailed = false;
+        break;
       } catch (error) {
-        pumpFailure = error;
-      } finally {
-        pumpDone = true;
-        wake();
-      }
-    })();
-
-    let fillerText = "";
-    if (fillerEnabled) {
-      try {
-        const fillerStream = this.llmService.completeStream({
-          messages: this.llmService.buildFillerPrompt(asrText, recentFillers),
-          model: this.llmService.smallModelName,
-          maxTokens: 60,
-        });
-        for await (const delta of fillerStream) {
-          fillerText += delta;
-          yield delta;
+        llmFailed = true;
+        const retriable = error instanceof LlmUpstreamError && error.retriable;
+        const detail =
+          error instanceof LlmUpstreamError
+            ? error.detail
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        this.logger.error(
+          `LLM upstream failed (attempt ${attempt}/${maxAttempts}): ${detail}`,
+        );
+        // mid-stream 断流（残句已播）或不可重试错误（4xx 等）：不重试，
+        // 避免孩子听到「前半句 + 重新生成的一整段」的冲突内容
+        if (answerText || !retriable || attempt === maxAttempts) {
+          break;
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`Filler stream failed, skipped: ${message}`);
+        this.logger.warn("LLM chat_main retrying once after retriable failure");
       }
     }
-
-    let answerText = "";
-    for (;;) {
-      const delta = buffered.shift();
-      if (delta !== undefined) {
-        answerText += delta;
-        yield delta;
-        continue;
-      }
-      if (pumpDone) break;
-      await new Promise<void>((resolve) => {
-        notify = resolve;
-      });
-    }
-    await pump;
-
-    let llmFailed = false;
-    if (pumpFailure) {
+    // answer 为空即兜底（断流失败 / empty_response 都算），无论 filler 是否已播
+    if (!answerText) {
       llmFailed = true;
-      const message =
-        pumpFailure instanceof Error
-          ? pumpFailure.message
-          : String(pumpFailure);
-      this.logger.error(`LLM upstream failed: ${message}`);
-      if (!answerText && !fillerText) {
-        answerText = UPSTREAM_FALLBACK_TEXT;
-        yield UPSTREAM_FALLBACK_TEXT;
-      }
+      answerText = resolveUpstreamFallbackText(device?.characterKey);
+      yield answerText;
     }
 
     // 用户实际播报全文：filler（如有）+ 大模型答案，作为最终回答落库
@@ -465,10 +654,13 @@ export class LlmAdapterService {
           content: responseText,
           status: llmFailed ? "failed" : "completed",
           mode,
-          conversationModeKey: activeConfig?.conversationModeKey ?? null,
           // 边界标注同老链路：content 保持播报全文纯净，
-          // filler/answer 边界结构化存 rawPayload
-          rawPayload: { filler: fillerText || null, answer: answerText },
+          // filler/answer 边界结构化存 rawPayload；哄睡内容降级证据同处留痕
+          rawPayload: {
+            filler: fillerText || null,
+            answer: answerText,
+            ...(sleepContentDegraded ? { sleepContentDegraded } : {}),
+          },
           spokeAt: new Date(),
         },
       });
@@ -484,6 +676,21 @@ export class LlmAdapterService {
         }
       }
     }
+
+    // 判定审计：主链路唯一正常出口（含 llmFailed 兜底）。成功与失败都要记——
+    // 判定质量与主模型成败是两件事，不能因为主模型挂了就把这轮判定丢掉。
+    // 放在这里而不是 finally：streamReply 是 async generator，消费方直接丢弃
+    // 迭代器时 finally 不保证执行；代价是未捕获异常中断的轮次没有判定记录，
+    // 所以看板文案必须写明「判定记录数 ≤ 对话轮次数」。
+    this.turnDecisions.record({
+      turnId,
+      deviceId: device?.id ?? null,
+      safety: l2,
+      safetySource: l2SourceOverride,
+      intent,
+      intentSource: intentDecision.source,
+      asrText,
+    });
   }
 
   /** 非流式：聚合全部 chunk 为整段文本 */
@@ -515,55 +722,81 @@ export class LlmAdapterService {
     const turnId = randomUUID();
     const responseText = adventureReply.texts.join("\n");
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "user",
-        content: asrText,
-        status: "completed",
-        mode: "adventure_story",
-        conversationModeKey: null,
-        rawPayload: { channel: "baidu-rtc" },
-        spokeAt: new Date(),
-      },
-    });
+    // 段落已经生成好了，落库只是审计。首条 create 发生在任何 chunk 之前，
+    // 一旦抛错整轮就静音——这是本文件最容易让孩子听不到声音的一处，
+    // 所以三次写库全部 best-effort：失败只记日志，内容照常播出。
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "user",
+          content: asrText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: { channel: "baidu-rtc" },
+          spokeAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure user message for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
 
     for (const text of adventureReply.texts) {
       yield text;
     }
 
-    await this.prisma.message.create({
-      data: {
-        deviceId: device.id,
-        turnId,
-        role: "assistant",
-        content: responseText,
-        status: "completed",
-        mode: "adventure_story",
-        conversationModeKey: null,
-        rawPayload: {
-          filler: null,
-          answer: responseText,
-          interactionResult: adventureReply.result ?? null,
+    try {
+      await this.prisma.message.create({
+        data: {
+          deviceId: device.id,
+          turnId,
+          role: "assistant",
+          content: responseText,
+          status: "completed",
+          mode: "adventure_story",
+          rawPayload: {
+            filler: null,
+            answer: responseText,
+            interactionResult: adventureReply.result ?? null,
+          },
+          spokeAt: new Date(),
         },
-        spokeAt: new Date(),
-      },
-    });
-    await this.adventure.recordPresented(device.id, turnId, adventureReply);
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist adventure assistant message for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+    try {
+      await this.adventure.recordPresented(device.id, turnId, adventureReply);
+    } catch (error) {
+      this.logger.error(
+        `Failed to record adventure presentation for device=${device.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+  }
+
+  private describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**
-   * 解析设备身份：显式 header 优先，fallback 请求体 user 字段。
-   * 机芯厂约定 user = 设备 MAC；MAC 归一化（去分隔符、小写）后
-   * 同时按 deviceId / macAddress 两列匹配，查不到则以原值建档
-   * （同老链路 ensureDeviceExists 的 4G 未绑定场景语义）。
+   * 解析设备身份：显式 header 优先，其次请求体 deviceid（机芯厂正式约定，
+   * 与小程序家长绑定编号一致），最后 fallback user 字段（旧约定兼容）。
+   * MAC 归一化（去分隔符、小写）后
+   * 同时按 deviceId / macAddress 两列匹配，查不到则建档
+   * （同老链路 ensureDeviceExists 的 4G 未绑定场景语义）；
+   * raw 为 MAC 形态时以归一化小写值建档，与 client-api loginMac
+   * 的建档口径一致，避免大小写差异产生重复 Device。
    */
   private async resolveDevice(
     req: ChatCompletionRequest,
     deviceHint?: string,
-  ): Promise<{ id: string; deviceId: string } | null> {
-    const raw = (deviceHint ?? req.user)?.trim();
+  ): Promise<{ id: string; deviceId: string; characterKey: string } | null> {
+    const raw = (deviceHint ?? req.deviceid ?? req.user)?.trim();
     if (!raw) return null;
 
     const candidates = Array.from(new Set([raw, this.normalizeMac(raw)]));
@@ -576,15 +809,25 @@ export class LlmAdapterService {
       },
     });
     if (existing) {
-      return { id: existing.id, deviceId: existing.deviceId };
+      return {
+        id: existing.id,
+        deviceId: existing.deviceId,
+        characterKey: existing.characterKey,
+      };
     }
+    const isMac = MAC_PATTERN.test(raw);
+    const normalized = isMac ? this.normalizeMac(raw) : null;
     const created = await this.prisma.device.create({
       data: {
-        deviceId: raw,
-        macAddress: MAC_PATTERN.test(raw) ? this.normalizeMac(raw) : null,
+        deviceId: normalized ?? raw,
+        macAddress: normalized,
       },
     });
-    return { id: created.id, deviceId: created.deviceId };
+    return {
+      id: created.id,
+      deviceId: created.deviceId,
+      characterKey: created.characterKey,
+    };
   }
 
   /** MAC 归一化：AA:BB:CC:DD:EE:FF / AA-BB-.. / aabb.. → aabbccddeeff */
@@ -594,9 +837,13 @@ export class LlmAdapterService {
   }
 
   /** L2 语义分类包装：任何异常 fail-open 返回 null，由 L3 兜底 */
-  private async safeClassifyL2(asrText: string) {
+  private async safeClassifyL2(
+    asrText: string,
+    deviceId?: string,
+    turnId?: string,
+  ) {
     try {
-      return await this.childSafety.classifyL2(asrText);
+      return await this.childSafety.classifyL2(asrText, deviceId, turnId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`L2 classification failed, fail-open: ${message}`);
@@ -604,19 +851,25 @@ export class LlmAdapterService {
     }
   }
 
-  /** 意图路由包装：会话服务异常时降级 free_chat，不让孩子面对沉默 */
+  /** 意图路由包装：会话服务异常时降级 free_chat，不让孩子面对沉默。
+   *  取 resolveWithSource 而非 resolve，好把「模型判的」和「兜底兜出来的」分开落库。 */
   private async safeResolveIntent(
     deviceInternalId: string,
     asrText: string,
-  ): Promise<ConversationIntent> {
+    turnId?: string,
+  ): Promise<TurnIntentDecision> {
     try {
-      return await this.conversationSession.resolve(deviceInternalId, asrText);
+      return await this.conversationSession.resolveWithSource(
+        deviceInternalId,
+        asrText,
+        turnId,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(
         `Intent resolution failed, fallback free_chat: ${message}`,
       );
-      return "free_chat";
+      return { intent: "free_chat", source: "fallback_error" };
     }
   }
 
@@ -636,24 +889,18 @@ export class LlmAdapterService {
   }
 
   /**
-   * 故事意图的话术（复制自 vendor.service.ts storyPrompt，两处需同步修改）。
-   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或
-   * 无集可播），统一走「自由创作、不承诺冒险」的降级话术。
+   * 故事意图话术：统一走 prompt 注册表。
+   * 此前这里是 vendor.service.ts storyPrompt 的逐字副本（靠注释「两处需同步修改」
+   * 维系一致），现两处都委托 PromptRegistryService.getStoryPrompt，单一真相。
+   *
+   * adventure_story/free_story 走到这里说明冒险未真正开始（门禁拦截或无集可播），
+   * 统一走「自由创作、不承诺冒险」的降级话术。
    */
-  private storyPrompt(intent: ConversationIntent): string | undefined {
-    switch (intent) {
-      case "english_story":
-        return "Tell a short, warm English story for a young child, then invite one simple spoken response.";
-      case "idiom_story":
-        return "讲一个适合孩子的成语故事，用口语解释成语含义，但不要冒险入每日互动冒险剧情。";
-      case "sleep_story":
-        return "用平静、缓慢、适合哄睡的语气讲一个温柔短故事；不要提问、不要邀请互动、不要让孩子做决定，逐渐安静收尾。";
-      case "adventure_story":
-      case "free_story":
-        return "请自由创作一个适合孩子的短故事，温暖、有画面感，不进入或复述每日互动冒险的固定剧情。每日冒险当前不可进入，不要承诺开始、重播或继续冒险，也不要虚构冒险进度。";
-      default:
-        return undefined;
-    }
+  private storyPrompt(
+    intent: ConversationIntent,
+    favoriteStoryType?: string | null,
+  ): string | undefined {
+    return this.promptRegistry.getStoryPrompt(intent, favoriteStoryType);
   }
 
   /**
@@ -685,19 +932,37 @@ export class LlmAdapterService {
     }
   }
 
-  /** 自由对话按 conversationModeKey 读取子模式 prompt 模板 */
-  private async resolvePromptTemplate(
-    mode: string,
-    conversationModeKey: string | null | undefined,
-  ): Promise<string | undefined> {
-    if (mode !== "free_chat" || !conversationModeKey) {
-      return undefined;
+  /**
+   * 哄睡内容降级取证：家长配了 song / mixed，但儿歌与催眠曲内容源尚未接入，
+   * 本轮实际只能出故事。这里不改行为，只把差异显式记录下来——结构化日志给
+   * 排查，rawPayload 给运营看板；否则配置项看起来永远「已生效」，
+   * 没人会发现儿歌其实一次都没播过。
+   *
+   * 读取失败只告警并返回 null：取证不能反过来阻塞孩子的哄睡回复。
+   */
+  private async resolveSleepContentDegradation(
+    deviceInternalId: string,
+  ): Promise<SleepContentDegradation | null> {
+    try {
+      const config = await this.sleepConfigs.getByDeviceId(deviceInternalId);
+      const requested = config?.contentType ?? null;
+      if (!requested || requested === SERVED_SLEEP_CONTENT_TYPE) return null;
+      this.logger.warn(
+        `Sleep content degraded: contentType=${requested} served=${SERVED_SLEEP_CONTENT_TYPE} device=${deviceInternalId} (儿歌/催眠曲内容源未接入)`,
+      );
+      return {
+        requested,
+        served: SERVED_SLEEP_CONTENT_TYPE,
+        reason: "content_source_unavailable",
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Sleep config read failed, skip degradation marking: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
     }
-    const conversationMode = await this.prisma.conversationMode.findFirst({
-      where: { key: conversationModeKey },
-      select: { promptTemplate: true },
-    });
-    return conversationMode?.promptTemplate ?? undefined;
   }
 
   /**
@@ -740,6 +1005,298 @@ export class LlmAdapterService {
     return { history, recentFillers: fillers.slice(-5) };
   }
 
+  /** 问 Elly 身份（名字/是谁）的窄类问句：filler 走模板，不交给小模型 */
+  private static readonly SELF_IDENTITY_QUESTION =
+    /你(叫什么|是谁|是干什么的)|你的名字|who are you|your name/i;
+  /** 问 Elly 偏好的窄类问句：同上走模板（实机事故：filler 主客颠倒） */
+  private static readonly SELF_PREFERENCE_QUESTION =
+    /你(最?(喜欢|爱)|喜欢什么|爱吃什么|平时喜欢)/i;
+
+  // 模板池统一 ≥15 字 / ≥8 词：模板也是过渡音覆盖，同样要盖住主模型首包
+  private static readonly IDENTITY_FILLERS_ZH = [
+    "你在问我的名字呀，让我想一想怎么介绍自己呢……",
+    "你想知道我是谁呀，这个问题还挺有意思的呢……",
+  ];
+  private static readonly PREFERENCE_FILLERS_ZH = [
+    "你想知道我喜欢什么呀，让我认真想一想呢……",
+    "你在问我的喜好呀，我还真想跟你好好聊聊呢……",
+  ];
+  private static readonly IDENTITY_FILLERS_EN = [
+    "Oh, you are asking about my name? Let me think!",
+  ];
+  private static readonly PREFERENCE_FILLERS_EN = [
+    "You want to know what I like? Let me think about it!",
+  ];
+  private static readonly GENERIC_FILLERS_ZH = [
+    "嗯嗯，我在认真听呢，你接着往下说呀……",
+    "哇，你说的话真有意思呀，我还想再听呢……",
+    "哦？这件事听起来好有趣呀，后来呢后来呢……",
+    "哈哈，我最喜欢听你说话啦，再多讲一点嘛……",
+  ];
+  private static readonly GENERIC_FILLERS_EN = [
+    "Hmm, I am listening carefully, keep going!",
+    "Wow, that sounds so fun, tell me more!",
+    "Oh really? I want to hear more about it!",
+  ];
+
+  /** 流式 filler 头部缓冲长度（字符）：足以定论「孩子名开头 / 人设名出现」 */
+  private static readonly FILLER_HEAD_BUFFER_CHARS = 8;
+
+  /** filler 开头语气词/标点剥离集：判「孩子名开头」前先剥掉填充开场 */
+  private static readonly FILLER_LEADING_FILLER_CHARS =
+    /^[\s\p{P}\p{S}呀嗯啊哦哈哇噢唉嘿]+/u;
+
+  /**
+   * 流式 filler（3s 超时）：小模型流式生成，头部缓冲 8 字做确定性校验
+   * （孩子名开头 / 人设名出现——两类实机事故均为头部现象），通过后立即
+   * 外发、后续 chunk 直通，首音从「整句生成完」提前到「头部定论」。
+   * 头部违规则中止本条流（未外发任何内容），带强禁令重试一次；重试仍
+   * 违规或生成失败 → 回落兜底模板池，保证过渡音覆盖不缺席（不再静默
+   * 无 filler——dashboard 实测 filler 缺失轮完全没有防死空气缓冲）。
+   * 权衡声明：全文复读/长度下限退化为事后告警（已播不可撤回），
+   * prompt 禁用清单与示例是主防线。
+   */
+  private async *streamFiller(params: {
+    asrText: string;
+    recentFillers: string[];
+    intent: ConversationIntent;
+    adventureDeclined: boolean;
+    device: { id: string; characterKey?: string | null } | null;
+    childProfile: {
+      name?: string | null;
+      birthday?: string | null;
+      englishName?: string | null;
+      gender?: string | null;
+    } | null;
+    turnId: string;
+  }): AsyncGenerator<string> {
+    const { asrText, recentFillers } = params;
+
+    const templated = this.fillerTemplateFor(asrText, recentFillers);
+    if (templated) {
+      yield templated;
+      return;
+    }
+
+    // 人设走注册表：admin 在 dashboard 发布的新版本立即生效；
+    // 未知/缺省 characterKey 一律回落 elly（与既有防匿名行为一致）
+    const persona = this.promptRegistry.getPersona(params.device?.characterKey);
+    // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝人设名出现
+    const personaName = persona.split("：")[0];
+    // 孩子名硬禁（优先英文名，与 buildChildBrief 的称呼口径一致）；
+    // 无档案时跳过该校验
+    const childName =
+      params.childProfile?.englishName ??
+      params.childProfile?.name ??
+      undefined;
+
+    const openStream = (extraInstruction?: string) => {
+      const messages = this.llmService.buildFillerPrompt(
+        asrText,
+        recentFillers,
+        {
+          intent: params.intent,
+          adventureDeclined: params.adventureDeclined,
+          persona: params.device ? persona : undefined,
+          childBrief: params.childProfile
+            ? LlmService.buildChildBrief(params.childProfile)
+            : undefined,
+        },
+      );
+      if (extraInstruction) {
+        messages.push({ role: "user", content: extraInstruction });
+      }
+      return this.llmService.completeStream({
+        scene: "filler",
+        deviceId: params.device?.id,
+        turnId: params.turnId,
+        messages,
+        model: this.llmService.smallModelName,
+        maxTokens: 60,
+        timeoutMs: 3000,
+      });
+    };
+
+    let fullText = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let buffer = "";
+      let flushed = false;
+      let rejected = false;
+      try {
+        const stream = openStream(
+          attempt === 2
+            ? this.promptRegistry.getTemplate("filler_retry_instruction")
+            : undefined,
+        );
+        for await (const chunk of stream) {
+          buffer += chunk;
+          if (flushed) {
+            // 头部已定论放行，后续 chunk 直通（首音之后零缓冲）
+            fullText += chunk;
+            yield chunk;
+            continue;
+          }
+          const verdict = this.checkFillerHead(buffer, childName, personaName);
+          if (verdict === "reject") {
+            rejected = true;
+            break; // 头部违规：中止本条流，未外发任何内容
+          }
+          if (verdict === "pass") {
+            flushed = true;
+            fullText += buffer;
+            yield buffer;
+            buffer = "";
+          }
+        }
+        if (!rejected && !flushed) {
+          // 全文不足头部缓冲长度（短句/空响应）：在完整文本上定论
+          if (
+            buffer &&
+            this.checkFillerHead(buffer, childName, personaName, true) !==
+              "reject"
+          ) {
+            flushed = true;
+            fullText += buffer;
+            yield buffer;
+          } else {
+            rejected = true; // 空响应或违规短句：走重试/兜底
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Filler stream attempt ${attempt} failed: ${message}`);
+        if (flushed) {
+          // 半截 filler 已播给孩子：不可撤回、不重试（避免孩子听到
+          // 「前半句 + 另一句」的冲突内容），保留已播部分直接结束
+          this.logFillerPostChecks(fullText, recentFillers, personaName);
+          return;
+        }
+        rejected = true; // 未外发 → 重试或兜底
+      }
+      if (!rejected) {
+        this.logFillerPostChecks(fullText, recentFillers, personaName);
+        return;
+      }
+    }
+
+    // 两次均违规/失败：兜底模板池（dedup-aware），保证过渡音覆盖不缺席
+    const fallback = this.fillerFallback(asrText, recentFillers);
+    this.logger.warn("Filler fell back to template pool");
+    yield fallback;
+  }
+
+  /**
+   * 流式 filler 头部校验：拒绝两类实机事故的头部现象
+   * （剥离语气词后以孩子名开头 / 任意位置出现人设名）。
+   * 缓冲不足 8 字且非终态时返回 undecided（继续等后续 chunk）。
+   */
+  private checkFillerHead(
+    buffer: string,
+    childName: string | undefined,
+    personaName: string,
+    final = false,
+  ): "pass" | "reject" | "undecided" {
+    const compact = buffer.replace(/\s+/g, "");
+    const compactPersona = personaName.replace(/\s+/g, "");
+    if (compactPersona && compact.includes(compactPersona)) {
+      return "reject";
+    }
+    if (childName) {
+      const stripped = buffer.replace(
+        LlmAdapterService.FILLER_LEADING_FILLER_CHARS,
+        "",
+      );
+      if (stripped.startsWith(childName)) {
+        return "reject";
+      }
+    }
+    return final ||
+      [...buffer].length >= LlmAdapterService.FILLER_HEAD_BUFFER_CHARS
+      ? "pass"
+      : "undecided";
+  }
+
+  /**
+   * 流式 filler 事后校验：已播不可撤回，违规只告警供日志/dashboard 观测。
+   * （复读与长度下限的硬门让位给首音延迟，prompt 禁用清单是主防线）
+   */
+  private logFillerPostChecks(
+    fullText: string,
+    recentFillers: string[],
+    personaName: string,
+  ): void {
+    if (!fullText) {
+      return;
+    }
+    if (this.isFillerDuplicate(fullText, recentFillers)) {
+      this.logger.warn(`Filler repeated despite banned list: ${fullText}`);
+    }
+    const isZh = /[\u4e00-\u9fff]/.test(fullText);
+    const tooShort = isZh
+      ? [...fullText.replace(/[\s\p{P}\p{S}]/gu, "")].length < 15
+      : fullText.trim().split(/\s+/).length < 8;
+    if (tooShort) {
+      this.logger.warn(
+        `Filler shorter than the 15-char/8-word floor: ${fullText}`,
+      );
+    }
+    const compactPersona = personaName.replace(/\s+/g, "");
+    if (
+      compactPersona &&
+      fullText.replace(/\s+/g, "").includes(compactPersona)
+    ) {
+      this.logger.warn(
+        `Filler contains persona name beyond head check: ${fullText}`,
+      );
+    }
+  }
+
+  /** 身份/偏好问句的确定性模板；非此类问句返回 null 走小模型 */
+  private fillerTemplateFor(
+    asrText: string,
+    recentFillers: string[],
+  ): string | null {
+    const isZh = /[\u4e00-\u9fff]/.test(asrText);
+    let pool: string[] | null = null;
+    if (LlmAdapterService.SELF_IDENTITY_QUESTION.test(asrText)) {
+      pool = isZh
+        ? LlmAdapterService.IDENTITY_FILLERS_ZH
+        : LlmAdapterService.IDENTITY_FILLERS_EN;
+    } else if (LlmAdapterService.SELF_PREFERENCE_QUESTION.test(asrText)) {
+      pool = isZh
+        ? LlmAdapterService.PREFERENCE_FILLERS_ZH
+        : LlmAdapterService.PREFERENCE_FILLERS_EN;
+    }
+    if (!pool) {
+      return null;
+    }
+    return (
+      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
+    );
+  }
+
+  /** 重试仍重复时的兜底：通用模板池里挑一条最近没用过的 */
+  private fillerFallback(asrText: string, recentFillers: string[]): string {
+    const pool = /[\u4e00-\u9fff]/.test(asrText)
+      ? LlmAdapterService.GENERIC_FILLERS_ZH
+      : LlmAdapterService.GENERIC_FILLERS_EN;
+    return (
+      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
+    );
+  }
+
+  /** 归一化比对（去大小写/空白/标点/符号）：挡逐字复读与近重复 */
+  private isFillerDuplicate(text: string, recentFillers: string[]): boolean {
+    const normalized = LlmAdapterService.normalizeFiller(text);
+    return recentFillers.some(
+      (recent) => LlmAdapterService.normalizeFiller(recent) === normalized,
+    );
+  }
+
+  private static normalizeFiller(text: string): string {
+    return text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+  }
+
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */
   private async persistTurn(
     deviceInternalId: string,
@@ -747,8 +1304,8 @@ export class LlmAdapterService {
     replyText: string,
     status: "completed" | "failed",
     assistantPayload: Prisma.InputJsonValue,
+    turnId: string = randomUUID(),
   ): Promise<void> {
-    const turnId = randomUUID();
     await this.prisma.message.create({
       data: {
         deviceId: deviceInternalId,
@@ -757,7 +1314,6 @@ export class LlmAdapterService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: { channel: "baidu-rtc" },
         spokeAt: new Date(),
       },
@@ -770,7 +1326,6 @@ export class LlmAdapterService {
         content: replyText,
         status,
         mode: "free_chat",
-        conversationModeKey: null,
         rawPayload: assistantPayload,
         spokeAt: new Date(),
       },

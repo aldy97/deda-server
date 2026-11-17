@@ -37,7 +37,6 @@ export class LearningStatsController {
       deviceId?: string;
       range?: "today" | "week" | "month";
       mode?: string;
-      conversationModeKey?: string;
     },
   ) {
     return this.learningStatsService.getDashboard(
@@ -46,7 +45,6 @@ export class LearningStatsController {
       query.range,
       {
         mode: query.mode,
-        conversationModeKey: query.conversationModeKey,
       },
     );
   }
@@ -59,7 +57,6 @@ export class LearningStatsController {
       deviceId?: string;
       days?: string;
       mode?: string;
-      conversationModeKey?: string;
       scope?: "all";
     },
   ) {
@@ -69,7 +66,6 @@ export class LearningStatsController {
       Number(query.days) || 7,
       {
         mode: query.mode,
-        conversationModeKey: query.conversationModeKey,
         ...(query.scope === "all" ? { scope: "all" as const } : {}),
       },
     );
@@ -109,7 +105,6 @@ export class LearningStatsController {
       pageSize?: string;
       range?: "today" | "week" | "month";
       mode?: string;
-      conversationModeKey?: string;
     },
   ) {
     return this.learningStatsService.getActivities(
@@ -120,7 +115,6 @@ export class LearningStatsController {
         pageSize: Number(query.pageSize) || 10,
         range: query.range,
         mode: query.mode,
-        conversationModeKey: query.conversationModeKey,
       },
     );
   }

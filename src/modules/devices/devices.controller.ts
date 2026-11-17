@@ -40,6 +40,13 @@ export class DevicesController {
     return this.devicesService.list(req.user.userId);
   }
 
+  // 注意：静态路由必须定义在 @Get(":id") 之前，否则会被 :id 吃掉
+  @Get("provision-candidates")
+  @ApiOperation({ summary: "配网认领候选：最近上线且未绑定当前用户的设备" })
+  async provisionCandidates(@Req() req: RequestWithUser) {
+    return this.devicesService.provisionCandidates(req.user.userId);
+  }
+
   @Put("order")
   @ApiOperation({ summary: "完整替换当前用户的设备显示顺序" })
   async updateOrder(

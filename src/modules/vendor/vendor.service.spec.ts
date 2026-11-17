@@ -15,6 +15,8 @@ import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 describe("VendorService", () => {
   let service: VendorService;
@@ -81,6 +83,7 @@ describe("VendorService", () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         VendorService,
         ConversationSessionService,
         {
@@ -96,12 +99,11 @@ describe("VendorService", () => {
             childProfile: {
               findUnique: jest.fn(),
             },
-            conversationMode: {
-              findFirst: jest.fn(),
-            },
             message: {
               findMany: jest.fn(),
               create: jest.fn(),
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn().mockResolvedValue({}),
             },
             conversationSession: {
               findUnique: jest.fn().mockResolvedValue(null),
@@ -163,7 +165,13 @@ describe("VendorService", () => {
           provide: SleepConfigsService,
           useValue: {
             applyVoiceUpdate: jest.fn(),
-            getByDeviceId: jest.fn().mockResolvedValue(null),
+            // sleepTime="00:00" 让哄睡时段全天开放：本文件的用例都在验证
+            // 老链路的话术与落库行为，不该被时段门禁左右。且本文件不用
+            // fake timers（跑真实系统时间），若留 null 会回落到默认 21:30，
+            // 哄睡用例就变成「北京时间 21:30 后才绿」的时间依赖假测试。
+            getByDeviceId: jest
+              .fn()
+              .mockResolvedValue({ contentType: "story", sleepTime: "00:00" }),
           },
         },
         {
@@ -194,6 +202,73 @@ describe("VendorService", () => {
   });
 
   describe("handleTextIn", () => {
+    it("新一轮开始时对上一轮 assistant 回复做打断推断（fire-and-forget）", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      // 上一轮 assistant 回复 100 字、2 秒前发出 → 仍在估算播放窗口内
+      prisma.message.findFirst.mockResolvedValue({
+        id: "prev-assistant",
+        content: "啊".repeat(100),
+        spokeAt: new Date(Date.now() - 2000),
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      await service.handleTextIn(dto);
+      // fire-and-forget：等微任务/IO 队列排空再断言
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(prisma.message.findFirst).toHaveBeenCalledWith({
+        where: {
+          deviceId: "uuid-001",
+          role: "assistant",
+          status: "completed",
+        },
+        orderBy: { spokeAt: "desc" },
+        select: { id: true, content: true, spokeAt: true },
+      });
+      expect(prisma.message.update).toHaveBeenCalledWith({
+        where: { id: "prev-assistant" },
+        data: { status: "interrupted" },
+      });
+    });
+
+    it("打断推断失败不阻塞本轮回复", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "你好",
+      };
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      prisma.message.findFirst.mockRejectedValue(new Error("db down"));
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "user", content: "你好" },
+      ] as any);
+      mockAnswerStream("你好呀！");
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("你好呀");
+    });
+
     it("should call LLM, ensure device exists, and persist conversation", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
@@ -207,10 +282,8 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.conversationMode.findFirst.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
       llmService.buildEnglishTutorPrompt.mockReturnValue([
@@ -243,7 +316,6 @@ describe("VendorService", () => {
           turnId: expect.any(String),
           status: "completed",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       );
       expect(userCall[0].data).not.toHaveProperty("textbookId");
@@ -282,6 +354,61 @@ describe("VendorService", () => {
       ).toBeGreaterThan(lastChunkOrder);
     });
 
+    it("should thread one turnId through safety, intent, streams and messages", async () => {
+      const dto: VendorTextInDto = {
+        deviceId: "dev-001",
+        asrText: "我想听故事",
+      };
+
+      prisma.device.findUnique.mockResolvedValue(null);
+      prisma.device.create.mockResolvedValue({
+        id: "uuid-001",
+        deviceId: "dev-001",
+      } as any);
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+      } as any);
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "我想听故事" },
+      ] as any);
+      // safety_l2 与 intent_classify 共用被 mock 的 complete，按 scene 分流返回
+      llmService.complete.mockImplementation((options: any) =>
+        Promise.resolve({
+          text: options.scene === "safety_l2" ? "safe" : "free_chat",
+        }),
+      );
+      mockAnswerStream("好呀，给你讲个故事！");
+
+      await service.handleTextIn(dto);
+
+      const turnId = prisma.message.create.mock.calls[0][0].data.turnId;
+      expect(typeof turnId).toBe("string");
+
+      // 同一轮：安全分类、意图分类、filler、主回答全部共享该 turnId
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "safety_l2", turnId }),
+      );
+      expect(llmService.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "intent_classify", turnId }),
+      );
+      expect(llmService.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "filler", turnId }),
+      );
+      expect(llmService.completeStream).toHaveBeenCalledWith(
+        expect.objectContaining({ scene: "chat_main", turnId }),
+      );
+      // 记忆提取沿用既有 turnId 契约
+      expect(childMemoriesService.extractAndStore).toHaveBeenCalledWith(
+        expect.objectContaining({ turnId }),
+      );
+      // assistant 消息与 user 消息同轮
+      expect(prisma.message.create.mock.calls[1][0].data.turnId).toBe(turnId);
+    });
+
     it("should route ordinary input to english_chat for an English chat device", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-002",
@@ -294,7 +421,6 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "english_chat",
-        conversationModeKey: null,
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
@@ -312,12 +438,10 @@ describe("VendorService", () => {
         [],
         expect.objectContaining({ mode: "english_chat" }),
       );
-      expect(prisma.conversationMode.findFirst).not.toHaveBeenCalled();
       expect(prisma.message.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             mode: "english_chat",
-            conversationModeKey: null,
           }),
         }),
       );
@@ -337,7 +461,6 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-003" } as any);
@@ -416,10 +539,8 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(childProfile as any);
-      prisma.conversationMode.findFirst.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
       llmService.buildEnglishTutorPrompt.mockReturnValue([
@@ -445,12 +566,11 @@ describe("VendorService", () => {
       );
     });
 
-    it("should fetch conversation mode prompt template in free_chat mode", async () => {
+    it("should NOT use a conversationMode prompt template in free_chat (flat mode)", async () => {
       const dto: VendorTextInDto = {
         deviceId: "dev-001",
         asrText: "Hi",
       };
-      const modeTemplate = "You are a casual chat partner for kids.";
 
       prisma.device.findUnique.mockResolvedValue({
         id: "uuid-001",
@@ -458,12 +578,8 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.conversationMode.findFirst.mockResolvedValue({
-        promptTemplate: modeTemplate,
-      } as any);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
       llmService.buildEnglishTutorPrompt.mockReturnValue([
@@ -473,19 +589,13 @@ describe("VendorService", () => {
       mockAnswerStream("Hey there!");
 
       await service.handleTextIn(dto);
-
-      expect(prisma.conversationMode.findFirst).toHaveBeenCalledWith({
-        where: { key: "free_chat_casual" },
-        select: { promptTemplate: true },
-      });
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         "Hi",
         [],
         expect.objectContaining({
           childProfile: undefined,
-          promptTemplate: modeTemplate,
+          promptTemplate: undefined,
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       );
     });
@@ -502,10 +612,8 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.conversationMode.findFirst.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
       llmService.buildEnglishTutorPrompt.mockReturnValue([
@@ -539,12 +647,8 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.conversationMode.findFirst.mockResolvedValue({
-        promptTemplate: null,
-      } as any);
       prisma.message.findMany.mockResolvedValue([]);
       prisma.message.create.mockResolvedValue({ id: "conv-001" } as any);
       llmService.buildEnglishTutorPrompt.mockReturnValue([
@@ -564,7 +668,6 @@ describe("VendorService", () => {
           role: "user",
           content: "Hi",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       );
       // assistant 落库 = 播报全文（filler + answer）
@@ -575,7 +678,6 @@ describe("VendorService", () => {
           content: "嗯\nHey!",
           status: "completed",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
           turnId: userCall[0].data.turnId,
         }),
       );
@@ -601,7 +703,6 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
@@ -658,13 +759,13 @@ describe("VendorService", () => {
         expect.any(String),
         expect.any(Array),
         expect.objectContaining({
-          mode: "free_chat",
+          mode: "free_story",
           promptTemplate: expect.stringMatching(/自由创作[\s\S]*不要承诺/),
         }),
       );
     });
 
-    it("should persist blocked adventure entry messages as free_chat mode", async () => {
+    it("should persist blocked adventure entry messages as free_story mode", async () => {
       setupStreamingBase();
       adventureService.isCompletedToday.mockResolvedValue(true);
       llmService.complete.mockResolvedValue({ text: "adventure_story" } as any);
@@ -675,13 +776,55 @@ describe("VendorService", () => {
         asrText: "我想玩下一集每日冒险",
       });
 
-      // 冒险被门禁拦截、未真正开始：消息 mode 不得污染 adventure_story 统计
+      // 冒险被门禁拦截、未真正开始：落 free_story，不污染 adventure_story 统计
       const [userCall, assistantCall] = prisma.message.create.mock.calls;
       expect(userCall[0].data).toEqual(
-        expect.objectContaining({ role: "user", mode: "free_chat" }),
+        expect.objectContaining({ role: "user", mode: "free_story" }),
       );
       expect(assistantCall[0].data).toEqual(
-        expect.objectContaining({ role: "assistant", mode: "free_chat" }),
+        expect.objectContaining({ role: "assistant", mode: "free_story" }),
+      );
+    });
+
+    it("should persist free_story intent messages with mode free_story", async () => {
+      setupStreamingBase();
+      adventureService.isCompletedToday.mockResolvedValue(false);
+      llmService.complete.mockResolvedValue({ text: "free_story" } as any);
+      mockAnswerStream("好的，我给你讲个故事。");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "讲个故事",
+      });
+
+      const [userCall, assistantCall] = prisma.message.create.mock.calls;
+      expect(userCall[0].data).toEqual(
+        expect.objectContaining({ role: "user", mode: "free_story" }),
+      );
+      expect(assistantCall[0].data).toEqual(
+        expect.objectContaining({ role: "assistant", mode: "free_story" }),
+      );
+    });
+
+    it("should persist free_chat intent as english_chat when device is in english_chat mode", async () => {
+      setupStreamingBase();
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "english_chat",
+      } as any);
+      llmService.complete.mockResolvedValue({ text: "free_chat" } as any);
+      mockAnswerStream("The weather is nice today.");
+
+      await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "今天天气怎么样",
+      });
+
+      const [userCall, assistantCall] = prisma.message.create.mock.calls;
+      expect(userCall[0].data).toEqual(
+        expect.objectContaining({ role: "user", mode: "english_chat" }),
+      );
+      expect(assistantCall[0].data).toEqual(
+        expect.objectContaining({ role: "assistant", mode: "english_chat" }),
       );
     });
 
@@ -711,8 +854,12 @@ describe("VendorService", () => {
       );
     });
 
-    it("should route ordinary chat directly to free-chat without classification or session writes", async () => {
+    // 契约变更：前置关键词过滤（isRoutingCandidate）已移除，普通闲聊也要过
+    // 分类器做语义判定——否则「我困了」这类不含词表字的表达永远进不了哄睡。
+    // free_chat 仍然不写会话，这一点没变。
+    it("should route ordinary chat to free-chat via the classifier without session writes", async () => {
       setupStreamingBase();
+      llmService.complete.mockResolvedValue({ text: "free_chat" } as any);
       mockAnswerStream("今天很适合出门走走。");
 
       await service.handleTextIn({
@@ -720,12 +867,11 @@ describe("VendorService", () => {
         asrText: "今天天气怎么样",
       });
 
-      // 普通闲聊不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
       const intentClassifyCalls = llmService.complete.mock.calls.filter(
         ([options]: any[]) =>
           options.messages[0].content.includes("对话意图分类器"),
       );
-      expect(intentClassifyCalls).toHaveLength(0);
+      expect(intentClassifyCalls).toHaveLength(1);
       expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         expect.any(String),
@@ -734,6 +880,8 @@ describe("VendorService", () => {
       );
     });
 
+    // 契约变更：活跃会话内的普通接话现在也会调分类器，但只有模型判为
+    // free_chat 时才维持原模式（session_sticky），因此英语故事不会被打断。
     it("should keep an active English session for ordinary answers without entering adventure", async () => {
       setupStreamingBase();
       prisma.conversationSession.findUnique.mockResolvedValue({
@@ -742,6 +890,7 @@ describe("VendorService", () => {
         currentMode: "english_story",
         expiresAt: new Date(Date.now() + 10 * 60_000),
       });
+      llmService.complete.mockResolvedValue({ text: "free_chat" } as any);
       mockAnswerStream("Yes, the cat is in the garden.");
 
       await service.handleTextIn({
@@ -749,12 +898,11 @@ describe("VendorService", () => {
         asrText: "I see a cat.",
       });
 
-      // 会话续期路径不触发意图分类（设计内的每轮 L2 安全分类调用不受此约束）
       const intentClassifyCalls = llmService.complete.mock.calls.filter(
         ([options]: any[]) =>
           options.messages[0].content.includes("对话意图分类器"),
       );
-      expect(intentClassifyCalls).toHaveLength(0);
+      expect(intentClassifyCalls).toHaveLength(1);
       expect(adventureService.startToday).not.toHaveBeenCalled();
       expect(childMemoriesService.buildPromptBlock).not.toHaveBeenCalled();
       expect(llmService.buildEnglishTutorPrompt).toHaveBeenCalledWith(
@@ -841,6 +989,7 @@ describe("VendorService", () => {
         setupStreamingBase();
         sleepConfigsService.getByDeviceId.mockResolvedValue({
           contentType: "song",
+          sleepTime: "00:00",
         });
         llmService.complete.mockResolvedValue({ text: "sleep_story" } as any);
         mockAnswerStream("月亮轻轻闭上了眼睛。");
@@ -994,7 +1143,6 @@ describe("VendorService", () => {
       setupStreamingBase();
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "companion",
       } as any);
       prisma.message.findMany.mockResolvedValue([
         {
@@ -1017,15 +1165,18 @@ describe("VendorService", () => {
       expect(result.responseText).toContain("我记得你最喜欢蓝色！");
       expect(childMemoriesService.buildPromptBlock).toHaveBeenCalledWith(
         "uuid-s1",
-        "你还记得我喜欢什么颜色吗？",
+        ["你最喜欢红色。"],
       );
       const answerCall = llmService.completeStream.mock.calls.find(
         ([options]) => options.model !== "small-llm",
       );
-      expect(answerCall?.[0].messages[0]).toEqual({
+      // 记忆块贴尾注入：位于本轮 user 之前，保住头部前缀缓存
+      const answerMessages = answerCall?.[0].messages ?? [];
+      expect(answerMessages[answerMessages.length - 2]).toEqual({
         role: "system",
         content: "孩子当前最喜欢蓝色。",
       });
+      expect(answerMessages[answerMessages.length - 1].role).toBe("user");
       const fillerCall = llmService.completeStream.mock.calls.find(
         ([options]) => options.model === "small-llm",
       );
@@ -1286,7 +1437,6 @@ describe("VendorService", () => {
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       } as any);
       prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.message.create.mockResolvedValue({ id: "conv-h1" } as any);
@@ -1572,7 +1722,6 @@ describe("VendorService", () => {
       });
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
-        conversationModeKey: null,
       });
       prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.message.findMany.mockResolvedValue([]);
@@ -1661,6 +1810,245 @@ describe("VendorService", () => {
       expect(guidance).toBeTruthy();
       expect(guidance!.content).toContain("绝不附和");
       expect(result.responseText).toContain("是不是和弟弟吵架了呀");
+    });
+  });
+
+  /**
+   * 备选链路（机芯厂 WS）的「永不沉默」。
+   *
+   * 这条链路的每个失败点都直接等于孩子听到静音：gateway 只会 emitError，
+   * 设备端收到 vendor:error 后无话可播。所以要求是——落库/审计失败绝不影响
+   * 已经生成好的内容播出；引擎与门禁失败降级到自由创作；连自由创作都失败时
+   * 还有一个 sendDegradedReply 可以调（gateway/controller 的最后一道闸）。
+   */
+  describe("备选链路的永不沉默", () => {
+    const setupBase = () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-d1",
+        deviceId: "dev-d1",
+      });
+      prisma.deviceConfig.findFirst.mockResolvedValue({
+        mode: "free_chat",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.message.findMany.mockResolvedValue([]);
+      prisma.message.create.mockResolvedValue({ id: "m-1" });
+      llmService.buildEnglishTutorPrompt.mockReturnValue([
+        { role: "system", content: "prompt" },
+        { role: "user", content: "x" },
+      ]);
+      mockAnswerStream("自由创作的故事");
+    };
+
+    const dto: VendorTextInDto = { deviceId: "dev-d1", asrText: "我想听故事" };
+
+    it("handleChildReply 抛错时降级到自由创作，不向上抛", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockRejectedValue(
+        new Error("engine down"),
+      );
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+      expect(llmService.completeStream).toHaveBeenCalled();
+    });
+
+    it("isCompletedToday 抛错时跳过冒险门禁，仍给出回复", async () => {
+      setupBase();
+      adventureService.isCompletedToday.mockRejectedValue(new Error("db down"));
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+      expect(adventureService.startToday).not.toHaveBeenCalled();
+    });
+
+    it("startToday 抛错时降级到自由创作", async () => {
+      setupBase();
+      adventureService.startToday.mockRejectedValue(new Error("engine down"));
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+    });
+
+    it("recordEntryBlocked 抛错不影响本轮回复", async () => {
+      setupBase();
+      adventureService.isCompletedToday.mockResolvedValue(true);
+      adventureService.recordEntryBlocked.mockRejectedValue(
+        new Error("db down"),
+      );
+      llmService.complete.mockResolvedValue({ text: "adventure_story" });
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toContain("自由创作的故事");
+    });
+
+    it("安全拦截话术落库失败仍照常播出（L1 是安全闸，不能因为写库失败就沉默）", async () => {
+      setupBase();
+      prisma.message.create.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-d1",
+        asrText: "我不想活了",
+      });
+
+      expect(result.responseText).toMatch(/爸爸妈妈/);
+      expect(
+        uploadedChunks()
+          .map((c) => c.delta)
+          .join(""),
+      ).toContain("陪着你");
+    });
+
+    it("冒险回复落库失败不影响 chunk 播出", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["段落一", "段落二"],
+        action: "await_reply",
+      });
+      prisma.message.create.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("段落一\n段落二");
+      expect(uploadedChunks().map((c) => c.delta)).toEqual([
+        "段落一",
+        "段落二",
+        "",
+      ]);
+    });
+
+    it("recordPresented 抛错不影响已播出的冒险回复", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["段落一"],
+        action: "narrate",
+      });
+      adventureService.recordPresented.mockRejectedValue(new Error("db down"));
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("段落一");
+    });
+
+    it("markPromptPlaybackComplete 抛错不影响本轮回复", async () => {
+      setupBase();
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["你要选哪个？"],
+        action: "await_reply",
+      });
+      adventureService.markPromptPlaybackComplete.mockRejectedValue(
+        new Error("db down"),
+      );
+
+      const result = await service.handleTextIn(dto);
+
+      expect(result.responseText).toBe("你要选哪个？");
+    });
+
+    describe("超时监听器", () => {
+      const timeoutListener = () =>
+        adventureService.registerTimeoutListener.mock.calls[0][0] as (
+          deviceId: string,
+          reply: unknown,
+        ) => Promise<void>;
+
+      it("注册在构造函数里", () => {
+        expect(adventureService.registerTimeoutListener).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(typeof timeoutListener()).toBe("function");
+      });
+
+      it("设备查询抛错时不产生未捕获拒绝（定时器里的异常没人接）", async () => {
+        prisma.device.findUnique.mockRejectedValue(new Error("db down"));
+
+        await expect(
+          timeoutListener()("uuid-x", { texts: ["继续吧"], action: "narrate" }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("下行推送与落库抛错时同样不产生未捕获拒绝", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-x",
+          deviceId: "dev-x",
+        });
+        prisma.message.create.mockRejectedValue(new Error("db down"));
+        replyUploader.sendChunk.mockRejectedValue(new Error("ws down"));
+
+        await expect(
+          timeoutListener()("uuid-x", { texts: ["继续吧"], action: "narrate" }),
+        ).resolves.toBeUndefined();
+      });
+    });
+
+    describe("sendDegradedReply（L0 最后一道闸）", () => {
+      it("上传兜底话术并返回同形状信封", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-d1",
+          deviceId: "dev-d1",
+        });
+        prisma.message.create.mockResolvedValue({ id: "m-1" });
+
+        const result = await service.sendDegradedReply("dev-d1");
+
+        expect(result).toEqual({
+          deviceId: "dev-d1",
+          responseText: ADVENTURE_DEGRADED_REPLIES.lastResort,
+          context: { degraded: true },
+          ttsOptions: {},
+        });
+        expect(uploadedChunks().map((c) => c.delta)).toEqual([
+          ADVENTURE_DEGRADED_REPLIES.lastResort,
+          "",
+        ]);
+        expect(uploadedChunks().at(-1)?.isFinal).toBe(true);
+        expect(replyUploader.sendFullReply).toHaveBeenCalled();
+      });
+
+      it("可指定话术（引擎级降级与最后一级降级用不同文案）", async () => {
+        prisma.device.findUnique.mockResolvedValue({
+          id: "uuid-d1",
+          deviceId: "dev-d1",
+        });
+        prisma.message.create.mockResolvedValue({ id: "m-1" });
+
+        const result = await service.sendDegradedReply(
+          "dev-d1",
+          ADVENTURE_DEGRADED_REPLIES.engine,
+        );
+
+        expect(result.responseText).toBe(ADVENTURE_DEGRADED_REPLIES.engine);
+      });
+
+      it("设备行不存在时仍返回话术：上传只需要对外 deviceId", async () => {
+        prisma.device.findUnique.mockResolvedValue(null);
+
+        const result = await service.sendDegradedReply("dev-unknown");
+
+        expect(result.responseText).toBe(ADVENTURE_DEGRADED_REPLIES.lastResort);
+        expect(uploadedChunks()).toHaveLength(2);
+        expect(prisma.message.create).not.toHaveBeenCalled();
+      });
+
+      it("落库与上传全挂时也返回话术，绝不抛错", async () => {
+        prisma.device.findUnique.mockRejectedValue(new Error("db down"));
+        prisma.message.create.mockRejectedValue(new Error("db down"));
+        replyUploader.sendChunk.mockRejectedValue(new Error("ws down"));
+        replyUploader.sendFullReply.mockRejectedValue(new Error("ws down"));
+
+        await expect(service.sendDegradedReply("dev-d1")).resolves.toEqual({
+          deviceId: "dev-d1",
+          responseText: ADVENTURE_DEGRADED_REPLIES.lastResort,
+          context: { degraded: true },
+          ttsOptions: {},
+        });
+      });
     });
   });
 });

@@ -3,6 +3,7 @@ import { LlmModule } from "@/modules/llm/llm.module";
 import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
 import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { TurnDecisionModule } from "@/modules/turn-decision/turn-decision.module";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { LlmAdapterController } from "./llm-adapter.controller";
@@ -16,6 +17,8 @@ import { LlmAdapterService } from "./llm-adapter.service";
  * ChildSafetyService 同款模式直接实例化（依赖仅 Prisma+Llm），
  * 避免把老链路拖进新模块边界。AdventureService 经 AdventureModule
  * 引入（与 vendor 共享单例；适配层只读使用，不注册超时监听）。
+ * TurnDecisionRecorder 经 TurnDecisionModule 引入：适配层是本期唯一埋点位置，
+ * 老 WS 链路（vendor.gateway）刻意不埋点。
  * PrismaService 由全局 PrismaModule 提供。
  */
 @Module({
@@ -24,6 +27,7 @@ import { LlmAdapterService } from "./llm-adapter.service";
     ChildMemoriesModule,
     SleepConfigsModule,
     AdventureModule,
+    TurnDecisionModule,
   ],
   controllers: [LlmAdapterController],
   providers: [

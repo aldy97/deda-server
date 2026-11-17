@@ -1,6 +1,51 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosError } from "axios";
+import { PrismaService } from "@/common/prisma/prisma.service";
+import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import {
+  RawUsage,
+  costMicroCnyOf,
+  extractCacheHitTokens,
+} from "./llm-cost.util";
+
+/** LLM 场景枚举：模型监控的分场景口径，新增调用点必须从这里取值 */
+export const LLM_SCENES = [
+  "safety_l2",
+  "intent_classify",
+  "filler",
+  "adventure_interaction",
+  "memory_extract",
+  "sleep_config_extract",
+  "sleep_story_generate",
+  "chat_main",
+  "parent_report",
+] as const;
+
+export type LlmScene = (typeof LLM_SCENES)[number];
+
+export type LlmFailureReason =
+  | "timeout"
+  | "rate_limit"
+  | "parse_error"
+  | "upstream_error"
+  | "empty_response";
+
+/**
+ * 上游调用失败的结构化错误：携带归一化原因、紧凑细节与是否可重试。
+ * 可重试判定在服务侧完成（此处能看到 HTTP status），调用方只需读 retriable。
+ */
+export class LlmUpstreamError extends Error {
+  constructor(
+    readonly reason: LlmFailureReason,
+    readonly detail: string,
+    readonly retriable: boolean,
+  ) {
+    super(`LLM upstream ${reason}: ${detail}`);
+    this.name = "LlmUpstreamError";
+  }
+}
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
@@ -8,6 +53,12 @@ export interface LlmMessage {
 }
 
 export interface LlmCompleteOptions {
+  /** 调用场景（监控埋点必填），取 LLM_SCENES 之一 */
+  scene: LlmScene;
+  /** 设备内部 UUID（devices.id）；后台任务无设备上下文时省略 */
+  deviceId?: string;
+  /** 对话轮次 ID（监控埋点可选）；后台任务无轮次上下文时省略 */
+  turnId?: string;
   messages: LlmMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -45,7 +96,11 @@ export class LlmService {
   private readonly smallApiKey: string;
   private readonly defaultTimeoutMs: number;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly prisma: PrismaService,
+    private readonly promptRegistry: PromptRegistryService,
+  ) {
     this.baseUrl =
       this.configService.get<string>("OPENAI_BASE_URL") ||
       "https://api.deepseek.com/v1";
@@ -80,12 +135,22 @@ export class LlmService {
     const isSmallModel = model === this.smallModel;
     const baseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
     const apiKey = isSmallModel ? this.smallApiKey : this.apiKey;
+    const startedAt = Date.now();
     if (!apiKey) {
       this.logger.error(
         isSmallModel
           ? "SMALL_LLM_API_KEY is not configured"
           : "OPENAI_API_KEY is not configured",
       );
+      this.logUsage({
+        options,
+        model,
+        success: false,
+        failureReason: "upstream_error",
+        failureDetail: "LLM API key is not configured",
+        latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
+      });
       throw new Error("LLM API key is not configured");
     }
 
@@ -118,6 +183,19 @@ export class LlmService {
       const text = choice?.message?.content?.trim() || "";
       const usage = response.data?.usage;
 
+      // 空响应视为失败（empty_response）：调用方多靠兜底降级，不报错但质量已损
+      this.logUsage({
+        options,
+        model,
+        success: text.length > 0,
+        failureReason: text.length > 0 ? null : "empty_response",
+        failureDetail:
+          text.length > 0 ? null : "response completed with empty text",
+        latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
+        usage,
+      });
+
       return {
         text,
         usage: usage
@@ -130,11 +208,18 @@ export class LlmService {
       };
     } catch (error) {
       const axiosError = error as AxiosError;
-      const message = axiosError.response?.data
-        ? JSON.stringify(axiosError.response.data)
-        : axiosError.message;
-      this.logger.error(`LLM request failed: ${message}`);
-      throw new Error(`LLM request failed: ${message}`);
+      const detail = this.buildFailureDetail(axiosError);
+      this.logger.error(`LLM request failed: ${detail}`);
+      this.logUsage({
+        options,
+        model,
+        success: false,
+        failureReason: this.classifyFailure(axiosError),
+        failureDetail: detail,
+        latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
+      });
+      throw new Error(`LLM request failed: ${detail}`);
     }
   }
 
@@ -150,120 +235,377 @@ export class LlmService {
     const effectiveBaseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
     const effectiveApiKey = isSmallModel ? this.smallApiKey : this.apiKey;
 
-    if (!effectiveApiKey) {
-      this.logger.error(
-        isSmallModel
-          ? "SMALL_LLM_API_KEY is not configured"
-          : "OPENAI_API_KEY is not configured",
-      );
-      throw new Error("LLM API key is not configured");
-    }
+    const startedAt = Date.now();
+    let firstTokenMs: number | null = null;
+    let usage: RawUsage | undefined;
+    let contentChars = 0;
+    let failureReason: LlmFailureReason | null = null;
+    let failureDetail: string | null = null;
 
-    const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
-    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
-
-    let response;
     try {
-      this.logger.debug(
-        `LLM stream request: model=${model}, messages=${JSON.stringify(options.messages)}`,
-      );
-      response = await axios.post(
-        url,
-        {
-          model,
-          messages: options.messages,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 512,
-          thinking: options.thinking ?? { type: "disabled" },
-          stream: true,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${effectiveApiKey}`,
-            "Content-Type": "application/json",
+      if (!effectiveApiKey) {
+        this.logger.error(
+          isSmallModel
+            ? "SMALL_LLM_API_KEY is not configured"
+            : "OPENAI_API_KEY is not configured",
+        );
+        failureReason = "upstream_error";
+        failureDetail = "LLM API key is not configured";
+        throw new LlmUpstreamError(failureReason, failureDetail, false);
+      }
+
+      const url = `${effectiveBaseUrl.replace(/\/$/, "")}/chat/completions`;
+      const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
+
+      let response;
+      try {
+        this.logger.debug(
+          `LLM stream request: model=${model}, messages=${JSON.stringify(options.messages)}`,
+        );
+        response = await axios.post(
+          url,
+          {
+            model,
+            messages: options.messages,
+            temperature: options.temperature ?? 0.7,
+            max_tokens: options.maxTokens ?? 512,
+            thinking: options.thinking ?? { type: "disabled" },
+            stream: true,
+            // 仅小模型（DashScope）流式需要显式开启 usage 回传；
+            // DeepSeek 主网关流式原生返回 usage，加此参数反而会 400，故不下发
+            ...(isSmallModel
+              ? { stream_options: { include_usage: true } }
+              : {}),
           },
-          timeout: timeoutMs,
-          responseType: "stream",
-        },
-      );
-    } catch (error) {
-      const axiosError = error as AxiosError;
-      const message = axiosError.response?.data
-        ? JSON.stringify(axiosError.response.data)
-        : axiosError.message;
-      this.logger.error(`LLM stream request failed: ${message}`);
-      throw new Error(`LLM request failed: ${message}`);
-    }
+          {
+            headers: {
+              Authorization: `Bearer ${effectiveApiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: timeoutMs,
+            responseType: "stream",
+          },
+        );
+      } catch (error) {
+        const axiosError = error as AxiosError;
+        failureReason = this.classifyFailure(axiosError);
+        failureDetail = this.buildFailureDetail(axiosError);
+        this.logger.error(`LLM stream request failed: ${failureDetail}`);
+        throw new LlmUpstreamError(
+          failureReason,
+          failureDetail,
+          this.isRetriable(axiosError, failureReason),
+        );
+      }
 
-    // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
-    const stream = response.data as AsyncIterable<Buffer | string>;
-    let pending = "";
-    for await (const chunk of stream) {
-      pending += chunk.toString();
-      let newlineIndex: number;
-      while ((newlineIndex = pending.indexOf("\n")) >= 0) {
-        const line = pending.slice(0, newlineIndex).trim();
-        pending = pending.slice(newlineIndex + 1);
+      // SSE 解析：按行切分，跨网络包的不完整行留在 pending 里等下一段
+      const stream = response.data as AsyncIterable<Buffer | string>;
+      let pending = "";
+      let streamDone = false;
+      for await (const chunk of stream) {
+        pending += chunk.toString();
+        let newlineIndex: number;
+        while ((newlineIndex = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, newlineIndex).trim();
+          pending = pending.slice(newlineIndex + 1);
 
-        if (!line.startsWith("data:")) {
-          continue;
-        }
-        const data = line.slice("data:".length).trim();
-        if (data === "[DONE]") {
-          return;
-        }
+          if (!line.startsWith("data:")) {
+            continue;
+          }
+          const data = line.slice("data:".length).trim();
+          if (data === "[DONE]") {
+            streamDone = true;
+            break;
+          }
 
-        let delta: unknown;
-        try {
-          delta = JSON.parse(data)?.choices?.[0]?.delta?.content;
-        } catch {
-          // 半行 / 心跳等无法解析的数据直接跳过
-          continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            // 半行 / 心跳等无法解析的数据直接跳过
+            continue;
+          }
+          // 部分网关（如 DashScope include_usage）在末 chunk 携带 usage，顺手采集
+          const chunkUsage = (parsed as { usage?: typeof usage } | null)?.usage;
+          if (chunkUsage) {
+            usage = chunkUsage;
+          }
+          const delta = (
+            parsed as {
+              choices?: Array<{ delta?: { content?: unknown } }>;
+            } | null
+          )?.choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            if (firstTokenMs === null) {
+              firstTokenMs = Date.now() - startedAt;
+            }
+            contentChars += delta.length;
+            yield delta;
+          }
         }
-        if (typeof delta === "string" && delta.length > 0) {
-          yield delta;
+        if (streamDone) {
+          break;
         }
       }
+      // 流正常结束但零内容：调用方会走兜底话术，按 empty_response 记失败
+      if (contentChars === 0) {
+        failureReason = "empty_response";
+        failureDetail = "stream completed with 0 content chars";
+      }
+    } catch (error) {
+      if (!failureReason) {
+        const axiosError = error as AxiosError;
+        failureReason = this.classifyFailure(axiosError);
+        failureDetail = this.buildFailureDetail(axiosError);
+        if (!(error instanceof LlmUpstreamError)) {
+          // mid-stream 断流（如 socket hang up）：连接级失败，按可重试上报
+          throw new LlmUpstreamError(
+            failureReason,
+            failureDetail,
+            this.isRetriable(axiosError, failureReason),
+          );
+        }
+      }
+      throw error;
+    } finally {
+      // 消费方提前 break 也会走到这里：记录已观测到的部分，不影响主链路
+      this.logUsage({
+        options,
+        model,
+        success: failureReason === null,
+        failureReason,
+        failureDetail,
+        latencyMs: Date.now() - startedAt,
+        at: new Date(startedAt),
+        firstTokenMs,
+        usage,
+      });
     }
   }
 
+  /** 失败细节紧凑串：HTTP 400: {...} / ECONNRESET: socket hang up，截断 200 字符入库 */
+  private buildFailureDetail(error: AxiosError): string {
+    const status = error?.response?.status;
+    const code = error?.code;
+    const raw = error?.response?.data
+      ? JSON.stringify(error.response.data)
+      : (error?.message ?? "unknown error");
+    const prefix = status ? `HTTP ${status}` : (code ?? "UNKNOWN");
+    return `${prefix}: ${raw}`.slice(0, 200);
+  }
+
   /**
-   * 构建首响「打哈哈」prompt（小模型用）
-   * 业内 filler 写法要点：明确角色定位（只为正式回答争取时间）、
-   * 语言跟随用户、极短、禁止实质回答、措辞多样化，并给 few-shot 示例。
+   * 可重试判定：超时 / 限流 / 连接级失败（无响应）/ 5xx 可重试；
+   * 其余 4xx 是请求本身有问题，重试无意义
+   */
+  private isRetriable(error: AxiosError, reason: LlmFailureReason): boolean {
+    if (reason === "timeout" || reason === "rate_limit") {
+      return true;
+    }
+    const status = error?.response?.status;
+    if (status == null) {
+      return true;
+    }
+    return status >= 500;
+  }
+
+  /** 失败原因归一化：timeout / rate_limit / upstream_error（parse_error 预留给调用方解析类失败） */
+  private classifyFailure(error: AxiosError): LlmFailureReason {
+    if (
+      error?.code === "ECONNABORTED" ||
+      /timeout/i.test(error?.message ?? "")
+    ) {
+      return "timeout";
+    }
+    if (error?.response?.status === 429) {
+      return "rate_limit";
+    }
+    return "upstream_error";
+  }
+
+  /**
+   * 监控埋点写库：fire-and-forget，失败只记日志，绝不影响主链路。
+   */
+  private logUsage(entry: {
+    options: LlmCompleteOptions;
+    model: string;
+    success: boolean;
+    failureReason: LlmFailureReason | null;
+    failureDetail?: string | null;
+    latencyMs: number;
+    firstTokenMs?: number | null;
+    usage?: RawUsage;
+    /** 请求发起时刻：峰谷定价按调用发生时间判定，不用写库时间 */
+    at: Date;
+  }): void {
+    const isSmallModel = entry.model === this.smallModel;
+    // 成本快照：任何异常都吞掉并写 null，绝不让定价缺项或脏 usage 影响主链路
+    let cacheHitInputTokens: number | null = null;
+    let costMicroCny: number | null = null;
+    try {
+      cacheHitInputTokens = extractCacheHitTokens(entry.usage);
+    } catch {
+      // usage 形状异常：缓存命中数记 null（金额随之退化为上界或 null）
+    }
+    try {
+      costMicroCny = costMicroCnyOf({
+        model: entry.model,
+        usage: entry.usage,
+        at: entry.at,
+      });
+    } catch {
+      // 定价表缺项/脏数据：记 null，由成本接口统计为「未计价条数」
+    }
+    this.prisma.llmUsageLog
+      .create({
+        data: {
+          scene: entry.options.scene,
+          model: entry.model,
+          tier: isSmallModel ? "small" : "main",
+          success: entry.success,
+          failureReason: entry.failureReason,
+          failureDetail: entry.failureDetail ?? null,
+          latencyMs: entry.latencyMs,
+          firstTokenMs: entry.firstTokenMs ?? null,
+          promptTokens: entry.usage?.prompt_tokens ?? null,
+          completionTokens: entry.usage?.completion_tokens ?? null,
+          totalTokens: entry.usage?.total_tokens ?? null,
+          cacheHitInputTokens,
+          costMicroCny,
+          deviceId: entry.options.deviceId ?? null,
+          turnId: entry.options.turnId ?? null,
+        },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(`LLM usage log write failed: ${message}`);
+        },
+      );
+  }
+
+  /**
+   * 设备角色人设表——**代码默认值快照**，仅供无法注入 registry 的静态上下文
+   * （以及既有测试）读取。运行时一律走 promptRegistry.getPersona()，
+   * admin 在 dashboard 发布的新版本不会反映到这里。
+   *
+   * 注意：adventure.service.ts 另有一份本地 CHARACTER_PERSONAS，两份已经漂移
+   * （那份缺「中文自称固定为…」后半句）。冒险链路的接话人设本次不纳入注册表，
+   * 故此处不做合并，漂移单独跟踪。
+   */
+  static readonly CHARACTER_PERSONAS: Record<string, string> = {
+    elly: PROMPT_DEFAULTS.persona_elly.template,
+    polly: PROMPT_DEFAULTS.persona_polly.template,
+  };
+
+  /**
+   * 构建首响「打哈哈」prompt（小模型用，中文撰写——输出以中文为主，
+   * 指令与目标语言对齐可减少跨语言指令遵循滑移，也便于团队维护）。
+   * 要点：明确角色定位（只为正式回答争取时间）、语言跟随用户、
+   * 15-20 字（音频覆盖主模型首包，实测 gap P90=2.36s）、禁止实质回答、
+   * 禁止以孩子名字开头、禁止自称/人设名、禁止新增意象（filler 越抒情，
+   * 主模型越有东西可复读）、措辞多样化，并给达标的 few-shot 示例。
    * 不带教材上下文与历史，避免小模型展开真正回答。
    * @param recentFillers 最近若干轮本方用过的 filler 原文，
    * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
+   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设/孩子档案），
+   * 让 filler 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
+   * "filler 自称小星但主模型是 Elly"这类矛盾播报
    */
-  buildFillerPrompt(asrText: string, recentFillers?: string[]): LlmMessage[] {
-    const systemPrompt = `You are the fast first-response layer of a voice chat companion for children. Your only job is to buy time for the main reply: instantly produce ONE short, warm sentence that acknowledges or echoes what the child just said, so the child feels heard.
-
-Rules:
-1. Reply in the same language the child just used.
-2. Keep it under 20 words, in a natural spoken style.
-3. Never answer the question or provide real content — the main reply comes later.
-4. Echo the child's topic keywords so it feels personal, and vary your wording — never reuse the same opener twice in a row.
-5. No lists, no emojis, no questions.
-6. End with a trailing, transitional tone (e.g. "呀", "呢", "...") so the main reply can take over naturally — never sound like a finished, closed statement.
-7. Never shorter than at least 10 characters in Chinese or at least 6 words in English — your sentence is spoken aloud as audio cover while the main reply is being prepared, and a too-short utterance leaves dead air.
-
-Examples:
-Child: 我喜欢上海的天气 → 原来你喜欢上海的天气呀
-Child: Why is the sky blue? → That is such a fun question!
-Child: 我昨天去公园玩了 → 去公园玩听起来好开心呀
-Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
+  buildFillerPrompt(
+    asrText: string,
+    recentFillers?: string[],
+    turnContext?: {
+      intent?: string;
+      adventureDeclined?: boolean;
+      persona?: string;
+      childBrief?: string;
+    },
+  ): LlmMessage[] {
+    const contextSection = this.buildFillerContextSection(turnContext);
 
     const bannedSection =
       recentFillers && recentFillers.length > 0
-        ? `\n\nRecently used openers (do NOT reuse or closely imitate any of them):\n${recentFillers
-            .map((filler) => `- "${filler}"`)
+        ? `\n\n最近用过的承接语（不要复用或近似模仿其中任何一句）：\n${recentFillers
+            .map((filler) => `- 「${filler}」`)
             .join("\n")}`
         : "";
 
     return [
-      { role: "system", content: systemPrompt + bannedSection },
+      {
+        role: "system",
+        content: this.promptRegistry.render("filler_system", {
+          contextSection,
+          bannedSection,
+        }),
+      },
       { role: "user", content: asrText },
     ];
+  }
+
+  /** filler 本轮情境段：仅声明自身身份与主回答走向，filler 不得复述细节 */
+  private buildFillerContextSection(turnContext?: {
+    intent?: string;
+    adventureDeclined?: boolean;
+    persona?: string;
+    childBrief?: string;
+  }): string {
+    const parts: string[] = [];
+    if (turnContext?.persona) {
+      // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
+      parts.push(
+        `你的身份：${turnContext.persona} 绝不给自己编造别的名字或身份。`,
+      );
+    }
+    if (turnContext?.childBrief) {
+      // 与主模型共享同一份孩子档案摘要，称呼保持一致（大小模型不像两个人）。
+      // 但本句不要用名字称呼（实机事故：每句 filler 都以孩子名开头）
+      parts.push(
+        `你正在和这个孩子说话：${turnContext.childBrief}。你知道 TA 的名字，但这句话里不要用名字称呼 TA，也不要编造此处之外的事实。`,
+      );
+    }
+    if (turnContext?.adventureDeclined) {
+      parts.push(
+        `本轮背景（绝不明说）：孩子想玩每日冒险，但今天的冒险已经结束——主回答会温柔说明并提议别的话题。不要宣告、承诺或预告冒险，只给中性温暖的承接。`,
+      );
+    } else if (
+      turnContext?.intent &&
+      [
+        "english_story",
+        "idiom_story",
+        "sleep_story",
+        "adventure_story",
+        "free_story",
+      ].includes(turnContext.intent)
+    ) {
+      parts.push(
+        `本轮背景（绝不明说）：主回答会讲一个故事。一句温暖的引导语没问题（如「好呀，故事时间到啦，把耳朵竖起来咯……」），但绝不自己开始或预告故事内容。`,
+      );
+    }
+    return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
+  }
+
+  /**
+   * 串行链路 handoff（方案 B）：filler 原文已在主模型生成前播报完毕，
+   * 产出独立 system 消息，由调用方 splice 到本轮 user 消息前注入——
+   * 离生成点最近，recency 最强（实机事故：埋在长 system prompt 中段的
+   * 一句英文禁令压不住人设段/档案段对「语气词+孩子名开场」的诱导，
+   * 主回答屡屡以「呀，贝果……」再承接开场）。
+   * 注入前清洗：去换行/多余空白、截断 100 字，防小模型产出污染指令位。
+   */
+  buildFillerHandoffMessage(fillerText: string): LlmMessage {
+    const sanitized = fillerText.replace(/\s+/g, " ").trim().slice(0, 100);
+    return {
+      role: "system",
+      content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。请从它自然接续：
+1. 直接从实质内容起句——第一句话就必须回应孩子说的事本身。
+2. 不要以「呀」「嗯」「哦」等语气词加再承接开场，也不要以孩子的名字开头。
+3. 不要重复或换写承接语已经表达过的意象、情绪或内容。
+好例（承接语是「去公园玩啦，听起来就让人觉得好开心呀……」）：「公园里最好玩的是什么呀？滑梯还是秋千？」
+坏例：「呀，去公园玩听起来好开心呢」——语气词开场加复述承接语，全踩。`,
+    };
   }
 
   /**
@@ -281,21 +623,14 @@ Child: I can draw a cat → Wow, drawing a cat sounds lovely!`;
         ? "孩子的回答偏离了当前互动：先接住孩子的话题，再自然引回当前互动问题；只引回这一次，不责怪孩子。"
         : "自然接住孩子的想法并鼓励表达，然后结束接话；后续故事原文会由系统继续播报，不要再提问。";
 
-    const systemPrompt = `你是儿童互动冒险故事中的角色接话层，只负责对孩子刚刚的回答作短暂回应。
-
-角色设定：
-${params.characterPersona}
-
-当前互动问题：
-${params.segmentText}
-
-硬约束：
-1. 只输出 1-2 句口语化中文，符合角色性格与口癖，适合直接语音播报。
-2. 禁止续写、改写或剧透主线，不确认孩子编出的新剧情，也不增加新人物、新场景或新任务。
-3. 禁止连续追问；禁止批评、纠正、说教或否定孩子。
-4. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
-5. 若孩子表达不适宜内容，只说「我们先回到故事里，好吗？」，不要复述不适宜内容。
-6. ${redirectRule}`;
+    const systemPrompt = this.promptRegistry.render(
+      "adventure_interaction_system",
+      {
+        characterPersona: params.characterPersona,
+        segmentText: params.segmentText,
+        redirectRule,
+      },
+    );
 
     return [
       { role: "system", content: systemPrompt },
@@ -317,7 +652,10 @@ ${params.segmentText}
    * 构建儿童对话 prompt
    * @param asrText 当前用户输入
    * @param history 同设备同模式的最近对话历史
-   * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板
+   * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板、
+   * 设备角色（characterKey → 人设段落，让模型始终以该角色自居）。
+   * filler 衔接（handoff）不在此处：由 buildFillerHandoffMessage 产出
+   * 独立 system 消息，调用方贴到本轮 user 消息前注入（方案 B）。
    */
   buildEnglishTutorPrompt(
     asrText: string,
@@ -327,42 +665,36 @@ ${params.segmentText}
         name?: string | null;
         birthday?: string | null;
         englishName?: string | null;
+        gender?: string | null;
       };
       promptTemplate?: string;
       mode?: string;
-      conversationModeKey?: string;
+      characterKey?: string;
     },
   ): LlmMessage[] {
     const childProfile = options?.childProfile;
     const promptTemplate = options?.promptTemplate;
 
     const childProfileSection = this.buildChildProfileSection(childProfile);
+    // 人设必须恒在：缺省/未知 characterKey 一律回落 elly，杜绝匿名或
+    // 未建档设备下主模型编造身份（实机事故：大模型自称「小暖」并经
+    // 历史消息自我强化）
+    const persona = this.promptRegistry.getPersona(options?.characterKey);
+    const personaSection =
+      `Character identity (absolute, second only to child safety rules) — you ARE this character, a real friend of the child, not an AI assistant:\n${persona}\n` +
+      `Your name comes from this identity. If any earlier assistant message in the conversation history used a different name or identity, that was a mistake: never repeat it, and use your real identity from now on.`;
 
-    const englishTutorRules = `You are a friendly English-speaking AI companion for Chinese children aged 4-10.
-Your goal is to help kids practice spoken English in a fun, encouraging, and safe way.
+    const englishTutorRules = this.promptRegistry.getTemplate(
+      "main_english_tutor_rules",
+    );
 
-Rules:
-1. Reply in English only, using simple words and short sentences suitable for children.
-2. Keep responses concise (1-3 sentences, ideally under 30 words) so they are easy to repeat.
-3. Be warm, patient, and encouraging. Praise effort.
-4. If the child says something in Chinese, gently guide them to say it in English.
-5. If the child's English has mistakes, correct them gently by repeating the correct form.
-6. Never use content that is scary, violent, or inappropriate for children.
-7. Have an open English conversation about the child's interests and everyday life. Introduce variety and do not repeat the same examples in every reply.
-8. Ask relevant, engaging questions that encourage the child to respond in English, but do not force a fixed topic.
-9. If the child changes the subject, follow their lead naturally while keeping the conversation in simple English.
-10. The child has just heard a short warm acknowledgment of what they said (played by a separate fast-response channel). Do NOT repeat greetings or acknowledgments (e.g. "Oh, you like...") — go straight into your reply content so the two parts sound like one natural utterance.`;
+    const freeChatRules = this.promptRegistry.getTemplate(
+      "main_free_chat_rules",
+    );
 
-    const freeChatRules = `You are a warm, safe companion for a young child. Have a natural free chat, not an English lesson.
-
-Rules:
-1. Reply in the same language the child just used, and answer the child's current question directly before adding anything else.
-2. Keep the reply warm, concise, age-appropriate, and relevant; do not force a question or change the topic.
-3. Never turn the conversation into English practice unless the child explicitly asks for it.
-4. When child_memories are provided, they are current trusted facts: use the active remembered value over conflicting statements in older conversation history.
-5. The child has already heard a short acknowledgment from a separate fast-response channel. Do not repeat it; go straight into the answer.`;
-
-    const storyModeRules = `You are a warm, safe storyteller for a young child. Follow the provided story-mode instruction exactly, including its requested language and interaction style. Do not turn the story into an English lesson or introduce textbook questions. The child has already heard a short acknowledgment from a separate fast-response channel, so do not repeat it.`;
+    const storyModeRules = this.promptRegistry.getTemplate(
+      "main_story_mode_rules",
+    );
 
     // L3 安全兜底：常驻大模型 system prompt，L1/L2 失效时的最后防线
     const childSafetyRules = `Child safety rules (always apply, highest priority):
@@ -393,7 +725,7 @@ Rules:
       ? `${promptTemplate}\n\n${rulesSection}`
       : rulesSection;
 
-    const systemPrompt = [childProfileSection, templateSection]
+    const systemPrompt = [personaSection, childProfileSection, templateSection]
       .filter((section) => section.length > 0)
       .join("\n\n");
 
@@ -414,28 +746,85 @@ Rules:
     name?: string | null;
     birthday?: string | null;
     englishName?: string | null;
+    gender?: string | null;
   }): string {
     if (!childProfile) {
       return "";
     }
 
-    const name = childProfile.name || "the child";
-    const birthday = childProfile.birthday || "not provided";
-    const englishName = childProfile.englishName || "not provided";
-
-    if (
-      !childProfile.name &&
-      !childProfile.birthday &&
-      !childProfile.englishName
-    ) {
+    const { name, birthday, englishName, gender } = childProfile;
+    if (!name && !birthday && !englishName && !gender) {
       return "";
     }
 
-    return `Child Profile:
-- Name: ${name}
-- Birthday: ${birthday}
-- English Name: ${englishName}
+    const lines: string[] = [];
+    if (name) lines.push(`- Name: ${name}`);
+    if (englishName) lines.push(`- English name: ${englishName}`);
+    const age = LlmService.ageFromBirthday(birthday);
+    if (age !== null) lines.push(`- Age: ${age} years old`);
+    if (birthday) lines.push(`- Birthday: ${birthday}`);
+    if (gender === "male") {
+      lines.push("- Gender: boy (he/him; 中文用「他」)");
+    } else if (gender === "female") {
+      lines.push("- Gender: girl (she/her; 中文用「她」)");
+    }
 
-Please address the child using their name or English name when appropriate.`;
+    return (
+      `Child Profile (you know this child well — you are their close friend):\n${lines.join("\n")}\n\n` +
+      `Address the child naturally by their English name or name, choose words and topics suitable for their age, ` +
+      `and weave what you know about them into the conversation like a real friend — without reciting this profile back.`
+    );
+  }
+
+  /** 由生日（YYYY-MM-DD）换算年龄；格式非法或结果越界（0-18 外）返回 null */
+  static ageFromBirthday(birthday?: string | null): number | null {
+    if (!birthday || !/^\d{4}-\d{2}-\d{2}$/.test(birthday)) {
+      return null;
+    }
+    const birth = new Date(`${birthday}T00:00:00Z`);
+    if (Number.isNaN(birth.getTime())) {
+      return null;
+    }
+    const now = new Date();
+    let age = now.getUTCFullYear() - birth.getUTCFullYear();
+    const monthDiff = now.getUTCMonth() - birth.getUTCMonth();
+    if (
+      monthDiff < 0 ||
+      (monthDiff === 0 && now.getUTCDate() < birth.getUTCDate())
+    ) {
+      age -= 1;
+    }
+    return age >= 0 && age <= 18 ? age : null;
+  }
+
+  /**
+   * filler 用一行精简档案（如「名叫 Amy，5 岁，女孩」）：
+   * 与主模型 buildChildProfileSection 同源，保证大小模型称呼一致。
+   * 无任何有效字段时返回空串（调用方省略该段）。
+   */
+  static buildChildBrief(childProfile?: {
+    name?: string | null;
+    birthday?: string | null;
+    englishName?: string | null;
+    gender?: string | null;
+  }): string {
+    if (!childProfile) {
+      return "";
+    }
+    const parts: string[] = [];
+    const displayName = childProfile.englishName || childProfile.name;
+    if (displayName) {
+      parts.push(`名叫 ${displayName}`);
+    }
+    const age = LlmService.ageFromBirthday(childProfile.birthday);
+    if (age !== null) {
+      parts.push(`${age} 岁`);
+    }
+    if (childProfile.gender === "male") {
+      parts.push("男孩");
+    } else if (childProfile.gender === "female") {
+      parts.push("女孩");
+    }
+    return parts.join("，");
   }
 }

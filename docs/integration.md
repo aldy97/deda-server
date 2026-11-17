@@ -46,12 +46,33 @@
 | 微信登录换 JWT     | `POST /users/login`                                                                                                              | `pages/login/login.ts`                                                                                 | `src/modules/users/users.controller.ts`                                                                                        | code 来自 `wx.login`                |
 | 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序 |
 | 查询设备当前配置   | `GET /device-configs/:deviceId/current`                                                                                          | `pages/device-list/device-list.ts` 等                                                                  | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 多页面共用                          |
-| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | `pages/switch-mode/switch-mode.ts`                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 顶层模式仅 `free_chat / english_chat` |
-| 选择自由对话子模式 | `GET /conversation-modes?categoryKey=free_chat`<br>`POST /device-configs/:deviceId/mode`                                         | `pages/choose-free-chat-mode/choose-free-chat-mode.ts`                                                 | `src/modules/conversation-modes/conversation-modes.controller.ts`<br>`src/modules/device-configs/device-configs.controller.ts` | 子页提交完整载荷（mode+conversationModeKey）；`english_chat` 无子模式 |
+| 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | （小程序入口已下线）                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 设备 mode 仅 `free_chat / english_chat` |
 | 查询对话记录       | `GET /conversations?page&pageSize&deviceId`                                                                                      | `pages/chat-history/chat-history.ts`                                                                   | `src/modules/conversations/conversations.controller.ts`                                                                        | 一条 item=一条消息（turnId 关联成轮）；page=1 为最新一页，页内时间正序（顶老底新），前端勿再自行反转；删除接口已移除；URL 无语境参数时前端按设备当前配置推导过滤（后端只认显式传参、不读配置） |
 | 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案；`gender` 可选值为 `male/female`，`null` 表示未设置或清除，PATCH 省略时保留原值 |
 | 学习全览 MVP       | `GET /learning-stats/dashboard`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/topics`<br>`GET /learning-stats/timeline` | `pages/learning-data/learning-data.ts`                                                                 | `src/modules/learning-stats/learning-stats.controller.ts`<br>`src/modules/learning-stats/learning-stats.service.ts`            | 仪表盘/趋势/主题/时间线             |
-| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前顶层模式过滤；自由对话可继续按子模式过滤；topics 按 `mode + conversationModeKey` 全量分组 |
+| 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前模式过滤；topics 按 `mode` 全量分组 |
+| 设备状态/控制      | `GET /devices/:id/status`<br>`POST /devices/:id/control`                                               | 设备详情/控制页                                                                                         | `src/modules/devices/devices.controller.ts`<br>`src/modules/device-link/device-link.service.ts`                                  | 2026-11 起接机芯厂新 MQTT 协议（`docs/vendor-mqtt-protocol.md`）：status 为真实值（`online/offline`，`battery/volume/isCharging` 可 `null`，前端需容错）；`volume` 为设备真实音量，`control` 下发后回读 status 即可确认生效；control 仅 `volume` 真实下发，其余动作协议待补 |
+
+## 设备配网与认领链路（BLE + client-api，2026-11 起）
+
+```
+小程序 BLE 配网(status=0)
+  → 设备连 WiFi → 设备直连本服务 POST /client/user/user/loginMac
+    （校验 macKey 派生密码；建档 Device(deviceId=小写MAC)；
+      响应头 Authorization 返回 LLM_ADAPTER_API_KEY；写入认领窗口）
+  → 小程序轮询 GET /devices/provision-candidates
+    （窗口内未绑定当前用户的设备；恰 1 台自动绑，多台用户选）
+  → POST /devices/bind {deviceId: mac} 完成绑定
+    （响应含 hasChildProfile：设备当前是否已有孩子档案，与是否本人绑过无关；
+      为 false 时小程序直接 redirectTo 孩子信息填写页 owner-info?from=bind）
+  → 设备每轮对话前后调 POST /client/bot/bot/start|stop 登记实例
+```
+
+- `client-api` 三个接口是**设备固件直连**本服务的 HTTP 接口（机芯厂《设备端接口文档》v1.1），无 JWT，不进入统一响应信封（设备只认 `code:200`），不进 Swagger；实现：`src/modules/client-api/`。
+- 设备业务 ID 与 MAC 同值（十二位小写）：百度 RTC 回调 `deviceid`、`loginMac` 上报、`devices/bind` 三方收敛，`llm-adapter` resolveDevice 按 deviceId/macAddress 双列归一化匹配，换手机重绑数据连续。
+- 认领窗口：Redis sorted set `provision:recent`，默认 120 秒（`PROVISION_CLAIM_WINDOW_SEC`）；无 REDIS_URL 时内存降级，多实例部署必须配 Redis。
+- MQTT 旧公共主题 `loginMac` 已被机芯厂新协议取消，Device 建档以 HTTP `loginMac` 为唯一入口；`device-link` 保留旧监听仅兼容老固件。
+- 密钥：`DEVICE_LOGIN_MAC_KEY`（与固件共享，不落仓库）。
 
 ## 设备排序契约
 
@@ -63,19 +84,85 @@
 
 ## 设备配置入参校验
 
-`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` / `conversationModeKey` 做服务端强校验：
+`POST /device-configs/:deviceId/mode` 与 `POST /device-configs/:deviceId/apply` 对 `mode` 做服务端强校验：
 
-| mode | conversationModeKey |
-| ---- | ------------------- |
-| `free_chat` | **必填**，须为启用中的 free_chat 分类子模式 |
-| `english_chat` | **禁止**，必须省略或为 `null` |
+- `400`：mode 不在 `DEVICE_MODES` 枚举内。
+- 无配置设备默认 `free_chat`。
 
-错误语义：
+前端对齐：提交 `mode` 字段即可（`free_chat` / `english_chat`）；mode 已平级化，不再有子模式概念，小程序侧原切换页（switch-mode / choose-free-chat-mode）已下线。
 
-- `400`：mode 不在枚举内、违反上表必填/禁止规则、`conversationModeKey` 不存在/未启用/分类与 mode 不匹配。
-- 无配置设备默认 `free_chat + free_chat_casual`。
+## 音色/语速配置
 
-前端对齐：`pages/switch-mode/switch-mode.ts`、`pages/choose-free-chat-mode/choose-free-chat-mode.ts` 需按上表提交；英语对话直接提交 `mode=english_chat`，不再进入子模式或教材选择页。
+### 查询设备当前音色/语速
+
+`GET /device-configs/:deviceId/voice`
+
+成功返回 **200**。
+
+请求：JWT Bearer header，`:deviceId` 为业务 deviceId（十二位小写 MAC）。
+
+响应 `data` 字段：
+
+| 字段           | 类型               | 说明                                                         |
+| -------------- | ------------------ | ------------------------------------------------------------ |
+| deviceId       | string             | 设备业务 ID                                                  |
+| vcn            | string \| null     | 当前期望音色 timbreId；未设置时为 null                       |
+| speechRate     | string \| null     | 当前期望语速档位（`slow` / `normal` / `fast`）；未设置时为 null |
+| spd            | number \| null     | speechRate 对应的 spd 倍数；未设置或映射缺失时为 null        |
+| catalog        | array              | 可用音色列表，每项 `{ timbreId, name, language }`；目录为空时返回 `[]` |
+| available      | boolean            | 音色切换是否可用（`VOICE_CATALOG_JSON` 非空 且 目录内有至少一个 TRAINED 音色） |
+| canApplyLive   | boolean            | 当前能否实时下发到活跃实例；false 时 POST 必然返回 `applied="deferred"` |
+| reason         | string \| null     | `available=false` 或 `canApplyLive=false` 的原因（取值见 `VoiceApplyBlockReason`） |
+
+### 设置音色/语速
+
+`POST /device-configs/:deviceId/voice`
+
+成功返回 **201**（与同 controller 的 `/mode`、`/apply` 一致，Nest `@Post` 默认状态码）。
+
+请求体（JSON）：
+
+| 字段       | 类型   | 必填 | 说明                                                    |
+| ---------- | ------ | ---- | ------------------------------------------------------- |
+| vcn        | string | 否   | 百度 timbreId（音色 ID）                                |
+| speechRate | string | 否   | 语速档位：`slow` / `normal` / `fast`                    |
+
+**至少提供一个字段，否则返回 400**。
+
+响应 `data` 字段：
+
+| 字段       | 类型               | 说明                                                         |
+| ---------- | ------------------ | ------------------------------------------------------------ |
+| deviceId   | string             | 设备业务 ID                                                  |
+| vcn        | string \| null     | 设置的音色 ID（与入参一致）                                  |
+| speechRate | string \| null     | 设置的语速档位（与入参一致）                                 |
+| spd        | number \| null     | speechRate 映射后的 spd 倍数                                 |
+| applied    | string             | `live` / `deferred` / `noop`（见下方语义）                   |
+| reason     | string \| null     | `applied !== "live"` 时的原因（取值见 `VoiceApplyBlockReason`） |
+
+### applied 三种取值语义
+
+| 取值       | 含义                                                   |
+| ---------- | ------------------------------------------------------ |
+| `live`     | 已对当前活跃百度实例调用 switchSceneRole 并收到 2xx    |
+| `deferred` | 期望值已落库，但本次未下发；等下一轮设备 start 后自动追平 |
+| `noop`     | 无需操作（期望值为空）。POST 至少带一个字段、且 `speechRate` 有 `normal` 兜底，因此 POST 实际不会返回 `noop`；该取值只出现在设备 start 后的追平路径 |
+
+### 错误口径
+
+| 状态码 | 条件                                                         |
+| ------ | ------------------------------------------------------------ |
+| 400    | `vcn` 和 `speechRate` 都未提供；`vcn` 不在音色目录内（目录为空时任何 `vcn` 都算不在）；`speechRate` 不是 `slow`/`normal`/`fast`；请求体含未声明字段 |
+| 401    | 未提供 JWT 或 token 无效/过期                                |
+| 403    | 当前用户未绑定该设备                                         |
+
+### 前端对齐
+
+- 小程序进入音色设置页先调 `GET /device-configs/:deviceId/voice`，用 `catalog` 渲染音色列表、用 `vcn`/`speechRate` 回填当前选中项。
+- 提交时调 `POST /device-configs/:deviceId/voice`，传入用户选择的 `vcn` 和/或 `speechRate`。
+- `applied="deferred"` 且 `reason` 非空时，应展示文案提示用户「将在下次对话开始时生效」。
+- `available=false` 时隐藏或禁用音色选择 UI（当前目录为空，不展示空列表）。
+- 字段命名 camelCase，响应信封 `{ code, message, data }`，`code=0` 为成功。
 
 ## 百度 RTC 直连主链路（当前主链路，2026-11 起）
 
@@ -94,9 +181,9 @@
 设备 ⇄(MQTT) 设备管理：电量、音量、版本、睡眠、重启、OTA（协议见机芯厂 MQTT 文档）
 ```
 
-- 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"user":"deda-toy","thinking":{"type":"disabled"}}`。
+- 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"deviceid":"<设备唯一标识>","thinking":{"type":"disabled"}}`。
 - 适配层约定：容忍 `llm_eb` 注入的未知 body 字段；`llm_sys` 注入的 system 消息保留在最前，动态 prompt 追加其后；`model` 不校验、原样回显；SSE 帧为 role 帧 → content 增量帧 → `finish_reason:"stop"` → `data: [DONE]`。
-- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份：请求体 `user` 字段（机芯厂约定 = 设备 MAC，重启/烧录/OTA 不变），或显式 header `X-Deda-Device-Id`（优先）；两者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
+- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份三级识别链：显式 header `X-Deda-Device-Id`（最高优先）→ 请求体 `deviceid`（机芯厂正式约定，与小程序家长绑定编号一致，重启/烧录/OTA 不变）→ 请求体 `user` 字段（旧约定兼容 fallback）；三者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
 - **能力对齐矩阵**（老链路 vendor WS → 新链路 llm-adapter）：
 
 | 能力 | 老链路 | 新链路 | 说明 |
@@ -113,10 +200,12 @@
 | filler 打哈哈首响 | ✅ | ✅ | SSE 前导 chunk，LLM_ADAPTER_FILLER=false 可关 |
 | 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
 | 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
+| 哄睡定时家长服务通知 | ❌ | ✅ | 一次性订阅消息额度池，到点全推绑定家长，见「哄睡服务通知推送」节 |
 | 主动播报（提醒/家长推送） | ✅ WS | 待确认 | 走百度服务端 API（interrupt/extra_msg），AK/SK 账号归属待与机芯厂确认 |
 
 - 延时预算：百度官方口径「第三方模型首句延时 + 约 1.0s」；立项书验收甲方处理段 ≤0.8s，因此上游调用强制 `thinking: disabled` + 流式。
 - 联调脚本：`scripts/simulate-baidu-llm.sh`（冒烟）、`scripts/mock-baidu-dialog.js`（17 轮 edge case + 意图/哄睡/冒险场景，`DEVICE_ID` 触发设备链路）。
+- 冒险内容版本化对机芯厂／小程序**零契约变化**：`vendor:text:out` DTO、`AdventureReply.action` 取值、chunk 上传时序均不变。变化只发生在服务端内部——孩子的进度锁定到具体内容版本，admin 发布新版或 retire 一集都不会改变正在播放那一轮的输出；内容侧故障时服务端自行平移到下一集或落到自由故事链路，孩子始终有回复。新增的 `failed_over` / `abandoned` 是内部进度状态，不出现在任何对外响应与家长报告 prompt 中。
 
 ## 机芯厂 WS 流式协议（vendor namespace）【备选链路 / backup】
 
@@ -210,6 +299,21 @@
 - `song`/`mixed` 在儿歌内容源上线前降级为哄睡故事；`durationMinutes` 仅落库保存，暂不控制播放时长。定时推送不写 `messages` 表，哄睡统计口径待 §3.4 单独决策。
 - 语音改配置（sleep_config 意图）：孩子说「以后睡前都听儿歌」「哄睡改成20分钟」「明天九点半哄我睡觉」等修改含义指令时，走独立短链路——小模型抽取字段，白名单校验后确定性话术确认，不进冒险门禁与大模型主链路。孩子语音只能改 `contentType`（`story/song/mixed`）、`durationMinutes`（∈ {10,15,20,25,30}，语音改时长自动置 `durationMode=custom`）、`sleepTime`（`HH:mm`）；`enabled`/`forceSleep` 仅家长端可改。指令一律持久化到 `sleep_configs`（家长端可见），非法值/解析失败回复兜底话术、不落库。该轮 user/assistant 消息 `mode=free_chat`，assistant `rawPayload.sleepConfig` 记录实际修改字段（未生效为 null），回复 `context: { sleepConfig: <field|null> }`。
 
+## 哄睡服务通知推送
+
+- 机制：微信一次性订阅消息。小程序端在用户手势上调 `wx.requestSubscribeMessage` 后上报 `POST /push-subscriptions`（契约见 MINI_PROGRAM_API.md §11）；后端按「用户 + 模板」维护额度池（`push_subscriptions` 表），accept 累加、reject 清零。
+- 触发：定时哄睡 claim 成功后（`lastTriggeredDate` 抢占、每设备每天最多一次），向设备当前所有绑定家长各消耗 1 点额度推送一次，与设备在线状态解耦（设备离线时 WS 下行跳过，服务通知仍推，作为家长的兜底提醒）。
+- 解绑/wipe 语义：发送时按 `user_device_bindings` 当前关系取人，关系解除即不再推送，无需按设备清理订阅表。
+- 失败处理：errcode 43101（额度耗尽）→ 清零并标记 `exhausted`；40001/42001（token 失效）→ 强制刷新 access_token 重试一次；其他错误仅 warn 日志、不抛出、不影响哄睡内容下发。
+- 开关与配置：`PUSH_NOTIFICATIONS_ENABLED=true` 开启（默认关）；`WECHAT_TMPL_SLEEP_REMINDER` 为模板 ID 白名单（未配置时上报接口 400、推送不发送）；access_token 走 Redis 缓存（TTL 7000s）+ 进程内 single-flight。
+
+## Prompt 管理（dashboard 后台编辑）
+
+- 机制：全部系统 prompt / 规则段 / 话术模板集中在 prompt registry（17 个 key），运行时按「DB published → 代码默认值 → 抛错」回落；首次上线行为零变化。详见 `docs/prompt-registry.md`。
+- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）与写策略；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
+- 边界：原「子模式模板」归 `conversation_modes.promptTemplate`；该表已随 mode 平级化迁移 `20261113141812_remove_conversation_mode_key` 删除，子模式模板概念一并废弃，可运营编辑的 prompt 文本现在只有 prompt registry 一个入口。儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。
@@ -226,7 +330,7 @@
 ## 常见坑
 
 - **CORS**：后端 `CORS_ORIGIN=*` 仅用于开发；生产需改为小程序域名。
-- **字段命名**：后端用 camelCase（如 `deviceId`、`conversationModeKey`），数据库存储也是 camelCase。
+- **字段命名**：后端用 camelCase（如 `deviceId`、`mode`），数据库存储也是 camelCase。
 - **时间格式**：后端返回 ISO 8601 字符串（如 `2026-09-25T09:11:00.657Z`）。
 - **401/403**：token 过期或设备不属于当前用户；前端应重新登录或提示无权限。
 - **代理配置**：小程序开发版直连 `127.0.0.1:3000`；真机需 HTTPS 域名或开启「不校验合法域名」。
@@ -234,7 +338,7 @@
 
 ## 单次联调最小文件集示例
 
-以「切换自由对话子模式」为例：
+以「查看设备当前对话模式」为例：
 
-- 后端：`src/modules/device-configs/device-configs.controller.ts`、`src/modules/device-configs/device-configs.service.ts`、`src/modules/conversation-modes/conversation-modes.controller.ts`。
-- 前端：`deda-wechat-app/miniprogram/pages/choose-free-chat-mode/choose-free-chat-mode.ts`、`deda-wechat-app/miniprogram/api/api.ts`。
+- 后端：`src/modules/device-configs/device-configs.controller.ts`、`src/modules/device-configs/device-configs.service.ts`。
+- 前端：`deda-wechat-app/miniprogram/api/api.ts`、`deda-wechat-app/miniprogram/pages/device-control/device-control.ts`。

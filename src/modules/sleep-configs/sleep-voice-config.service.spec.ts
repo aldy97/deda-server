@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { SleepVoiceConfigService } from "./sleep-voice-config.service";
 import { SleepConfigsService } from "./sleep-configs.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
 describe("SleepVoiceConfigService", () => {
   let service: SleepVoiceConfigService;
@@ -11,6 +12,7 @@ describe("SleepVoiceConfigService", () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        PROMPT_REGISTRY_PROVIDER,
         SleepVoiceConfigService,
         {
           provide: SleepConfigsService,

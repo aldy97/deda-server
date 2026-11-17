@@ -10,11 +10,6 @@ export class ApplyDeviceConfigDto {
   @IsIn(DEVICE_MODES)
   mode: string;
 
-  @ApiPropertyOptional({ description: "自由对话子模式 key" })
-  @IsOptional()
-  @IsString()
-  conversationModeKey?: string;
-
   @ApiPropertyOptional({ description: "CEFR 等级" })
   @IsOptional()
   @IsString()

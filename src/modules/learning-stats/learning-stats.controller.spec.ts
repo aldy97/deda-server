@@ -78,7 +78,6 @@ describe("LearningStatsController", () => {
         undefined,
         {
           mode: undefined,
-          conversationModeKey: undefined,
         },
       );
       expect(result).toBe(dashboard);
@@ -96,7 +95,6 @@ describe("LearningStatsController", () => {
         "week",
         {
           mode: undefined,
-          conversationModeKey: undefined,
         },
       );
     });
@@ -121,7 +119,6 @@ describe("LearningStatsController", () => {
         14,
         {
           mode: undefined,
-          conversationModeKey: undefined,
         },
       );
       expect(result).toBe(trend);
@@ -145,7 +142,6 @@ describe("LearningStatsController", () => {
         7,
         {
           mode: undefined,
-          conversationModeKey: undefined,
           scope: "all",
         },
       );
@@ -211,7 +207,6 @@ describe("LearningStatsController", () => {
           pageSize: 10,
           range: "week",
           mode: undefined,
-          conversationModeKey: undefined,
         },
       );
       expect(result).toBe(page);

@@ -33,9 +33,6 @@ describe("LearningStatsService", () => {
               count: jest.fn(),
               groupBy: jest.fn(),
             },
-            conversationMode: {
-              findMany: jest.fn().mockResolvedValue([]),
-            },
           },
         },
       ],
@@ -239,7 +236,6 @@ describe("LearningStatsService", () => {
           makeUserMessage("m2-u", "t2", "3d ago free chat", {
             spokeAt: threeDaysAgo,
             mode: "free_chat",
-            conversationModeKey: "free_chat_casual",
           }),
           makeUserMessage("m3-u", "t3", "40d ago", { spokeAt: fortyDaysAgo }),
         ])
@@ -248,7 +244,6 @@ describe("LearningStatsService", () => {
           makeUserMessage("m2-u", "t2", "3d ago free chat", {
             spokeAt: threeDaysAgo,
             mode: "free_chat",
-            conversationModeKey: "free_chat_casual",
           }),
         ]);
 
@@ -443,14 +438,12 @@ describe("LearningStatsService", () => {
 
       await service.getDailyTrend("user-001", "dev-001", 7, {
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             mode: "free_chat",
-            conversationModeKey: "free_chat_casual",
           }),
         }),
       );
@@ -471,7 +464,6 @@ describe("LearningStatsService", () => {
         makeUserMessage("m2-u", "t2", "How are you"),
         makeUserMessage("m3-u", "t3", "Let's chat", {
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       ]);
 
@@ -494,7 +486,7 @@ describe("LearningStatsService", () => {
       );
       expect(freeChat).toEqual(
         expect.objectContaining({
-          id: "free_chat|free_chat_casual",
+          id: "free_chat",
           count: 1,
           isActive: false,
         }),
@@ -525,51 +517,31 @@ describe("LearningStatsService", () => {
       expect(adventure.avgScore).toBe(0);
     });
 
-    it("should group free_chat by sub-mode with resolved names and no score", async () => {
+    it("should group free_chat messages into a single mode topic with no score", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue(mockBindings);
       prisma.deviceConfig.findMany.mockResolvedValue([
         {
           deviceId: "device-uuid-001",
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         },
       ]);
       prisma.message.findMany.mockResolvedValue([
         makeUserMessage("m1-u", "t1", "hello there my friend", {
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
         makeUserMessage("m2-u", "t2", "once upon a time there was", {
           mode: "free_chat",
-          conversationModeKey: "free_chat_roleplay",
         }),
-      ]);
-      prisma.conversationMode.findMany.mockResolvedValue([
-        { key: "free_chat_casual", name: "自由闲聊" },
-        { key: "free_chat_roleplay", name: "角色扮演" },
       ]);
 
       const result = await service.getTopicBreakdown("user-001");
 
-      expect(result).toHaveLength(2);
-      const casual = result.find(
-        (t) => t.conversationModeKey === "free_chat_casual",
-      );
-      const roleplay = result.find(
-        (t) => t.conversationModeKey === "free_chat_roleplay",
-      );
-      expect(casual).toEqual(
+      expect(result).toHaveLength(1);
+      const topic = result.find((t) => t.mode === "free_chat");
+      expect(topic).toEqual(
         expect.objectContaining({
-          conversationModeName: "自由闲聊",
           avgScore: null, // 自由对话不评分
           isActive: true,
-        }),
-      );
-      expect(roleplay).toEqual(
-        expect.objectContaining({
-          conversationModeName: "角色扮演",
-          avgScore: null,
-          isActive: false,
         }),
       );
     });
@@ -821,7 +793,6 @@ describe("LearningStatsService", () => {
       prisma.message.findMany.mockResolvedValue([
         msg("m2", "t2", "free chat", new Date("2026-09-20T10:00:00"), {
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       ]);
 
@@ -829,7 +800,6 @@ describe("LearningStatsService", () => {
         page: 1,
         pageSize: 10,
         mode: "free_chat",
-        conversationModeKey: "free_chat_casual",
       });
 
       expect(prisma.message.findMany).toHaveBeenCalledWith(
@@ -837,7 +807,6 @@ describe("LearningStatsService", () => {
           where: expect.objectContaining({
             role: "user",
             mode: "free_chat",
-            conversationModeKey: "free_chat_casual",
           }),
         }),
       );
@@ -855,7 +824,6 @@ describe("LearningStatsService", () => {
           mode: "english_chat",
         },
       ]);
-      prisma.conversationMode.findMany.mockResolvedValue([]);
     });
 
     it("should return insights based on dashboard and topics", async () => {
@@ -906,7 +874,6 @@ describe("LearningStatsService", () => {
           mode: "english_chat",
         },
       ]);
-      prisma.conversationMode.findMany.mockResolvedValue([]);
     });
 
     it("should return health score with dimensions and suggestion", async () => {

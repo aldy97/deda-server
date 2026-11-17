@@ -18,7 +18,7 @@ export class ConversationsService {
       page?: number | string;
       pageSize?: number | string;
       deviceId?: string;
-      conversationModeKey?: string;
+      mode?: string;
     },
   ) {
     const page = Math.max(1, Number(query.page) || 1);
@@ -103,7 +103,7 @@ export class ConversationsService {
   private buildWhereClause(
     query: {
       deviceId?: string;
-      conversationModeKey?: string;
+      mode?: string;
     },
     targetInternalIds: string[],
   ): any {
@@ -112,9 +112,9 @@ export class ConversationsService {
     if (targetInternalIds.length > 0) {
       where.deviceId = { in: targetInternalIds };
     }
-
-    if (query.conversationModeKey)
-      where.conversationModeKey = query.conversationModeKey;
+    if (query.mode) {
+      where.mode = query.mode;
+    }
 
     return where;
   }

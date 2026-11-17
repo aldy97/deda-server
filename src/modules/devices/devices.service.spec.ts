@@ -1,9 +1,13 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { DevicesService } from "./devices.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { RedisService } from "@/common/redis/redis.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
+import { DeviceLinkService } from "../device-link/device-link.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
+import { PROVISION_RECENT_KEY } from "../client-api/client-api.constants";
 import { BindDeviceDto } from "./dto/bind-device.dto";
 import { DeviceControlDto } from "./dto/device-control.dto";
 import { WifiConfigDto } from "./dto/wifi-config.dto";
@@ -11,10 +15,11 @@ import { WifiConfigDto } from "./dto/wifi-config.dto";
 describe("DevicesService", () => {
   let service: DevicesService;
   let prisma: any;
-  let deviceStatusService: any;
-  let manufacturer: any;
+  let deviceLink: any;
+  let redis: { zRangeByScoreWithScores: jest.Mock };
 
   beforeEach(async () => {
+    redis = { zRangeByScoreWithScores: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DevicesService,
@@ -26,6 +31,9 @@ describe("DevicesService", () => {
               findUnique: jest.fn(),
               findMany: jest.fn(),
               create: jest.fn(),
+            },
+            childProfile: {
+              findUnique: jest.fn(),
             },
             userDeviceBinding: {
               findUnique: jest.fn(),
@@ -47,22 +55,105 @@ describe("DevicesService", () => {
           },
         },
         {
+          provide: DeviceLinkService,
+          useValue: {
+            getStatus: jest.fn(),
+            setVolume: jest.fn(),
+          },
+        },
+        {
           provide: ManufacturerService,
           useValue: {
             controlVolume: jest.fn(),
           },
+        },
+        { provide: RedisService, useValue: redis },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
         },
       ],
     }).compile();
 
     service = module.get<DevicesService>(DevicesService);
     prisma = module.get(PrismaService);
-    deviceStatusService = module.get(DeviceStatusService);
-    manufacturer = module.get(ManufacturerService);
+    deviceLink = module.get(DeviceLinkService);
   });
 
   it("should be defined", () => {
     expect(service).toBeDefined();
+  });
+
+  describe("provisionCandidates", () => {
+    const NOW = 1_800_000_000_000;
+
+    beforeEach(() => {
+      jest.spyOn(Date, "now").mockReturnValue(NOW);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("returns empty when no device came online recently", async () => {
+      const result = await service.provisionCandidates("user-1");
+      expect(result).toEqual({ devices: [] });
+      expect(redis.zRangeByScoreWithScores).toHaveBeenCalledWith(
+        PROVISION_RECENT_KEY,
+        NOW - 120_000,
+        NOW,
+      );
+      expect(prisma.device.findMany).not.toHaveBeenCalled();
+    });
+
+    it("returns candidates sorted by recency with macTail and ISO time", async () => {
+      redis.zRangeByScoreWithScores.mockResolvedValue([
+        { member: "aabbccddeeff", score: NOW - 10_000 },
+        { member: "90fe1de7a1ca", score: NOW - 5_000 },
+      ]);
+      prisma.device.findMany.mockResolvedValue([
+        { deviceId: "aabbccddeeff", bindings: [] },
+        { deviceId: "90fe1de7a1ca", bindings: [] },
+      ]);
+
+      const result = await service.provisionCandidates("user-1");
+
+      expect(result.devices).toEqual([
+        {
+          deviceId: "90fe1de7a1ca",
+          macTail: "e7a1ca",
+          lastSeenAt: new Date(NOW - 5_000).toISOString(),
+        },
+        {
+          deviceId: "aabbccddeeff",
+          macTail: "ddeeff",
+          lastSeenAt: new Date(NOW - 10_000).toISOString(),
+        },
+      ]);
+    });
+
+    it("excludes devices already bound to the current user", async () => {
+      redis.zRangeByScoreWithScores.mockResolvedValue([
+        { member: "aabbccddeeff", score: NOW - 10_000 },
+        { member: "90fe1de7a1ca", score: NOW - 5_000 },
+      ]);
+      prisma.device.findMany.mockResolvedValue([
+        { deviceId: "aabbccddeeff", bindings: [{ id: "binding-1" }] },
+        { deviceId: "90fe1de7a1ca", bindings: [] },
+      ]);
+
+      const result = await service.provisionCandidates("user-1");
+
+      expect(result.devices.map((d: any) => d.deviceId)).toEqual([
+        "90fe1de7a1ca",
+      ]);
+      expect(prisma.device.findMany).toHaveBeenCalledWith({
+        where: { deviceId: { in: ["aabbccddeeff", "90fe1de7a1ca"] } },
+        include: {
+          bindings: { where: { userId: "user-1" }, select: { id: true } },
+        },
+      });
+    });
   });
 
   describe("bind", () => {
@@ -77,6 +168,7 @@ describe("DevicesService", () => {
         id: "device-uuid-001",
         deviceId: "dev-001",
       });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.create.mockResolvedValue({ id: "binding-001" });
 
@@ -97,10 +189,15 @@ describe("DevicesService", () => {
           sortOrder: 0,
         },
       });
+      expect(prisma.childProfile.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+        select: { id: true },
+      });
       expect(result).toEqual({
         success: true,
         deviceId: "dev-001",
         alreadyBound: false,
+        hasChildProfile: false,
       });
     });
 
@@ -113,6 +210,7 @@ describe("DevicesService", () => {
         id: "device-uuid-002",
         deviceId: "dev-002",
       });
+      prisma.childProfile.findUnique.mockResolvedValue({ id: "profile-002" });
       prisma.userDeviceBinding.findUnique.mockResolvedValue({
         id: "binding-002",
       });
@@ -125,6 +223,71 @@ describe("DevicesService", () => {
         success: true,
         deviceId: "dev-002",
         alreadyBound: true,
+        hasChildProfile: true,
+      });
+    });
+
+    it("should retry the whole bind transaction on P2034 then succeed", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-005",
+      };
+
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-005",
+        deviceId: "dev-005",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.userDeviceBinding.findUnique.mockResolvedValue({
+        id: "binding-005",
+      });
+      prisma.$transaction.mockRejectedValueOnce({ code: "P2034" });
+
+      const result = await service.bind("user-001", dto);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-005",
+        alreadyBound: true,
+        hasChildProfile: false,
+      });
+    });
+
+    it("should not retry bind on non-P2034 errors", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-006",
+      };
+
+      prisma.$transaction.mockRejectedValueOnce({ code: "P2002" });
+
+      await expect(service.bind("user-001", dto)).rejects.toMatchObject({
+        code: "P2002",
+      });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("should report hasChildProfile=false when rebinding a device whose profile was never filled", async () => {
+      const dto: BindDeviceDto = {
+        deviceId: "dev-004",
+      };
+
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-004",
+        deviceId: "dev-004",
+      });
+      prisma.childProfile.findUnique.mockResolvedValue(null);
+      prisma.userDeviceBinding.findUnique.mockResolvedValue({
+        id: "binding-004",
+      });
+
+      const result = await service.bind("user-001", dto);
+
+      expect(prisma.userDeviceBinding.create).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-004",
+        alreadyBound: true,
+        hasChildProfile: false,
       });
     });
 
@@ -138,6 +301,7 @@ describe("DevicesService", () => {
         deviceId: "dev-003",
         deviceCode: "CODE123",
       });
+      prisma.childProfile.findUnique.mockResolvedValue({ id: "profile-003" });
       prisma.userDeviceBinding.findUnique.mockResolvedValue(null);
       prisma.userDeviceBinding.create.mockResolvedValue({ id: "binding-003" });
 
@@ -150,6 +314,7 @@ describe("DevicesService", () => {
         success: true,
         deviceId: "dev-003",
         alreadyBound: false,
+        hasChildProfile: true,
       });
     });
 
@@ -383,28 +548,156 @@ describe("DevicesService", () => {
   });
 
   describe("status", () => {
-    it("should return hardcoded status for wechat-app integration (TODO: replace with real MQTT status)", async () => {
+    const mockDevice = () =>
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-001",
+        deviceId: "dev-001",
+        macAddress: "AABBCCDDEEFF",
+      });
+
+    it("should return real online status from device-link cache", async () => {
+      mockDevice();
+      const lastSeenAt = Date.now() - 5000;
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 80,
+        volume: 50,
+        version: "1.2.3",
+        charging: true,
+        lastSeenAt,
+        online: true,
+      });
+
       const result = await service.status("dev-001");
 
-      expect(result).toMatchObject({
+      expect(deviceLink.getStatus).toHaveBeenCalledWith("AABBCCDDEEFF");
+      expect(result).toEqual({
         deviceId: "dev-001",
         status: "online",
-        battery: 78,
+        battery: 80,
+        volume: 50,
         isCharging: true,
+        lastActiveAt: new Date(lastSeenAt).toISOString(),
       });
-      expect(result.lastActiveAt).toBeDefined();
-      expect(deviceStatusService.getStatus).not.toHaveBeenCalled();
     });
 
-    it("should not call manufacturer status methods", async () => {
+    it("should expose volume so the mini program renders the real device volume", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 75,
+        volume: 80,
+        version: "1.0.7",
+        charging: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.volume).toBe(80);
+    });
+
+    it("should return null volume when the device never reported one", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: null,
+        volume: null,
+        version: null,
+        charging: null,
+        lastSeenAt: null,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.volume).toBeNull();
+    });
+
+    it("should return offline when device exceeds heartbeat window", async () => {
+      mockDevice();
+      const lastSeenAt = Date.now() - 60_000;
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 66,
+        volume: 50,
+        version: "1.2.3",
+        lastSeenAt,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.status).toBe("offline");
+      expect(result.battery).toBe(66);
+      expect(result.lastActiveAt).toBe(new Date(lastSeenAt).toISOString());
+    });
+
+    it("should return offline null status when device never reported", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: null,
+        volume: null,
+        version: null,
+        charging: null,
+        lastSeenAt: null,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result).toEqual({
+        deviceId: "dev-001",
+        status: "offline",
+        battery: null,
+        volume: null,
+        isCharging: null,
+        lastActiveAt: null,
+      });
+    });
+
+    it("should fall back to deviceId when macAddress is missing", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-001",
+        deviceId: "dev-001",
+        macAddress: null,
+      });
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "dev-001",
+        battery: null,
+        volume: null,
+        version: null,
+        lastSeenAt: null,
+        online: false,
+      });
+
       await service.status("dev-001");
 
-      expect(manufacturer.controlVolume).not.toHaveBeenCalled();
+      expect(deviceLink.getStatus).toHaveBeenCalledWith("dev-001");
+    });
+
+    it("should throw NotFoundException when device not found", async () => {
+      prisma.device.findUnique.mockResolvedValue(null);
+
+      await expect(service.status("dev-999")).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(deviceLink.getStatus).not.toHaveBeenCalled();
     });
   });
 
   describe("control", () => {
-    it("should return success with action", async () => {
+    const mockDevice = () =>
+      prisma.device.findUnique.mockResolvedValue({
+        id: "device-uuid-001",
+        deviceId: "dev-001",
+        macAddress: "AABBCCDDEEFF",
+      });
+
+    it("should publish volume command via device-link when action=volume", async () => {
+      mockDevice();
       const dto: DeviceControlDto = {
         action: "volume",
         volume: 50,
@@ -412,11 +705,61 @@ describe("DevicesService", () => {
 
       const result = await service.control("dev-001", dto);
 
+      expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 50);
       expect(result).toEqual({
         success: true,
         deviceId: "dev-001",
         action: "volume",
       });
+    });
+
+    it("should reject action=volume without volume value", async () => {
+      mockDevice();
+      const dto: DeviceControlDto = { action: "volume" };
+
+      await expect(service.control("dev-001", dto)).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(deviceLink.setVolume).not.toHaveBeenCalled();
+    });
+
+    it("should propagate out-of-range volume as 400", async () => {
+      mockDevice();
+      deviceLink.setVolume.mockImplementation(() => {
+        throw new BadRequestException("volume out of range");
+      });
+      const dto: DeviceControlDto = { action: "volume", volume: 101 };
+
+      await expect(service.control("dev-001", dto)).rejects.toMatchObject({
+        status: 400,
+      });
+    });
+
+    it("should throw NotFoundException for volume control on unknown device", async () => {
+      prisma.device.findUnique.mockResolvedValue(null);
+      const dto: DeviceControlDto = { action: "volume", volume: 50 };
+
+      await expect(service.control("dev-999", dto)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(deviceLink.setVolume).not.toHaveBeenCalled();
+    });
+
+    it("should keep stub success for actions not supported by MQTT protocol", async () => {
+      const dto: DeviceControlDto = {
+        action: "sleep",
+        delayMinutes: 30,
+      };
+
+      const result = await service.control("dev-001", dto);
+
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-001",
+        action: "sleep",
+      });
+      expect(deviceLink.setVolume).not.toHaveBeenCalled();
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
     });
   });
 

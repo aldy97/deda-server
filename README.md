@@ -161,8 +161,9 @@ deda-server/
 | **production** | 正式用户 | `api.deda.example.com` | 机芯厂商云生产环境 |
 
 **关键原则**：
-- 机芯设备只连接机芯厂商云，不直接连接 deda-server。
-- 机芯厂商云需要支持配置不同环境的 deda-server 地址（WebSocket/MQTT/HTTP）。
+- 语音链路：设备 ⇄ 百度 RTC 云，百度回调本服务 LLM 适配层（`POST /v1/chat/completions`）。
+- 设备上线/实例登记：2026-11 起设备固件**直连**本服务 `POST /client/**`（`src/modules/client-api/`，机芯厂《设备端接口文档》v1.1），不再经机芯厂商云中转。
+- 设备状态/控制指令：走 MQTT（机芯厂商云 broker），见 `docs/vendor-mqtt-protocol.md`。
 - 测试/生产数据库、Redis、MQTT topic 必须隔离。
 - 禁止本地/测试环境连接生产数据库。
 
@@ -194,6 +195,19 @@ docker-compose -f docker/docker-compose.yml up -d postgres redis
 npx prisma migrate dev --name init
 npx prisma generate
 ```
+
+初始化之后不用再手动 `prisma generate`：仓库带了 husky 的 `post-merge` / `post-checkout`
+钩子（共用逻辑在 `.husky/lib/prisma-generate-if-stale.sh`），`git pull`、切分支、
+`git worktree add` 之后会自动比较 Prisma Client 与 `src/prisma/schema.prisma` 的新旧，
+**只在 client 陈旧或缺失时才重新生成**，否则静默通过、零开销。
+
+- 钩子**只生成 client，绝不碰数据库**。拉下来新的 migration 仍需自己跑
+  `npx prisma migrate deploy --schema=src/prisma/schema.prisma`。
+- 依赖没装的环境（新 worktree、刚 clone）会自动跳过，不报错。
+- 临时跳过一次：`HUSKY=0 git checkout <branch>`。
+- CI 与 Docker 镜像各自显式生成（`.github/workflows/ci.yml`、`docker/Dockerfile`），
+  不依赖这个钩子。
+- 钩子行为由 `src/common/workflows/prisma-generate-hooks.spec.ts` 钉住。
 
 ### 5. 启动开发服务
 

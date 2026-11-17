@@ -2,7 +2,7 @@
  * OpenAI 兼容 chat completions 请求类型与手工校验。
  *
  * 不用 class-validator 的原因：全局 ValidationPipe 开启了 forbidNonWhitelisted，
- * 而百度 RTC 会通过 llm_eb 注入我们未声明的扩展字段（thinking/user 等），
+ * 而百度 RTC 会通过 llm_eb 注入我们未声明的扩展字段（thinking/deviceid 等），
  * 该端点必须容忍未知字段，因此走 @Req() 原始 body + 手工校验。
  */
 
@@ -17,8 +17,13 @@ export interface ChatCompletionRequest {
   messages: ChatCompletionMessage[];
   stream: boolean;
   /**
-   * OpenAI 标准 user 字段。百度 RTC 用它携带设备 userid（机芯厂约定 = 设备
-   * MAC，重启/烧录/OTA 不变），适配层据此解析设备身份；缺省走匿名链路。
+   * 机芯厂约定的设备唯一标识（llm_eb 注入，与小程序家长绑定编号一致，
+   * 重启/烧录/OTA 不变）。适配层据此解析设备身份，优先级高于 user。
+   */
+  deviceid?: string;
+  /**
+   * OpenAI 标准 user 字段（早期机芯厂约定 = 设备 MAC 的兼容 fallback，
+   * 新配置请用 deviceid）。两者皆无且无 X-Deda-Device-Id header 时走匿名链路。
    */
   user?: string;
 }
@@ -69,6 +74,10 @@ export function parseChatCompletionRequest(body: unknown): ParseResult {
           : "deda-english-tutor",
       messages,
       stream: raw.stream === true,
+      deviceid:
+        typeof raw.deviceid === "string" && raw.deviceid.trim().length > 0
+          ? raw.deviceid.trim()
+          : undefined,
       user:
         typeof raw.user === "string" && raw.user.trim().length > 0
           ? raw.user.trim()

@@ -12,6 +12,7 @@ import { Request } from "express";
 import { DeviceConfigsService } from "./device-configs.service";
 import { SwitchModeDto } from "./dto/switch-mode.dto";
 import { ApplyDeviceConfigDto } from "./dto/apply-device-config.dto";
+import { UpdateVoiceConfigDto } from "./dto/update-voice-config.dto";
 import { JwtAuthGuard } from "@/modules/users/guards/jwt-auth.guard";
 
 interface RequestWithUser extends Request {
@@ -52,5 +53,28 @@ export class DeviceConfigsController {
     @Req() req: RequestWithUser,
   ) {
     return this.deviceConfigsService.switchMode(req.user.userId, deviceId, dto);
+  }
+
+  @Get(":deviceId/voice")
+  @ApiOperation({ summary: "获取设备当前音色/语速配置及可用目录" })
+  async getVoiceConfig(
+    @Param("deviceId") deviceId: string,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.deviceConfigsService.getVoiceConfig(req.user.userId, deviceId);
+  }
+
+  @Post(":deviceId/voice")
+  @ApiOperation({ summary: "更新设备音色/语速期望值并尝试实时下发" })
+  async updateVoiceConfig(
+    @Param("deviceId") deviceId: string,
+    @Body() dto: UpdateVoiceConfigDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.deviceConfigsService.updateVoiceConfig(
+      req.user.userId,
+      deviceId,
+      dto,
+    );
   }
 }

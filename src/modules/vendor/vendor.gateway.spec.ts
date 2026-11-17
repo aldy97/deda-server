@@ -43,6 +43,7 @@ describe("VendorGateway", () => {
             handleBindCallback: jest.fn(),
             handleConversationBackup: jest.fn(),
             getHealth: jest.fn(),
+            sendDegradedReply: jest.fn(),
           },
         },
         {
@@ -239,6 +240,84 @@ describe("VendorGateway", () => {
       (chunk as any).seq = "0";
       const errors = await validate(chunk);
       expect(errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  /**
+   * 「永不沉默」的最后一道闸。
+   *
+   * gateway 原先在 catch 里只 emitError：设备端收到 vendor:error 后无话可播，
+   * 孩子听到的就是静音。现在先尽力下行一句 L0 兜底话术，再发错误通知
+   * （错误通知仍要发，机芯厂要靠它判活）。兜底话术自己也失败时，
+   * 至少不能让 handleTextIn 抛出未捕获拒绝。
+   */
+  describe("L0 兜底话术下行", () => {
+    const dto: VendorTextInDto = { deviceId: "dev-l0", asrText: "你好" };
+    const degraded = {
+      deviceId: "dev-l0",
+      responseText: "我在这儿呢，我们等一会儿再玩好不好？",
+      context: { degraded: true },
+      ttsOptions: {},
+    };
+
+    it("服务抛错时先下行兜底话术，再发 vendor:error", async () => {
+      const client = createMockClient("socket-l0");
+      vendorService.handleTextIn.mockRejectedValue(new Error("pipeline down"));
+      vendorService.sendDegradedReply.mockResolvedValue(degraded);
+
+      const result = await gateway.handleTextIn(client, dto);
+
+      expect(vendorService.sendDegradedReply).toHaveBeenCalledWith("dev-l0");
+      expect(client.emit).toHaveBeenCalledWith("vendor:text:out", degraded);
+      expect(client.emit).toHaveBeenCalledWith(
+        "vendor:error",
+        expect.objectContaining({ message: "pipeline down" }),
+      );
+      expect(result).toBeNull();
+      // 兜底话术同样要进流量录制，事后才能证明孩子到底听到了什么
+      expect(trafficRecorder.record).toHaveBeenCalledWith(
+        "out",
+        degraded,
+        expect.objectContaining({ deviceId: "dev-l0" }),
+      );
+    });
+
+    it("兜底话术在错误通知之前发出（顺序错了孩子就先听到报错提示音）", async () => {
+      const client = createMockClient("socket-l0-order");
+      vendorService.handleTextIn.mockRejectedValue(new Error("pipeline down"));
+      vendorService.sendDegradedReply.mockResolvedValue(degraded);
+
+      await gateway.handleTextIn(client, dto);
+
+      const events = client.emit.mock.calls.map((call) => call[0]);
+      expect(events.indexOf("vendor:text:out")).toBeLessThan(
+        events.indexOf("vendor:error"),
+      );
+    });
+
+    it("兜底话术自己也失败时仍然发 vendor:error，且不抛未捕获拒绝", async () => {
+      const client = createMockClient("socket-l0-fail");
+      vendorService.handleTextIn.mockRejectedValue(new Error("pipeline down"));
+      vendorService.sendDegradedReply.mockRejectedValue(new Error("ws down"));
+
+      const result = await gateway.handleTextIn(client, dto);
+
+      expect(client.emit).toHaveBeenCalledWith(
+        "vendor:error",
+        expect.objectContaining({ message: "pipeline down" }),
+      );
+      expect(result).toBeNull();
+    });
+
+    it("payload 非法时不下行兜底话术：没有可信 deviceId，发出去也是发给空气", async () => {
+      const client = createMockClient("socket-l0-invalid");
+
+      await gateway.handleTextIn(client, {
+        deviceId: "",
+        asrText: "",
+      } as VendorTextInDto);
+
+      expect(vendorService.sendDegradedReply).not.toHaveBeenCalled();
     });
   });
 });

@@ -2,7 +2,7 @@
 
 > 文档版本：1.1.0  
 > 适用范围：微信小程序业务接口  
-> 接口总数：38  
+> 接口总数：35  
 > 契约依据：当前后端 Controller、DTO、Service 与统一响应实现
 
 ## 1. 通用约定
@@ -90,14 +90,14 @@ Content-Type: application/json
 | 模块 | 数量 | 接口 |
 | --- | ---: | --- |
 | 用户账号 | 4 | 登录、绑定手机号、查询资料、更新资料 |
-| 设备管理 | 9 | 绑定、列表、详情、状态、成员、控制、WiFi、排序、解绑 |
+| 设备管理 | 10 | 绑定、列表、详情、状态、成员、控制、WiFi、排序、解绑、配网认领候选 |
 | 孩子档案 | 2 | 查询、创建或更新 |
 | 设备配置 | 3 | 当前配置、应用配置、切换模式 |
 | 对话记录 | 1 | 分页查询 |
-| 对话模式 | 3 | 分类、子模式、树形结构 |
 | 学习统计 | 10 | 仪表盘、趋势、主题、时间线、动态、洞察、健康度、家长报告、报告反馈、功能统计 |
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 | 哄睡配置 | 2 | 查询、部分更新 |
+| 推送订阅 | 1 | 上报订阅消息授权结果 |
 
 ---
 
@@ -218,6 +218,7 @@ Content-Type: application/json
 | `success` | boolean | 是否成功 |
 | `deviceId` | string | 设备业务 ID |
 | `alreadyBound` | boolean | `true` 表示当前用户此前已绑定 |
+| `hasChildProfile` | boolean | 该设备当前是否已存在孩子档案（填过任意字段即为 `true`）；与是否本人绑过无关。为 `false` 时前端应在绑定成功后自动引导填写孩子信息 |
 
 ### 3.2 查询当前用户设备列表
 
@@ -280,15 +281,18 @@ Content-Type: application/json
 - **鉴权**：JWT
 - **成功状态**：200
 
-响应数据：
+响应数据（2026-11 起接入机芯厂 MQTT 真实状态，字段允许空值）：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
-| `status` | string | 当前实现固定为 `online` |
-| `battery` | number | 电量百分比，当前实现固定为 `78` |
-| `isCharging` | boolean | 是否充电中，当前实现固定为 `true` |
-| `lastActiveAt` | string | 最近活跃时间，ISO 8601 |
+| `status` | string | `online`／`offline`；超过 15 秒未收到设备心跳即判定 `offline` |
+| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。当前固件为占位值，前端可展示但勿据此做业务判断 |
+| `volume` | number \| null | 音量 0–100；设备尚未上报时为 `null`。音量下发（见 3.6）后回读本字段即可确认设备是否已生效 |
+| `isCharging` | boolean \| null | 是否充电中；对应机芯厂 `query.data.charging`（契约类型 `boolean \| null`），`null` 表示未知。当前固件恒发 `null`，前端按未知处理 |
+| `lastActiveAt` | string \| null | 最近活跃时间，ISO 8601；设备从未上报时为 `null` |
+
+设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值。
 
 ### 3.5 查询设备绑定成员
 
@@ -320,10 +324,12 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `action` | string | 是 | `volume / power / interrupt / sleep / auto_shutdown` |
-| `volume` | number | 条件必填 | 音量 0–100；`action=volume` 时使用 |
+| `volume` | number | 条件必填 | 音量 0–100；`action=volume` 时必填，缺失返回 400 |
 | `powerOn` | boolean | 条件必填 | `action=power` 时使用；`true` 开机／唤醒，`false` 关机／休眠 |
 | `interruptEnabled` | boolean | 条件必填 | `action=interrupt` 时使用 |
 | `delayMinutes` | number | 条件必填 | `action=sleep / auto_shutdown` 时使用的延迟分钟数 |
+
+> 2026-11 起：`action=volume` 经机芯厂 MQTT 协议真实下发到设备；`power / interrupt / sleep / auto_shutdown` 四个动作协议尚未支持，服务端暂返回成功但不产生实际效果，待机芯厂补协议后接入。`action=volume` 时设备不存在返回 404。
 
 响应数据：
 
@@ -422,6 +428,31 @@ Content-Type: application/json
 
 设备不存在时返回 404；仅删除当前用户与设备的绑定关系。
 
+### 3.10 查询配网认领候选设备
+
+- **方法／路径**：`GET /devices/provision-candidates`
+- **鉴权**：JWT
+- **成功状态**：200
+
+BLE 配网成功后轮询本接口认领设备：设备连上 WiFi 后会通过机芯厂 `loginMac` 接口完成上线登记，登记后进入认领窗口（默认 120 秒，服务端 `PROVISION_CLAIM_WINDOW_SEC` 可配）。
+
+请求参数：无。
+
+响应数据：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `devices` | array | 窗口内已上线且未绑定当前用户的设备，按上线时间倒序 |
+| `devices[].deviceId` | string | 设备业务 ID（十二位小写 MAC，如 `90fe1de7a1ca`） |
+| `devices[].macTail` | string | MAC 后 6 位，多设备并列时供用户辨认 |
+| `devices[].lastSeenAt` | string | 上线时间（ISO 8601） |
+
+约定：
+
+- 恰好 1 台候选：小程序可直接调用 `POST /devices/bind` 完成绑定；
+- 多于 1 台：必须展示列表让用户选择，禁止自动绑定；
+- 0 台：设备可能尚未完成上线，建议每 2 秒轮询、总时长不超过 60 秒，超时提示失败并允许重试。
+
 ---
 
 ## 4. 孩子档案
@@ -479,17 +510,9 @@ Content-Type: application/json
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
 | `mode` | string | `free_chat / english_chat` |
-| `conversationModeKey` | string \| null | 自由对话子模式 key；`english_chat` 固定为 `null` |
 | `cefrLevel` | string \| null | CEFR 等级 |
 | `language` | string \| null | 语言，如 `zh / en / bilingual` |
 | `speechRate` | string \| null | 语速，如 `slow / normal / fast` |
-
-配置组合规则：
-
-| `mode` | `conversationModeKey` |
-| --- | --- |
-| `free_chat` | 必填，且属于启用的 `free_chat` 分类 |
-| `english_chat` | 禁止，必须省略或为 `null` |
 
 ### 5.2 查询当前生效配置
 
@@ -499,7 +522,7 @@ Content-Type: application/json
 
 响应数据：`DeviceConfigResponse`。
 
-无历史配置时默认 `mode=free_chat`、`conversationModeKey=free_chat_casual`、`language=bilingual`、`speechRate=normal`。
+无历史配置时默认 `mode=free_chat`、`language=bilingual`、`speechRate=normal`。
 
 ### 5.3 应用完整设备配置
 
@@ -512,14 +535,13 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `mode` | string | 是 | `free_chat / english_chat` |
-| `conversationModeKey` | string | 条件必填 | 仅自由对话必填 |
 | `cefrLevel` | string | 否 | CEFR 等级 |
 | `language` | string | 否 | 缺省为 `bilingual` |
 | `speechRate` | string | 否 | 缺省为 `normal` |
 
 响应数据：新创建的生效 `DeviceConfigResponse`。旧生效配置会被置为失效。
 
-### 5.4 切换对话模式／子模式
+### 5.4 切换对话模式
 
 - **方法／路径**：`POST /device-configs/:deviceId/mode`
 - **鉴权**：JWT
@@ -530,7 +552,6 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `mode` | string | 是 | `free_chat / english_chat` |
-| `conversationModeKey` | string | 条件必填 | 仅自由对话必填 |
 | `language` | string | 否 | 缺省为 `bilingual` |
 | `speechRate` | string | 否 | 缺省为 `normal` |
 
@@ -553,7 +574,7 @@ Query 参数：
 | `page` | number | 否 | 1 | 页码，小于 1 时按 1 处理 |
 | `pageSize` | number | 否 | 20 | 每页条数，小于 1 时按 1 处理 |
 | `deviceId` | string | 否 | — | 仅查询当前用户绑定的指定设备 |
-| `conversationModeKey` | string | 否 | — | 按对话子模式过滤 |
+| `mode` | string | 否 | — | 按对话模式过滤（`free_chat` / `english_chat` / `english_story` / `idiom_story` / `sleep_story` / `adventure_story` / `free_story`；历史数据可能还有 legacy 值） |
 
 响应数据：
 
@@ -570,76 +591,7 @@ Query 参数：
 
 ---
 
-## 7. 对话模式
-
-本模块接口当前均为公开接口，仅返回启用中的分类和模式。默认分类为 `free_chat` 和 `english_chat`；仅自由对话包含 `free_chat_casual / free_chat_roleplay / free_chat_qa` 三个子模式。
-
-### 7.1 通用模型
-
-`ConversationModeCategory`：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 分类 ID |
-| `key` | string | 分类业务键 |
-| `name` | string | 展示名称 |
-| `description` | string \| null | 描述 |
-| `sortOrder` | number | 排序值 |
-| `isActive` | boolean | 是否启用 |
-
-`ConversationMode`：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 模式 ID |
-| `categoryId` | string | 所属分类 ID |
-| `key` | string | 模式业务键 |
-| `name` | string | 展示名称 |
-| `description` | string \| null | 描述 |
-| `sortOrder` | number | 排序值 |
-| `isActive` | boolean | 是否启用 |
-| `configSchema` | object \| null | 前端配置 schema |
-| `promptTemplate` | string \| null | 提示词模板 |
-
-### 7.2 查询顶层分类
-
-- **方法／路径**：`GET /conversation-modes/categories`
-- **鉴权**：公开
-- **成功状态**：200
-
-请求参数：无。响应数据为 `ConversationModeCategory[]`，按 `sortOrder` 升序。
-
-### 7.3 查询子模式列表
-
-- **方法／路径**：`GET /conversation-modes`
-- **鉴权**：公开
-- **成功状态**：200
-
-Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `categoryKey` | string | 否 | 按顶层分类业务键过滤；分类不存在时返回空数组 |
-
-响应数据：`ConversationMode[]`，按 `sortOrder` 升序。
-
-### 7.4 查询分类与子模式树
-
-- **方法／路径**：`GET /conversation-modes/tree`
-- **鉴权**：公开
-- **成功状态**：200
-
-请求参数：无。
-
-响应数据：分类数组；每项在 `ConversationModeCategory` 基础上增加：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `modes` | ConversationMode[] | 该分类下启用中的子模式；无子模式时为 `[]` |
-
----
-
-## 8. 学习统计
+## 7. 学习统计
 
 本模块接口均需要 JWT。未传 `deviceId` 时统计当前用户绑定的全部设备；传入时仅统计该设备。
 
@@ -650,15 +602,14 @@ Query 参数：
 | `deviceId` | 查询接口 | 否 | 设备业务 ID |
 | `range` | dashboard、activities、insights、health | 否 | `today / week / month`；缺省按各接口累计口径 |
 | `mode` | dashboard、daily、activities | 否 | 顶层消息模式过滤 |
-| `conversationModeKey` | dashboard、daily、activities | 否 | 自由对话子模式过滤 |
 
-### 8.1 查询学习仪表盘
+### 7.1 查询学习仪表盘
 
 - **方法／路径**：`GET /learning-stats/dashboard`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`range`、`mode`、`conversationModeKey`，均可选。
+Query：`deviceId`、`range`、`mode`，均可选。
 
 响应数据：
 
@@ -690,20 +641,20 @@ Query：`deviceId`、`range`、`mode`、`conversationModeKey`，均可选。
 | `todayDurationMinutes` | number | 今日时长（分钟） |
 | `weekDurationMinutes` | number | 本周时长（分钟） |
 
-### 8.2 查询每日学习趋势
+### 7.2 查询每日学习趋势
 
 - **方法／路径**：`GET /learning-stats/daily`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`mode`、`conversationModeKey` 可选；另支持：
+Query：`deviceId`、`mode` 可选；另支持：
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `days` | number | 否 | 7 | 返回最近多少天的数据；非有效数字按 7 处理 |
 | `scope` | string | 否 | — | 传入 `all` 时不按设备当前配置过滤，统计全部用户交互 |
 
-`scope=all` 用于“更懂 TA”：时长按每条用户消息 0.5 分钟估算，`sessionCount` 为当日用户交互数，并与同日家长报告的 `durationMinutes` 保持一致。单设备使用设备时区；多设备汇总使用默认报告时区。未传 `scope=all` 时按显式语境或设备当前顶层模式过滤。
+`scope=all` 用于“更懂 TA”：时长按每条用户消息 0.5 分钟估算，`sessionCount` 为当日用户交互数，并与同日家长报告的 `durationMinutes` 保持一致。单设备使用设备时区；多设备汇总使用默认报告时区。未传 `scope=all` 时按显式语境或设备当前 mode 过滤。
 
 响应数据：按日期升序排列的数组，无数据的日期也返回零点。
 
@@ -713,7 +664,7 @@ Query：`deviceId`、`mode`、`conversationModeKey` 可选；另支持：
 | `durationMinutes` | number | 使用时长（分钟） |
 | `sessionCount` | number | 会话数；`scope=all` 时为用户交互数 |
 
-### 8.3 查询主题分布
+### 7.3 查询主题分布
 
 - **方法／路径**：`GET /learning-stats/topics`
 - **鉴权**：JWT
@@ -721,20 +672,18 @@ Query：`deviceId`、`mode`、`conversationModeKey` 可选；另支持：
 
 Query：`deviceId` 可选。
 
-响应数据：按 `mode + conversationModeKey` 分组的主题数组。
+响应数据：按 `mode` 分组的主题数组。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | string | 主题语境标识 |
-| `mode` | string | 顶层对话模式 |
-| `conversationModeKey` | string \| null | 自由对话子模式 key |
-| `conversationModeName` | string \| null | 自由对话子模式名称 |
+| `mode` | string | 对话模式 |
 | `count` | number | 对话数量 |
 | `lastSpokeAt` | string | 最近对话时间 |
 | `isActive` | boolean | 是否为设备当前配置语境 |
 | `avgScore` | number \| null | 启发式开口分；自由对话为 `null` |
 
-### 8.4 查询对话时间线
+### 7.4 查询对话时间线
 
 - **方法／路径**：`GET /learning-stats/timeline`
 - **鉴权**：JWT
@@ -770,13 +719,13 @@ Query：
 | `aiText` | string | 同轮 AI 回复；缺失时为空字符串 |
 | `createdAt` | string | 对话时间 |
 
-### 8.5 查询学习动态
+### 7.5 查询学习动态
 
 - **方法／路径**：`GET /learning-stats/activities`
 - **鉴权**：JWT
 - **成功状态**：200
 
-Query：`deviceId`、`range`、`mode`、`conversationModeKey` 可选；另支持 `page`（默认 1）、`pageSize`（默认 10）。
+Query：`deviceId`、`range`、`mode` 可选；另支持 `page`（默认 1）、`pageSize`（默认 10）。
 
 响应数据：
 
@@ -794,11 +743,11 @@ Query：`deviceId`、`range`、`mode`、`conversationModeKey` 可选；另支持
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `type` | string | `study / streak` |
-| `mode` | string \| null | `study` 事件的顶层对话模式 |
+| `mode` | string \| null | `study` 事件的对话模式 |
 | `turnCount` | number | `study` 事件的当日对话轮数 |
 | `streakDays` | number | `streak` 事件的连续学习天数 |
 
-### 8.6 查询学习洞察
+### 7.6 查询学习洞察
 
 - **方法／路径**：`GET /learning-stats/insights`
 - **鉴权**：JWT
@@ -819,7 +768,7 @@ Query：`deviceId`、`range` 可选。
 | `deviceId` | string \| null | 关联设备业务 ID |
 | `deviceName` | string \| null | 关联设备名称 |
 
-### 8.7 查询学习健康度
+### 7.7 查询学习健康度
 
 - **方法／路径**：`GET /learning-stats/health`
 - **鉴权**：JWT
@@ -841,7 +790,7 @@ Query：`deviceId`、`range` 可选。
 
 等级边界：`excellent ≥ 85`、`good ≥ 70`、`average ≥ 55`，其余为 `attention`。
 
-### 8.8 查询家长每日报告
+### 7.8 查询家长每日报告
 
 - **方法／路径**：`GET /learning-stats/parent-report`
 - **鉴权**：JWT
@@ -883,7 +832,7 @@ Query：
 
 设备未绑定或日期无效时分别返回 404 或 400；响应不包含内部异常堆栈或模型错误。
 
-### 8.9 提交家长报告反馈
+### 7.9 提交家长报告反馈
 
 - **方法／路径**：`POST /learning-stats/parent-report/feedback`
 - **鉴权**：JWT
@@ -908,7 +857,7 @@ Query：
 
 `useful=false` 时 `feedback=not_useful`。报告不存在时返回 404。
 
-### 8.10 查询滚动功能使用统计
+### 7.10 查询滚动功能使用统计
 
 - **方法／路径**：`GET /learning-stats/mode-usage`
 - **鉴权**：JWT
@@ -952,11 +901,11 @@ Query：
 
 ---
 
-## 9. 音乐播放
+## 8. 音乐播放
 
 本模块接口当前均为公开接口。
 
-### 9.1 查询设备音乐播放状态
+### 8.1 查询设备音乐播放状态
 
 - **方法／路径**：`GET /music/status`
 - **鉴权**：公开
@@ -978,7 +927,7 @@ Query：
 | `volume` | number | 音量；当前实现固定为 `50` |
 | `source` | string | 音乐来源；当前实现固定为 `netease` |
 
-### 9.2 控制音乐播放
+### 8.2 控制音乐播放
 
 - **方法／路径**：`POST /music/control`
 - **鉴权**：公开
@@ -1003,7 +952,7 @@ Query：
 }
 ```
 
-### 9.3 绑定网易云音乐账号
+### 8.3 绑定网易云音乐账号
 
 - **方法／路径**：`POST /music/netease/bind`
 - **鉴权**：公开
@@ -1028,11 +977,11 @@ Query：
 
 ---
 
-## 10. 哄睡配置
+## 9. 哄睡配置
 
 本模块接口均需要 JWT，且当前用户必须已绑定目标设备（否则 403）。配置按设备一对一保存，生命周期跟随设备（解绑/删除设备时级联删除）。
 
-### 10.1 查询设备哄睡配置
+### 9.1 查询设备哄睡配置
 
 - **方法／路径**：`GET /sleep-configs/device/:deviceId`
 - **鉴权**：JWT
@@ -1053,7 +1002,7 @@ Query：
 | `createdAt` | string | 创建时间 |
 | `updatedAt` | string | 更新时间 |
 
-### 10.2 部分更新哄睡配置
+### 9.2 部分更新哄睡配置
 
 - **方法／路径**：`PATCH /sleep-configs/device/:deviceId`
 - **鉴权**：JWT
@@ -1082,10 +1031,55 @@ Query：
 
 ---
 
+## 10. 推送订阅
+
+哄睡服务通知走微信「一次性订阅消息」：小程序端在用户手势上调用 `wx.requestSubscribeMessage`，随后把授权结果上报到本接口；后端按「用户 + 模板」维度累计可推送额度，哄睡时间到点时向设备当前所有绑定家长各消耗 1 点额度推送一次。
+
+约定：
+
+- 额度按「用户 + 模板」维度累计，与设备无关；解绑/wipe 后发送时按当前绑定关系取人，关系不存在即不再推送。
+- 同一模板多次 accept 额度累加，单次上报最多 +30；reject 会清零该模板的剩余额度。
+- 后端未配置模板白名单（`WECHAT_TMPL_SLEEP_REMINDER`）时本接口一律 400。
+
+### 10.1 上报订阅消息授权结果
+
+- Method：`POST`
+- Path：`/push-subscriptions`
+- 鉴权：Bearer Token
+- Content-Type：`application/json`
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| templateId | string | 是 | 微信订阅消息模板 ID（须在后端白名单内） |
+| result | string | 是 | 授权结果：`accept` / `reject` |
+| count | number | 否 | 本次新增额度（仅 accept 有效），默认 1，上限 30 |
+
+响应数据：
+
+```json
+{
+  "templateId": "tmpl-sleep-reminder",
+  "quota": 5,
+  "status": "active"
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| templateId | string | 模板 ID |
+| quota | number | 累计后的剩余推送额度 |
+| status | string | `active` / `rejected` / `exhausted` |
+
+异常：`templateId` 不在白名单返回 400。
+
+---
+
 ## 11. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。
 3. 设备相关业务 ID 与数据库内部 UUID 不可混用，尤其是孩子档案响应中标注的内部 ID。
-4. 自由对话配置保存前先读取对话模式树，确保 `conversationModeKey` 属于 `free_chat`；`english_chat` 不传子模式。
+4. 设备配置保存时只传 `mode` 字段，取值为 `free_chat` 或 `english_chat`；mode 已平级化，不再有子模式概念。
 5. 标注为“当前实现”的字段或占位行为只代表现有契约；后续实现真实能力时，应保持字段类型与兼容策略明确后再升级调用方。

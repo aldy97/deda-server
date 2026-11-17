@@ -100,8 +100,31 @@ export class VendorGateway implements OnGatewayConnection, OnGatewayDisconnect {
           deviceId: payload.deviceId,
         },
       );
+      // 「永不沉默」的最后一道闸：设备端收到 vendor:error 后无话可播，
+      // 孩子听到的就是静音。先尽力下行一句 L0 兜底话术，再发错误通知
+      // （错误通知仍要发，机芯厂要靠它判活）。顺序不能反：
+      // 先报错的话孩子会先听到设备端的异常提示音。
+      await this.emitDegradedReply(client, payload.deviceId);
       this.emitError(client, "vendor:text:in", message);
       return null;
+    }
+  }
+
+  /** 兜底话术自身失败也不能抛：这里是 catch 块内部，抛出去就没人接了。 */
+  private async emitDegradedReply(client: Socket, deviceId: string) {
+    try {
+      const reply = await this.vendorService.sendDegradedReply(deviceId);
+      client.emit("vendor:text:out", reply);
+      void this.trafficRecorder.record("out", reply, {
+        event: "vendor:text:out",
+        deviceId,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Degraded reply failed for ${deviceId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

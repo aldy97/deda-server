@@ -11,14 +11,15 @@ import { ConversationSessionService } from "./../src/modules/vendor/conversation
 import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service";
 import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
+import { PROMPT_REGISTRY_PROVIDER } from "./../src/modules/prompt-registry/prompt-registry.testing";
 
-const extraction = (value: string, operation = "assert") =>
+const extraction = (value: string, operation = "assert", evidence: string) =>
   JSON.stringify([
     {
       key: "favorite_color",
       value,
       operation,
-      evidence: "孩子明确表达",
+      evidence,
       confidence: 0.95,
     },
   ]);
@@ -66,13 +67,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
       deviceConfig: {
         findFirst: jest.fn().mockResolvedValue({
           mode: "free_chat",
-          conversationModeKey: "free_chat_casual",
         }),
       },
       childProfile: { findUnique: jest.fn().mockResolvedValue(null) },
-      conversationMode: {
-        findFirst: jest.fn().mockResolvedValue({ promptTemplate: null }),
-      },
       message: {
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(({ data }) => Promise.resolve(data)),
@@ -203,6 +200,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
           provide: SleepVoiceConfigService,
           useValue: { handle: jest.fn() },
         },
+        // prompt 注册表：DB 恒空的替身，全部 prompt 走代码默认值，
+        // 即聚合重构前各 service 内硬编码字面量的行为
+        PROMPT_REGISTRY_PROVIDER,
       ],
     }).compile();
 
@@ -211,13 +211,27 @@ describe("Child memories conversation pipeline (e2e)", () => {
   });
 
   it("should preserve red history, activate blue v2, and recall only blue", async () => {
-    // 调用顺序（每轮）：L2 安全分类先消费一次 complete（返回 safe 放行），
-    // 随后记忆提取器消费下一次 complete。
-    mockLlmService.complete
-      .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({ text: extraction("red") })
-      .mockResolvedValueOnce({ text: "safe" })
-      .mockResolvedValueOnce({ text: extraction("blue", "supersede") });
+    // 按 scene 分派而非按调用顺序排队：一轮里 L2 安全分类与意图分类是
+    // Promise.all 并行发起的，谁先消费 mock 队列并不确定；且意图分类在
+    // 移除前置关键词过滤后每轮都会调用，位置式队列必然错位。
+    const extractionResponses = [
+      extraction("red", "assert", "我最喜欢红色"),
+      extraction("blue", "supersede", "我现在最喜欢蓝色"),
+    ];
+    mockLlmService.complete.mockImplementation(
+      (options: { scene?: string }) => {
+        if (options.scene === "safety_l2") {
+          return Promise.resolve({ text: "safe" });
+        }
+        if (options.scene === "intent_classify") {
+          return Promise.resolve({ text: "free_chat" });
+        }
+        if (options.scene === "memory_extract") {
+          return Promise.resolve({ text: extractionResponses.shift() ?? "[]" });
+        }
+        return Promise.resolve({ text: "[]" });
+      },
+    );
 
     await vendorService.handleTextIn({
       deviceId: "device-external",
@@ -230,6 +244,9 @@ describe("Child memories conversation pipeline (e2e)", () => {
     });
     await waitFor(() => memories.length === 2);
 
+    // 两条记忆抽取响应都被按 scene 正确消费，没有被其他场景误吞
+    expect(extractionResponses).toHaveLength(0);
+
     const red = memories.find((memory) => memory.version === 1);
     const blue = memories.find((memory) => memory.version === 2);
     expect(red).toMatchObject({
@@ -239,9 +256,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
     });
     expect(blue).toMatchObject({ valueText: "blue", status: "active" });
 
+    // 全量注入：无关键词也返回全部 active 记忆；superseded 的 red 不带出
     const recalled = await childMemoriesService.buildPromptBlock(
       "device-uuid",
-      "你还记得我喜欢什么颜色吗？",
+      [],
     );
     expect(recalled.text).toContain("blue");
     expect(recalled.text).not.toContain("red");

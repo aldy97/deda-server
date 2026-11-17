@@ -8,7 +8,6 @@ export interface TopicCoverage {
   topics: Array<{
     key: string;
     mode: string;
-    conversationModeKey: string | null;
     count: number;
     lastSpokeAt: Date;
   }>;
@@ -20,7 +19,6 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
       string,
       {
         mode: string;
-        conversationModeKey: string | null;
         count: number;
         lastSpokeAt: Date;
       }
@@ -39,7 +37,6 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
       } else {
         map.set(key, {
           mode: conv.mode ?? "unknown",
-          conversationModeKey: conv.conversationModeKey ?? null,
           count: 1,
           lastSpokeAt: new Date(conv.spokeAt),
         });
@@ -60,7 +57,6 @@ export class TopicCoverageCalculator implements MetricCalculator<TopicCoverage> 
   }
 
   private buildKey(conv: ConversationWithDevice): string {
-    // 顶层模式隔离；free_chat 继续按子模式分组。
-    return [conv.mode, conv.conversationModeKey].filter(Boolean).join("|");
+    return conv.mode ?? "unknown";
   }
 }

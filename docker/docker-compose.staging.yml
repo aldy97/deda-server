@@ -1,0 +1,68 @@
+version: '3.8'
+
+# staging 环境覆盖配置
+# 用法（服务器上）：
+#   docker compose --env-file env/.env.staging \
+#     -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
+#
+# 与生产同机部署，通过容器名 / 端口 / 数据卷完全隔离：
+#   - app 对公网暴露 3001（备案期间走 http://ECS公网IP:3001）
+#   - 独立 postgres（回环 5433）与 redis（回环 6380），杜绝与生产串库
+#   - 不启动 nginx（备案完成前用不到域名反代）
+
+services:
+  app:
+    container_name: deda-server-staging
+    restart: always
+    ports:
+      - '3001:3000'
+    volumes:
+      # deda-dashboard SPA 产物（dashboard 仓库流水线投递至此），由 app 托管在 /dashboard。
+      # 必须挂父目录而非 staging 子目录：流水线若删建子目录，bind mount 绑定的
+      # 旧 inode 会让容器内永久看到空目录（2026-11-08 事故）；挂父目录后子目录
+      # 删建对容器透明，仅投递窗口期短暂 404。
+      - /opt/deda/dashboard:/opt/deda/dashboard:ro
+    environment:
+      DASHBOARD_DIST_PATH: /opt/deda/dashboard/staging
+      # staging 是内容创作环境，放开写。prod 的 compose 不设这个变量 → 只读（fail-safe），
+      # 内容必须在 staging 改好、验证过，再用管理台的导入功能搬过去。
+      CONTENT_ADMIN_PROFILE: authoring
+      # staging 容器 limit 1G，堆留 768M，其余给 Buffer/代码段/ARMS 探针
+      NODE_OPTIONS: --max-old-space-size=768
+    deploy:
+      resources:
+        limits:
+          # ARMS 探针额外占 100-200M，随探针接入上调
+          cpus: '0.75'
+          memory: 1G
+
+  postgres:
+    container_name: deda-postgres-staging
+    ports:
+      - '127.0.0.1:5433:5432'
+
+  redis:
+    container_name: deda-redis-staging
+    ports:
+      - '127.0.0.1:6380:6379'
+
+  # 设备 MQTT broker（机芯厂协议：device/up|down/{mac}，5s 心跳）。
+  # 公网暴露 1883 供设备直连（安全组需放行）；强制用户名密码认证。
+  # 配置与密码文件在服务器 /opt/deda/mosquitto/ 下，不入库。
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: deda-mqtt-staging
+    restart: always
+    ports:
+      - '1883:1883'
+    volumes:
+      - /opt/deda/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - /opt/deda/mosquitto/passwordfile:/mosquitto/config/passwordfile:ro
+    # 必须显式加入 deda-network：缺省会落到 default 网络，app 将无法解析 mosquitto 主机名
+    networks:
+      - deda-network
+
+  nginx:
+    # staging 不部署 nginx；profiles 使其不会被 up -d 自动拉起
+    profiles:
+      - disabled-in-staging
