@@ -9,6 +9,7 @@ import {
   parseBundle,
   planBundleImport,
   toBundleEpisode,
+  toDraftEpisode,
 } from "./adventure-bundle";
 import {
   EpisodeContentDraft,
@@ -215,6 +216,61 @@ describe("adventure-bundle", () => {
       expect(episodeContentHash(shuffled)).toBe(
         episodeContentHash(toBundleEpisode(identity, content())),
       );
+    });
+
+    it("still drops an empty-text segment because a bundle must never carry silence", () => {
+      const episode = toBundleEpisode(identity, {
+        ...content(),
+        segments: [
+          { order: 0, kind: "narration", text: "今天 Elly 要出门啦。" },
+          { order: 1, kind: "narration", text: "   " },
+        ],
+      });
+      expect(episode.segments).toHaveLength(1);
+    });
+  });
+
+  /**
+   * 草稿是可变行，作者需要能把「写到一半」的稿子停下来：新加了一段还没来得及写字，
+   * 不该因此存不进库——存不进去等于浏览器一关整集内容全丢。
+   * 但 bundle 是跨环境运输件，必须继续严格。所以拆成两个规范化函数，
+   * 而不是给 toBundleEpisode 加开关：开关迟早会被误用到导出链路上。
+   */
+  describe("toDraftEpisode", () => {
+    it("keeps a segment whose text is still empty so work in progress can be parked", () => {
+      const draft = toDraftEpisode(identity, {
+        ...content(),
+        segments: [
+          { order: 0, kind: "narration", text: "今天 Elly 要出门啦。" },
+          { order: 1, kind: "narration", text: "" },
+        ],
+      });
+      expect(draft.segments).toHaveLength(2);
+      expect(draft.segments[1]).toMatchObject({ order: 1, text: "" });
+    });
+
+    it("still drops structurally malformed segments: those are garbage, not work in progress", () => {
+      const draft = toDraftEpisode(identity, {
+        ...content(),
+        segments: [
+          { order: 0, kind: "narration", text: "开场" },
+          { order: 1, kind: "banana" as never, text: "类型非法" },
+          { order: 1.5, kind: "narration", text: "段号非法" },
+        ],
+      });
+      expect(draft.segments).toHaveLength(1);
+    });
+
+    it("strips database row identity exactly like the bundle normalizer does", () => {
+      const draft = toDraftEpisode(identity, {
+        ...content(),
+        segments: content().segments.map((segment) => ({
+          ...segment,
+          id: `s-${segment.order}`,
+          episodeId: "ep-uuid-should-not-travel",
+        })),
+      } as never);
+      expect(JSON.stringify(draft)).not.toContain("ep-uuid-should-not-travel");
     });
   });
 
