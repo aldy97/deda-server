@@ -445,6 +445,45 @@ describe("AdventureTransferService", () => {
       expect(preview.ok).toBe(true);
     });
 
+    /**
+     * 导入路径的阻断必须按 code 判，不能按 severity 判。
+     * 禁用词在草稿标准下已经降级成 warning（编辑器里允许把稿子停下来），
+     * 而导入走的就是草稿标准；如果这里只看 severity，staging 的禁用词草稿
+     * 就能被整包搬进 prod——那是一条内容安全泄漏通道。
+     */
+    it("still rejects a forbidden word that the draft standard only warns about", async () => {
+      mockTargetEnvironment();
+      const warnings: LintIssue[] = [
+        {
+          severity: "warning",
+          code: "FORBIDDEN_WORD",
+          message: "第 0 段含禁用词：刀子。",
+          businessKey: "elly/1/3",
+        },
+      ];
+      query.checkContent.mockImplementation(
+        async (
+          episodeId: string | null,
+          _c: unknown,
+          identity?: { episodeNumber?: number },
+        ) =>
+          identity?.episodeNumber === 3
+            ? { ok: true, issues: warnings, errors: [], warnings }
+            : okReport,
+      );
+
+      const preview = await service.planImport(
+        makeBundle([episodeA(), episodeC()]),
+      );
+
+      expect(preview.ok).toBe(false);
+      const rejected = preview.plan.items.find(
+        (item) => item.businessKey === "elly/1/3",
+      );
+      expect(rejected?.action).toBe("reject");
+      expect(rejected?.reason).toContain("禁用词");
+    });
+
     it("blocks the whole import when incoming content would not even be savable as a draft", async () => {
       mockTargetEnvironment();
       const errors: LintIssue[] = [

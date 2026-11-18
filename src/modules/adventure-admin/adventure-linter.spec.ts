@@ -504,15 +504,31 @@ describe("adventure-linter", () => {
       expect(report.errors).toEqual([]);
     });
 
-    it("blocks a forbidden word rather than merely warning", () => {
+    it("blocks a forbidden word at the publish standard rather than merely warning", () => {
+      const report = lintEpisode(
+        identity,
+        { ...valid(), segments: [narration(0, "这里有把刀子。")] },
+        { forPublish: true },
+        { forbiddenWords: ["刀子"] },
+      );
+      expect(codes(report.errors)).toContain("FORBIDDEN_WORD");
+      expect(report.ok).toBe(false);
+    });
+
+    /**
+     * 草稿阶段只 warning：草稿对孩子不可见，发布时会按发布标准重新判一次。
+     * 在草稿阶段就硬拦等于让作者没法把写到一半的稿子停下来，浏览器一关就全丢。
+     */
+    it("downgrades a forbidden word to a warning at the draft standard so work in progress can be parked", () => {
       const report = lintEpisode(
         identity,
         { ...valid(), segments: [narration(0, "这里有把刀子。")] },
         {},
         { forbiddenWords: ["刀子"] },
       );
-      expect(codes(report.errors)).toContain("FORBIDDEN_WORD");
-      expect(report.ok).toBe(false);
+      expect(codes(report.warnings)).toContain("FORBIDDEN_WORD");
+      expect(codes(report.errors)).not.toContain("FORBIDDEN_WORD");
+      expect(report.ok).toBe(true);
     });
 
     it("warns when the episode opens with a question and no context", () => {
