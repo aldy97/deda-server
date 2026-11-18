@@ -141,6 +141,22 @@ export function lintEpisode(
     lintEpisodeShape(segments, thresholds, warn);
   }
 
+  /**
+   * 禁用词的严重度随校验阶段变，且只在这一处定级：
+   * - 发布标准：error。这是儿童内容安全唯一的硬闸口，不留「先发了再说」的余地。
+   * - 草稿标准：warning。草稿对孩子不可见，发布时会按发布标准重新判一次；
+   *   在落草稿这一步就硬拦，等于作者没法把写到一半的稿子停下来。
+   * 注意各条阻断闸口一律按 code 判、不按 severity 判（见 assertImportable），
+   * 所以这次降级不会让禁用词从导入链路溜过去。
+   */
+  if (context.forPublish !== true) {
+    for (const issue of issues) {
+      if (issue.code === "FORBIDDEN_WORD") {
+        issue.severity = "warning";
+      }
+    }
+  }
+
   const errors = issues.filter((issue) => issue.severity === "error");
   const warnings = issues.filter((issue) => issue.severity === "warning");
   return { ok: errors.length === 0, issues, errors, warnings };

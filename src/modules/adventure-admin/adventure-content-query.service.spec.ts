@@ -2,7 +2,10 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { AdventureContentQueryService } from "./adventure-content-query.service";
+import {
+  AdventureContentQueryService,
+  contentFromPayload,
+} from "./adventure-content-query.service";
 import {
   ADVENTURE_SEASON,
   EpisodeContentDraft,
@@ -534,6 +537,101 @@ describe("AdventureContentQueryService", () => {
       ).toBeGreaterThan(0);
       expect(diff.left.businessKey).toBe("elly/1/3");
       expect(diff.right.businessKey).toBe("elly/1/3");
+    });
+
+    /**
+     * 对比页必须看得见「还没写字」的那一段。若这里走严格规范化，空段会被整个抹掉，
+     * 作者看到的是「两边一样」——比不显示更糟，因为他会以为草稿根本没改动。
+     */
+    it("shows an empty-text draft segment in the diff instead of hiding it", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(ellyEpisode);
+      prisma.adventureEpisodeVersion.findUnique
+        .mockResolvedValueOnce({
+          id: "v1",
+          episodeId: "ep1",
+          version: 1,
+          status: "published",
+          payload: {
+            title: "第三集",
+            recap: null,
+            segments: [{ order: 0, kind: "narration", text: "开场" }],
+          },
+        })
+        .mockResolvedValueOnce({
+          id: "v2",
+          episodeId: "ep1",
+          version: 2,
+          status: "draft",
+          payload: {
+            title: "第三集",
+            recap: null,
+            segments: [
+              { order: 0, kind: "narration", text: "开场" },
+              { order: 1, kind: "narration", text: "" },
+            ],
+          },
+        });
+
+      const diff = await service.diffVersions("ep1", "v1", "v2");
+
+      expect(diff.right.episode.segments).toHaveLength(2);
+      expect(diff.right.episode.segments[1].text).toBe("");
+      expect(diff.added).toHaveLength(1);
+    });
+  });
+
+  describe("contentFromPayload", () => {
+    const identity = {
+      characterKey: "elly" as const,
+      season: 1,
+      episodeNumber: 3,
+    };
+
+    it("keeps an empty-text segment so a work-in-progress draft survives a reload", () => {
+      const content = contentFromPayload(identity, {
+        title: "第三集",
+        recap: null,
+        segments: [
+          { order: 0, kind: "narration", text: "开场" },
+          { order: 1, kind: "narration", text: "" },
+        ],
+      });
+
+      expect(content.segments).toHaveLength(2);
+      expect(content.segments[1]).toMatchObject({ order: 1, text: "" });
+    });
+
+    it("is the identity transform for payloads written under the strict bundle shape", () => {
+      const legacy = {
+        title: "第三集",
+        recap: "上集回顾",
+        segments: [
+          {
+            order: 0,
+            kind: "narration",
+            text: "开场",
+            interactionType: null,
+            options: null,
+            fallbackText: null,
+            exitText: null,
+            rewardStar: false,
+          },
+        ],
+      };
+
+      expect(contentFromPayload(identity, legacy)).toEqual(legacy);
+    });
+
+    it("still drops structurally malformed segments", () => {
+      const content = contentFromPayload(identity, {
+        title: "第三集",
+        segments: [
+          { order: 0, kind: "narration", text: "开场" },
+          { order: 1, kind: "banana", text: "类型非法" },
+        ],
+      });
+
+      expect(content.segments).toHaveLength(1);
     });
   });
 

@@ -671,9 +671,13 @@ GET /analytics/adventure-admin/episodes/:episodeId/versions
 
 GET /analytics/adventure-admin/episodes/:episodeId/versions/:versionId
 → { meta: VersionSummary, content }
+   // content 按无损口径读取：草稿里的空文本段会原样出现在这里（详见 POST .../draft）。
+   //   published / superseded 快照落库时本就是严格口径，对它们是恒等变换，无需数据迁移。
 
 GET /analytics/adventure-admin/episodes/:episodeId/diff?left=&right=
 → { left, right, titleChanged, recapChanged, added, removed, changed, segmentDiffs }
+   // 两侧都用无损口径规范化，所以**空段会显示在 diff 里**（added / segmentDiffs 都能看到），
+   //   而不是先被吃掉、让作者以为「这一段保存成功了但对比里没有」。
 
 GET /analytics/adventure-admin/episodes/:episodeId/impact
 → { devicesPlayingToday,        // 今日已分配且仍在播：retire 不会打断它们
@@ -698,6 +702,9 @@ body { episodeId?, identity?, content, forPublish? }
    // issue: { severity, code, message(中文), businessKey, segmentOrder?, path? }
    // path 形如 segments[2].options.choices[0].text，前端据此把错误定位到具体表单字段
    // forPublish=true 额外要求 1..n-1 集都已发布（PREDECESSOR_NOT_PUBLISHED）
+   // forPublish 还决定禁用词的严重度：true → FORBIDDEN_WORD 是 error（发布是儿童内容
+   //   安全唯一的硬闸口）；false/缺省 → 降级为 warning，好让写到一半的稿子能先存下来。
+   //   严重度只在 lintEpisode 汇总处定级一次；各条阻断闸口一律按 code 判、不按 severity 判。
 
 POST /analytics/adventure-admin/simulate
 body { identity, content }
@@ -736,6 +743,22 @@ body { content, reason, baseVersionId?, baseDraftUpdatedAt?, force? }
    //     未发布且内容不同的草稿时直接判 reject，不静默覆盖）。
    // 响应里的 draftUpdatedAt 是**下一次保存该带的新令牌**：编辑器必须改用它，
    //   否则会被自己刚存的那一次顶成 409（自己锁死自己）。
+   // 入库门槛分两类，别混：
+   //   身份级（SEASON_UNSUPPORTED / UNKNOWN_CHARACTER_KEY / INVALID_EPISODE_NUMBER /
+   //     BUSINESS_KEY_TAKEN）+ 规范化会丢段 → 400 CONTENT_REJECTED / SEGMENT_WOULD_BE_DROPPED。
+   //     这些不是「没写完」，是「这一行写坏了」，落库会污染业务键唯一约束。
+   //   内容级（缺文本、段号断档、选项不全、**禁用词**……）→ 放行。草稿对孩子不可见，
+   //     发布必定按发布标准重新校验一次（PUBLISH_BLOCKED），那才是儿童内容的闸口。
+   //   跨环境导入是个例外，它比存草稿多拦一道禁用词（见 import/preview）。
+   // 草稿 payload 是**无损**的：「新加一段还没写字」是写作中最常见的中间态，
+   //   空文本段原样落库，不再被规范化吃掉（存不下 = 关浏览器就整集丢失）。
+   //   所以 SEGMENT_WOULD_BE_DROPPED 现在只因**段号非法 / 段落类型非法**触发；
+   //   空段交给发布闸口——SEGMENT_TEXT_REQUIRED 在发布标准下是 error，到不了孩子那边。
+   // 唯一例外是 contentHash（响应里的字段，内部即 payloadHash）：仍按严格口径计算，
+   //   空段不参与哈希。刻意如此——换成无损口径会让所有历史快照的 contentHash 失配，
+   //   导入链路把每份既有内容都判成 replace。代价是「只差一个空段」的两份草稿哈希相同：
+   //   并发覆盖由 baseDraftUpdatedAt 兜住；导入的「内容相同可覆盖」判断会认为它们相同，
+   //   覆盖时丢掉那个空段。
 
 POST /analytics/adventure-admin/episodes/:episodeId/publish
 body { reason }
@@ -821,7 +844,13 @@ body { bundle, reason, confirmText /* = confirmToken */, expectedBundleHash? }
 会被判 reject 的情况：bundle 内业务键重复；目标集已 retire；目标集有**别人未发布的本地草稿**
 且内容既不等于草稿也不等于当前发布版（错误消息会点名是谁的草稿）；**这一集一段可用段落都没有**
 （bundle 里本来就是空的，或所有段落都因 `order`/`kind`/`text` 非法在解析时被丢弃，见 `parseWarnings`）；
-内容过不了 lint 或会丢段。
+内容过不了导入闸门（身份级 lint 阻断项、**禁用词**、或规范化会丢段）。
+
+禁用词在导入这里按 `code` 拦、不看 `severity`：导入校验走的是草稿标准，禁用词在那份报告里
+只是 warning；若按 severity 判，就会开出一条泄漏通道——staging 的禁用词草稿能被整包搬进 prod。
+
+bundle 解析这一侧**刻意保持严格口径**（缺文本的段照旧丢弃并记进 `parseWarnings`）：
+跨环境运输件里不该出现沉默段。「草稿无损」只服务于「作者写到一半也能存下来」。
 
 拒绝空壳集是刻意的：空壳集自己发布不出去（lint `NO_SEGMENTS` 挡着），但一旦落地就成了
 「目标环境有未发布草稿」，会让**之后每一次正常导入都卡住**，而且拒绝理由指向一个根本没人在写的草稿。
@@ -934,8 +963,8 @@ kill switch 关掉时连手动 `sweep` 也一并拒绝（回 `skipped: true` + �
 | --- | --- | --- |
 | `REASON_REQUIRED` / `REASON_TOO_LONG` | 400 | 理由字数不合规（至少 8 字，至多 300 字） |
 | `CONFIRM_TEXT_MISMATCH` | 400 | 确认文本与业务键不符，带 `expected` |
-| `CONTENT_REJECTED` | 400 | 身份 / 禁用词 / 业务键已被占用等 lint 阻断项，带完整 `lint` |
-| `SEGMENT_WOULD_BE_DROPPED` | 400 | 规范化会吃掉段落（缺文本 / 段号非法 / 类型非法），带 `lint` |
+| `CONTENT_REJECTED` | 400 | 身份级 lint 阻断项（季不支持 / IP 未知 / 集号非法 / 业务键已被占用）；**导入链路**额外含禁用词。带完整 `lint` |
+| `SEGMENT_WOULD_BE_DROPPED` | 400 | 规范化会吃掉段落（段号非法 / 类型非法；**缺文本不再触发**，空段无损落库），带 `lint` |
 | `PUBLISH_BLOCKED` | 400 | 还有 lint error 未清，带 `lint` |
 | `NO_DRAFT` | 400 | 没有待发布 / 待丢弃的草稿 |
 | `EPISODE_RETIRED` | 400 | 已 retire 的集不能直接发布，先 restore |

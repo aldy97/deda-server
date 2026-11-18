@@ -21,7 +21,11 @@ import {
   draftToken,
 } from "./adventure-content.types";
 import { LintReport } from "./adventure-linter";
-import { episodeContentHash, toBundleEpisode } from "./adventure-bundle";
+import {
+  episodeContentHash,
+  toBundleEpisode,
+  toDraftEpisode,
+} from "./adventure-bundle";
 
 /**
  * 冒险内容写侧。三条不可让步的原则：
@@ -43,14 +47,26 @@ export const MIN_REASON_CHARS = 8;
 export const MAX_REASON_CHARS = 300;
 
 /**
- * 身份与儿童安全类错误：连草稿都不许落库。
- * 其余（缺文本、段号断档、选项不全……）属于「写到一半」，允许存草稿，只拦发布。
+ * 身份级错误：连草稿都不许落库。
+ * 这些不是「没写完」，是「这一行写坏了」——落库会污染
+ * @@unique([characterKey, season, episodeNumber])，或指向根本不存在的 IP / 季。
+ * 其余（缺文本、段号断档、选项不全、禁用词……）都属于内容级，允许存草稿，只拦发布：
+ * 草稿对孩子不可见，而发布时会按发布标准重新校验一次。
  */
 export const DRAFT_BLOCKING_CODES = [
   "SEASON_UNSUPPORTED",
   "UNKNOWN_CHARACTER_KEY",
   "INVALID_EPISODE_NUMBER",
   "BUSINESS_KEY_TAKEN",
+];
+
+/**
+ * 跨环境导入比「存草稿」严一档：禁用词同样拦下。
+ * 导入校验走的是草稿标准（禁用词在那个标准下已降级为 warning），若按 severity 判
+ * 就会开出一条泄漏通道——staging 的禁用词草稿能被整包搬进 prod。所以这里按 code 判。
+ */
+export const IMPORT_BLOCKING_CODES = [
+  ...DRAFT_BLOCKING_CODES,
   "FORBIDDEN_WORD",
 ];
 
@@ -986,21 +1002,40 @@ function assertConfirmText(
 }
 
 /**
- * 草稿入库门槛：身份/禁用词类错误直接拒绝，规范化会丢段也直接拒绝。
- * 导出给搬运服务复用——导入写的也是草稿，必须过同一道门，不能因为是「从别的环境搬来的」就放宽。
+ * 草稿入库门槛：身份级错误直接拒绝，规范化会丢段也直接拒绝。
+ * 内容级问题（含禁用词）一律放行——草稿对孩子不可见，发布才是唯一的闸口，
+ * 而发布必定按发布标准重新校验一次（见 publish / revert 里的 assertPublishable）。
  */
 export function assertDraftSavable(
   identity: EpisodeIdentity,
   content: EpisodeContentDraft,
   report: LintReport,
 ): void {
-  assertNoDraftBlocking(report);
+  assertNoBlockingCodes(report, DRAFT_BLOCKING_CODES);
   assertNoSegmentLoss(identity, content, report);
 }
 
-function assertNoDraftBlocking(report: LintReport): void {
-  const blocking = report.errors.filter((issue) =>
-    DRAFT_BLOCKING_CODES.includes(issue.code),
+/**
+ * 跨环境导入门槛：比「存草稿」多拦一道禁用词。
+ * 导入写的也是草稿，但它跨越环境边界——目标环境的运营并没有逐字看过这份内容，
+ * 不能指望「反正发布时还会拦」，因为导入落地后可能隔很久才有人去发布。
+ */
+export function assertImportable(
+  identity: EpisodeIdentity,
+  content: EpisodeContentDraft,
+  report: LintReport,
+): void {
+  assertNoBlockingCodes(report, IMPORT_BLOCKING_CODES);
+  assertNoSegmentLoss(identity, content, report);
+}
+
+/**
+ * 扫 issues 而不是 errors：严重度会随校验阶段变（禁用词在草稿标准下是 warning），
+ * code 不会。所有阻断判定一律按 code，这是导入链路不被降级波及的唯一保证。
+ */
+function assertNoBlockingCodes(report: LintReport, codes: string[]): void {
+  const blocking = (report.issues ?? []).filter((issue) =>
+    codes.includes(issue.code),
   );
   if (blocking.length === 0) {
     return;
@@ -1013,8 +1048,10 @@ function assertNoDraftBlocking(report: LintReport): void {
 }
 
 /**
- * 规范化会丢掉空文本段（对外来 bundle 是对的，对草稿不是）。
- * 草稿存一次就少一段等于编辑器吃字，所以这里把静默丢段变成一次明确的报错。
+ * 把「静默丢段」变成一次明确的报错。
+ * 比对基准是**实际要写进去的那份**规范化结果（toDraftEpisode，无损口径）：
+ * 空文本段现在能存下来了，所以这里只会因段号非法或段落类型非法而触发——
+ * 那两类是垃圾数据，不是「写到一半」，丢掉之前必须先说清楚。
  */
 function assertNoSegmentLoss(
   identity: EpisodeIdentity,
@@ -1024,14 +1061,14 @@ function assertNoSegmentLoss(
   const incoming = Array.isArray(content?.segments)
     ? content.segments.length
     : 0;
-  const kept = toBundleEpisode(identity, content).segments.length;
+  const kept = toDraftEpisode(identity, content).segments.length;
   if (kept === incoming) {
     return;
   }
   throw new BadRequestException({
     message: `有 ${
       incoming - kept
-    } 段因为缺文本、段号非法或段落类型非法而无法保存。草稿不会偷偷吃掉你写的段落——请先补齐标红的段。`,
+    } 段因为段号非法或段落类型非法而无法保存。草稿不会偷偷吃掉你写的段落——请先补齐标红的段。`,
     code: "SEGMENT_WOULD_BE_DROPPED",
     lint: report,
   });
@@ -1064,11 +1101,16 @@ function throwIfBusinessKeyTaken(error: unknown, key: string): void {
   }
 }
 
+/**
+ * 写进草稿行的 payload 用无损规范化：空文本段必须原样留着。
+ * 草稿是可变行，作者要能把「新加一段还没写字」的中间态存下来；
+ * 这里若沿用 bundle 的严格规范化，存一次就少一段，等于编辑器吃字。
+ */
 function buildPayload(
   identity: EpisodeIdentity,
   content: EpisodeContentDraft,
 ): EpisodePayload {
-  const normalized = toBundleEpisode(identity, content);
+  const normalized = toDraftEpisode(identity, content);
   return {
     title: normalized.title,
     recap: normalized.recap,
@@ -1076,6 +1118,13 @@ function buildPayload(
   };
 }
 
+/**
+ * 内容哈希刻意继续走**严格**规范化（bundle 口径），不跟 payload 一起改成无损。
+ * 理由：contentHash 是跨环境比对的身份证，staging 与 prod 必须对同样的内容算出
+ * 同样的值；改口径会让线上已存的哈希全部失配，导入永远判成 replace。
+ * 代价（已知并接受）：只差一个空段的两份草稿哈希相同——乐观锁靠 baseDraftUpdatedAt
+ * 兜住不受影响，导入的「内容相同可覆盖」判断会认为它们相同，覆盖时丢掉那个空段。
+ */
 function payloadHash(identity: EpisodeIdentity, content: EpisodeContentDraft) {
   return episodeContentHash(toBundleEpisode(identity, content));
 }
