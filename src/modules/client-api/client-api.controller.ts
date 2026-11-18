@@ -30,8 +30,11 @@ export class ClientApiController {
   /**
    * 设备上线登记：校验成功后在响应头 Authorization 返回三方 LLM API KEY。
    *
-   * 响应体与《设备端接口文档》3.2 节一致：音色不在上线时下发，出厂音色由固件
-   * 内置（产品定义），运行期切换走 switchSceneRole。
+   * 响应体按《设备端接口文档》v1.2 的 3.2 节返回 {id, nickname, lang}。
+   *
+   * TODO(v1.4): 2026-11-18 的 v1.4 已删除响应体里的 lang（loginMac 只作登录用），
+   * 音色/语速/音量改由新接口 POST /client/bot/bot/getvalue 每轮下发；
+   * 该对齐在后续 PR 完成，本 PR 不改现有响应体。
    */
   @Post("user/user/loginMac")
   async loginMac(

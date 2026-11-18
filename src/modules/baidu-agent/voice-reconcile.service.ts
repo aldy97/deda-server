@@ -41,8 +41,11 @@ interface BotInstanceRecordView {
  * 1. 从 DeviceConfig 读取设备当前期望的音色与语速；
  * 2. 对活跃百度实例实时下发（通过 switchSceneRole），或在条件不满足时返回
  *    可归因的 deferred 原因，留给下一轮 bot/start 追平；
- * 3. 提供 IP/角色 → timbreId 查表，供剧情内按角色切换音色使用。
- *    出厂音色由固件内置（产品定义），本服务不参与设备上线时的音色下发。
+ * 3. 提供 IP/角色 → timbreId 查表（CHARACTER_TIMBRE_JSON），是平台侧「某个 IP 用哪个
+ *    音色」的唯一真相。设备端协议 v1.4（2026-11-18）新增 POST /client/bot/bot/getvalue：
+ *    固件每轮创建百度实例前拉取 vcn/vol/spd 且**不缓存**，vcn 即取自这张表；
+ *    剧情内多 IP 同剧时按角色切音色也查同一张表。
+ *    TODO(v1.4): getvalue 的服务端实现在后续 PR，本 PR 只提供数据源。
  */
 @Injectable()
 export class VoiceReconcileService implements VoiceReconcilePort {
@@ -59,9 +62,9 @@ export class VoiceReconcileService implements VoiceReconcilePort {
    * 产品决策，走配置注入：音色目录本身还是 placeholder（TODO(Q1)），把具体 id
    * 写进代码等于把待确认值固化。默认空表 → 查表一律返回 null，由调用方决定降级。
    *
-   * 出厂音色由固件内置（产品定义，熊总 2026-11-17：一个机芯对应一个 IP、
-   * 一个 IP 一个专属音色），本映射**不参与上线下发**；
-   * 它只用于剧情内按角色切音色时查表，见 getTimbreForCharacter。
+   * 产品定义（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色，
+   * 家长不在小程序端选择音色——所以本映射的键就是 IP，值就是它唯一的音色。
+   * 消费方见 getTimbreForCharacter（getvalue 与剧情内切音色共用）。
    */
   private readonly characterTimbre: ReadonlyMap<string, string>;
 
