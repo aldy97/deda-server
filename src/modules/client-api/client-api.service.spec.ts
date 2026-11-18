@@ -3,7 +3,6 @@ import {
   BadRequestException,
   ConflictException,
   InternalServerErrorException,
-  Logger,
   NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -11,10 +10,7 @@ import { ConfigService } from "@nestjs/config";
 import { ClientApiService } from "./client-api.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
-import {
-  DEVICE_DEFAULT_LANG,
-  VOICE_RECONCILE_PORT,
-} from "@/modules/baidu-agent/baidu-agent.types";
+import { VOICE_RECONCILE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   DEFAULT_PROVISION_WINDOW_SECONDS,
@@ -42,7 +38,6 @@ describe("ClientApiService", () => {
   let configValues: Record<string, string | undefined>;
   let voiceReconcile: {
     onInstanceRegistered: jest.Mock;
-    resolveInitialVoice: jest.Mock;
   };
 
   const createService = async () => {
@@ -89,7 +84,6 @@ describe("ClientApiService", () => {
     };
     voiceReconcile = {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
-      resolveInitialVoice: jest.fn().mockResolvedValue({ status: "none" }),
     };
     service = await createService();
   });
@@ -104,7 +98,6 @@ describe("ClientApiService", () => {
       expect(result).toEqual({
         mac: MAC,
         apiKey: TEST_LLM_API_KEY,
-        loginVoice: null,
       });
       expect(prisma.device.upsert).toHaveBeenCalledWith({
         where: { deviceId: MAC },
@@ -171,77 +164,6 @@ describe("ClientApiService", () => {
       await service.loginMac({ mac: MAC, password: GOLDEN_PASSWORD });
       expect(prisma.device.upsert).toHaveBeenCalledTimes(2);
       expect(redis.zAdd).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  describe("loginMac initial voice dispatch", () => {
-    const login = () =>
-      service.loginMac({ mac: MAC, password: GOLDEN_PASSWORD });
-
-    it("passes the upserted device id, its characterKey and the default lang", async () => {
-      await login();
-
-      expect(voiceReconcile.resolveInitialVoice).toHaveBeenCalledWith({
-        deviceInternalId: "device-uuid-1",
-        characterKey: "elly",
-        lang: DEVICE_DEFAULT_LANG,
-      });
-    });
-
-    it("returns the ready field so the controller can spread it into data", async () => {
-      voiceReconcile.resolveInitialVoice.mockResolvedValue({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-
-      const result = await login();
-
-      expect(result.loginVoice).toEqual({ key: "timbreId", value: "1000063" });
-    });
-
-    it("returns no field when nothing is desired", async () => {
-      voiceReconcile.resolveInitialVoice.mockResolvedValue({ status: "none" });
-
-      expect((await login()).loginVoice).toBeNull();
-    });
-
-    it("returns no field and records the reason when the resolution is blocked", async () => {
-      jest.spyOn(Logger.prototype, "warn").mockImplementation();
-      voiceReconcile.resolveInitialVoice.mockResolvedValue({
-        status: "blocked",
-        reason: "empty_catalog",
-      });
-
-      const result = await login();
-
-      expect(result.loginVoice).toBeNull();
-      expect(Logger.prototype.warn).toHaveBeenCalledWith(
-        expect.stringContaining("empty_catalog"),
-      );
-      jest.restoreAllMocks();
-    });
-
-    it("still onboards the device when the voice resolution throws", async () => {
-      voiceReconcile.resolveInitialVoice.mockRejectedValue(
-        new Error("catalog exploded"),
-      );
-
-      await expect(login()).resolves.toEqual({
-        mac: MAC,
-        apiKey: TEST_LLM_API_KEY,
-        loginVoice: null,
-      });
-      expect(prisma.device.upsert).toHaveBeenCalledTimes(1);
-      expect(redis.zAdd).toHaveBeenCalledTimes(1);
-    });
-
-    it("does not resolve a voice when credentials are rejected", async () => {
-      await expect(
-        service.loginMac({ mac: MAC, password: "0".repeat(32) }),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
-
-      expect(voiceReconcile.resolveInitialVoice).not.toHaveBeenCalled();
     });
   });
 

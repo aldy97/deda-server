@@ -30,15 +30,15 @@ export class ClientApiController {
   /**
    * 设备上线登记：校验成功后在响应头 Authorization 返回三方 LLM API KEY。
    *
-   * 响应体 data 内可能多出一个音色字段（仅在解析成功时出现），供固件在创建
-   * 百度实例时拼进 tts 配置——本轮第一句话即为目标音色，且不依赖设备签名有效期。
+   * 响应体与《设备端接口文档》3.2 节一致：音色不在上线时下发，出厂音色由固件
+   * 内置（产品定义），运行期切换走 switchSceneRole。
    */
   @Post("user/user/loginMac")
   async loginMac(
     @Body() dto: LoginMacDto,
     @Res() res: Response,
   ): Promise<void> {
-    const { mac, apiKey, loginVoice } = await this.clientApi.loginMac(dto);
+    const { mac, apiKey } = await this.clientApi.loginMac(dto);
     res.setHeader("Authorization", apiKey);
     res.status(200).json({
       code: 200,
@@ -46,10 +46,6 @@ export class ClientApiController {
         id: mac,
         nickname: `设备 ${mac.slice(-6)}`,
         lang: DEVICE_DEFAULT_LANG,
-        // TODO(Q11): 字段名待机芯厂书面确认；TODO(Q14): 老固件对 data 内未知
-        // 字段的容忍度待确认。因此只在解析成功时展开，默认配置下（音色目录为空、
-        // 无 IP 默认音色）响应体与《设备端接口文档》3.2 节完全一致。
-        ...(loginVoice ? { [loginVoice.key]: loginVoice.value } : {}),
       },
       msg: "success",
     });

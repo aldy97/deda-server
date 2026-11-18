@@ -11,12 +11,6 @@ import {
   VoiceApplyOutcome,
   VoiceReconcilePort,
   VoiceApplyBlockReason,
-  InitialVoiceResolution,
-  LoginVoiceField,
-  LoginVoicePayloadFormat,
-  LOGIN_VOICE_PAYLOAD_FORMATS,
-  LOGIN_VOICE_FIELD_BY_FORMAT,
-  DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT,
   parseVoicePayload,
   TTS_SPD_MIN,
   TTS_SPD_MAX,
@@ -47,8 +41,8 @@ interface BotInstanceRecordView {
  * 1. 从 DeviceConfig 读取设备当前期望的音色与语速；
  * 2. 对活跃百度实例实时下发（通过 switchSceneRole），或在条件不满足时返回
  *    可归因的 deferred 原因，留给下一轮 bot/start 追平；
- * 3. 设备上线（loginMac）时算出应下发给固件的初始音色，由固件在创建百度实例
- *    时带上——这条路径不依赖设备签名有效期，也不依赖实例是否已经活跃。
+ * 3. 提供 IP/角色 → timbreId 查表，供剧情内按角色切换音色使用。
+ *    出厂音色由固件内置（产品定义），本服务不参与设备上线时的音色下发。
  */
 @Injectable()
 export class VoiceReconcileService implements VoiceReconcilePort {
@@ -60,16 +54,16 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   private readonly spdMap: ReadonlyMap<string, number>;
 
   /**
-   * IP（Device.characterKey，如 elly / polly）→ 默认 timbreId。
+   * IP（Device.characterKey，如 elly / polly）→ timbreId 权威映射。
    *
-   * 同样是产品决策，走配置注入：音色目录本身还是 placeholder（TODO(Q1)），
-   * 把具体 id 写进代码等于把待确认值固化。默认空表 → 没有 IP 默认音色，
-   * 上线时不下发任何字段，固件沿用百度互动应用自身的默认 tts。
+   * 产品决策，走配置注入：音色目录本身还是 placeholder（TODO(Q1)），把具体 id
+   * 写进代码等于把待确认值固化。默认空表 → 查表一律返回 null，由调用方决定降级。
+   *
+   * 出厂音色由固件内置（产品定义，熊总 2026-11-17：一个机芯对应一个 IP、
+   * 一个 IP 一个专属音色），本映射**不参与上线下发**；
+   * 它只用于剧情内按角色切音色时查表，见 getTimbreForCharacter。
    */
-  private readonly characterDefaultTimbre: ReadonlyMap<string, string>;
-
-  /** loginMac 下发形态，见 LOGIN_VOICE_PAYLOAD_FORMATS（TODO(Q12)） */
-  private readonly loginVoiceFormat: LoginVoicePayloadFormat;
+  private readonly characterTimbre: ReadonlyMap<string, string>;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -82,11 +76,8 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     this.spdMap = this.parseSpdMap(
       this.configService.get<string>("SPEECH_RATE_MAP_JSON"),
     );
-    this.characterDefaultTimbre = this.parseCharacterDefaultTimbre(
-      this.configService.get<string>("CHARACTER_DEFAULT_TIMBRE_JSON"),
-    );
-    this.loginVoiceFormat = this.parseLoginVoiceFormat(
-      this.configService.get<string>("LOGIN_VOICE_PAYLOAD_FORMAT"),
+    this.characterTimbre = this.parseCharacterTimbre(
+      this.configService.get<string>("CHARACTER_TIMBRE_JSON"),
     );
   }
 
@@ -118,6 +109,17 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     const spd = this.spdMap.get(speechRate);
     if (spd === undefined) return null;
     return spd;
+  }
+
+  /**
+   * 角色/IP → timbreId 查表；未配置或未命中返回 null，由调用方决定降级。
+   *
+   * 纯查表，不校验 timbreId 是否在音色目录内：目录本身还是 placeholder
+   * （TODO(Q1)），此刻校验只会把「待确认」误判为「不合法」。
+   */
+  getTimbreForCharacter(characterKey: string | null): string | null {
+    if (!characterKey) return null;
+    return this.characterTimbre.get(characterKey) ?? null;
   }
 
   /**
@@ -186,105 +188,6 @@ export class VoiceReconcileService implements VoiceReconcilePort {
         }`,
       );
       return { applied: "deferred", reason: "internal_error" };
-    }
-  }
-
-  /**
-   * 设备上线（loginMac）时算出应下发给固件的初始音色；永不抛错。
-   *
-   * 与 dispatchToInstance 的关键差别：这条路径**不调用百度云**，只是把
-   * 「该用哪个音色」告诉固件，由固件在创建实例时带上（机芯厂 2026-11-17 确认）。
-   * 因此它不读 Redis 实例登记、不需要设备签名、不受 1800 秒有效期限制，
-   * 本轮对话的第一句话就是目标音色。
-   *
-   * 优先级：DeviceConfig 里用户显式选择的音色 > IP（characterKey）默认音色。
-   * 显式值校验不通过时**不回落**到默认值——静默替换用户的选择比不生效更糟。
-   */
-  async resolveInitialVoice(params: {
-    deviceInternalId: string;
-    characterKey: string | null;
-    lang: string;
-  }): Promise<InitialVoiceResolution> {
-    const where = `device=${params.deviceInternalId}, lang=${params.lang}`;
-    try {
-      if (!this.client.enabled) {
-        this.logger.debug(
-          `Initial voice not dispatched: client disabled, ${where}`,
-        );
-        return { status: "blocked", reason: "disabled" };
-      }
-
-      const desired = await this.readDesired(params.deviceInternalId);
-      const vcn =
-        desired.vcn ??
-        (params.characterKey
-          ? (this.characterDefaultTimbre.get(params.characterKey) ?? null)
-          : null);
-
-      if (vcn === null) {
-        // 既没有用户显式选择、也没有该 IP 的默认音色。只配了语速同样落到这里：
-        // 创建实例时无法只表达 spd（TODO(Q12)），不猜一个音色出来。
-        this.logger.debug(
-          `Initial voice not dispatched: nothing desired, ${where}`,
-        );
-        return { status: "none" };
-      }
-
-      if (!this.catalog.available) {
-        this.logger.warn(
-          `Initial voice not dispatched: empty catalog, ${where}, vcn=${vcn}`,
-        );
-        return { status: "blocked", reason: "empty_catalog" };
-      }
-
-      if (!this.catalog.find(vcn, params.lang)) {
-        this.logger.warn(
-          `Initial voice not dispatched: voice not in catalog, ${where}, vcn=${vcn}`,
-        );
-        return { status: "blocked", reason: "voice_not_in_catalog" };
-      }
-
-      // 语速档位缺失时降级为只下发音色：音色是设备开口第一句就必须对的，
-      // 语速等映射补齐后下次上线自然生效。仍打 warn——配置错误不该静默。
-      let spd: number | undefined;
-      if (desired.speechRate !== null) {
-        const resolved = this.resolveSpd(desired.speechRate);
-        if (resolved === null) {
-          this.logger.warn(
-            `Initial voice dispatched without rate: speech rate map missing, ${where}, speechRate=${desired.speechRate}`,
-          );
-        } else {
-          spd = resolved;
-        }
-      }
-
-      let field: LoginVoiceField;
-      if (this.loginVoiceFormat === "tts") {
-        let tts: string;
-        try {
-          tts = buildTtsConfig(spd === undefined ? { vcn } : { vcn, spd });
-        } catch {
-          this.logger.warn(
-            `Initial voice not dispatched: invalid tts config, ${where}, vcn=${vcn}`,
-          );
-          return { status: "blocked", reason: "invalid_request" };
-        }
-        field = { key: LOGIN_VOICE_FIELD_BY_FORMAT.tts, value: tts };
-      } else {
-        field = { key: LOGIN_VOICE_FIELD_BY_FORMAT.timbreId, value: vcn };
-      }
-
-      this.logger.log(
-        `Initial voice dispatched at login: ${where}, vcn=${vcn}, format=${this.loginVoiceFormat}`,
-      );
-      return { status: "ready", timbreId: vcn, field };
-    } catch (error) {
-      this.logger.warn(
-        `Initial voice not dispatched: error, ${where}, error=${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return { status: "blocked", reason: "internal_error" };
     }
   }
 
@@ -464,13 +367,13 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   }
 
   /**
-   * 解析 IP → 默认 timbreId 映射。
+   * 解析 IP/角色 → timbreId 映射（供剧情内切音色时查表）。
    *
    * timbreId 在百度侧是 Long，配置里写数字或字符串都接受（与
    * VoiceCatalogService 对 timbreId 的宽容度保持一致），统一转字符串。
    * 结构非法或值为空一律跳过该条，不整体失败——一个 IP 配错不该拖垮另一个。
    */
-  private parseCharacterDefaultTimbre(
+  private parseCharacterTimbre(
     raw: string | undefined,
   ): ReadonlyMap<string, string> {
     if (!raw || raw.trim().length === 0) return new Map();
@@ -480,7 +383,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       parsed = JSON.parse(raw);
     } catch {
       this.logger.warn(
-        "CHARACTER_DEFAULT_TIMBRE_JSON is not valid JSON; no IP default timbre will be dispatched",
+        "CHARACTER_TIMBRE_JSON is not valid JSON; character timbre lookups will always miss",
       );
       return new Map();
     }
@@ -491,7 +394,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       Array.isArray(parsed)
     ) {
       this.logger.warn(
-        "CHARACTER_DEFAULT_TIMBRE_JSON must be a JSON object of characterKey -> timbreId",
+        "CHARACTER_TIMBRE_JSON must be a JSON object of characterKey -> timbreId",
       );
       return new Map();
     }
@@ -508,25 +411,5 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       }
     }
     return map;
-  }
-
-  /** 解析 loginMac 下发形态；未配置或取值非法一律回落默认，不猜。 */
-  private parseLoginVoiceFormat(
-    raw: string | undefined,
-  ): LoginVoicePayloadFormat {
-    const trimmed = raw ? raw.trim() : "";
-    if (trimmed.length === 0) return DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT;
-
-    const known: readonly string[] = LOGIN_VOICE_PAYLOAD_FORMATS;
-    if (known.includes(trimmed)) {
-      return trimmed as LoginVoicePayloadFormat;
-    }
-
-    this.logger.warn(
-      `LOGIN_VOICE_PAYLOAD_FORMAT="${trimmed}" is not one of ${LOGIN_VOICE_PAYLOAD_FORMATS.join(
-        "/",
-      )}; falling back to "${DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT}"`,
-    );
-    return DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT;
   }
 }

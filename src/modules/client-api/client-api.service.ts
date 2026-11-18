@@ -14,7 +14,6 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import {
   DEVICE_DEFAULT_LANG,
-  LoginVoiceField,
   VOICE_RECONCILE_PORT,
   VoiceReconcilePort,
 } from "@/modules/baidu-agent/baidu-agent.types";
@@ -100,14 +99,10 @@ export class ClientApiService {
 
   /**
    * 设备上线：校验密码 → upsert Device（幂等，重复上线仅更新登记）→
-   * 写入认领窗口 → 算出本轮要下发给固件的初始音色。
-   * 返回归一化 MAC、三方 LLM API KEY 与音色字段供 controller 组装响应。
+   * 写入认领窗口。
+   * 返回归一化 MAC 与三方 LLM API KEY 供 controller 组装响应。
    */
-  async loginMac(dto: LoginMacDto): Promise<{
-    mac: string;
-    apiKey: string;
-    loginVoice: LoginVoiceField | null;
-  }> {
+  async loginMac(dto: LoginMacDto): Promise<{ mac: string; apiKey: string }> {
     const mac = this.normalizeMac(dto.mac);
 
     if (!this.macKey || !this.verifyPassword(mac, dto.password)) {
@@ -121,7 +116,7 @@ export class ClientApiService {
       throw new InternalServerErrorException("llm api key not configured");
     }
 
-    const device = await this.prisma.device.upsert({
+    await this.prisma.device.upsert({
       where: { deviceId: mac },
       create: { deviceId: mac, macAddress: mac },
       update: { macAddress: mac },
@@ -135,51 +130,8 @@ export class ClientApiService {
       now - this.provisionWindowMs,
     );
 
-    const loginVoice = await this.resolveLoginVoice(device, mac);
-
     this.logger.log(`loginMac ok, mac=${mac}`);
-    return { mac, apiKey: this.llmApiKey, loginVoice };
-  }
-
-  /**
-   * 算出上线响应体里要下发给固件的音色字段；永不抛错、永不影响 200 响应。
-   *
-   * 协议 3.2 节的响应体没有这个字段，它是我方与机芯厂 2026-11-17 约定的扩展：
-   * 固件解析后在创建百度实例时拼进 tts 配置，于是本轮**第一句话**就是目标音色，
-   * 且不依赖设备签名有效期（1800 秒）与实例是否已登记。
-   *
-   * TODO(Q11): 字段名待机芯厂书面确认（对方原话只说「加一个音色id的参数」）。
-   * TODO(Q14): 老固件对 data 内未知字段的容忍度待确认；在此之前该字段只在解析
-   *   成功时出现，而默认配置下（音色目录为空、无 IP 默认音色）永不出现。
-   */
-  private async resolveLoginVoice(
-    device: { id: string; characterKey: string | null },
-    mac: string,
-  ): Promise<LoginVoiceField | null> {
-    try {
-      const resolution = await this.voiceReconcile.resolveInitialVoice({
-        deviceInternalId: device.id,
-        characterKey: device.characterKey ?? null,
-        lang: DEVICE_DEFAULT_LANG,
-      });
-
-      if (resolution.status === "ready") {
-        return resolution.field;
-      }
-      if (resolution.status === "blocked") {
-        this.logger.warn(
-          `loginMac voice not dispatched: reason=${resolution.reason}, mac=${mac}`,
-        );
-      }
-      return null;
-    } catch (error) {
-      this.logger.warn(
-        `loginMac voice dispatch failed, mac=${mac}, error=${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return null;
-    }
+    return { mac, apiKey: this.llmApiKey };
   }
 
   /**

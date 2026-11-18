@@ -239,19 +239,17 @@ export interface VoiceReconcilePort {
     deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
   /**
-   * 计算设备上线（loginMac）时应下发给固件的初始音色；永不抛错。
+   * IP/角色 → timbreId 权威映射查表；纯读配置，不出网、不查库、永不抛错。
    *
-   * 与 switchSceneRole 追平互补：这里决定「固件创建百度实例时用哪个音色」，
-   * 因此本轮第一句话就是目标音色，且不依赖设备签名有效期（1800 秒）
-   * 与实例是否活跃。机芯厂 2026-11-17 确认由固件解析该字段后拼进创建实例请求。
+   * 出厂音色由固件内置（产品定义，熊总 2026-11-17：「不联网状态就是写好了的」），
+   * 本映射**不用于上线下发**。它的用途是让服务端知道「某个 IP 对应哪个音色」，
+   * 供剧情内按角色切换音色时查表：冒险故事里非本机芯 IP 的角色说话时用该角色
+   * 自己的音色，故事结束后再切回本 IP 的音色。
+   *
+   * @param characterKey Device.characterKey（elly / polly）；null 或空串返回 null
+   * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
    */
-  resolveInitialVoice(params: {
-    deviceInternalId: string;
-    /** Device.characterKey（elly / polly），用于回落 IP 默认音色 */
-    characterKey: string | null;
-    /** 实例语种，取 DEVICE_DEFAULT_LANG */
-    lang: string;
-  }): Promise<InitialVoiceResolution>;
+  getTimbreForCharacter(characterKey: string | null): string | null;
   /** 语速档位 → spd 倍数；映射未配置时返回 null */
   resolveSpd(speechRate: string | null): number | null;
 }
@@ -267,8 +265,8 @@ export type SpeechRate = (typeof SPEECH_RATES)[number];
  * 设备默认语种。
  *
  * 机芯厂 2026-11-17 书面确认：固件 bot/start 上报的 lang 取值就是 `zh`，
- * 与《设备端接口文档》4.1 节「默认 zh」一致。loginMac 响应体的 lang、
- * bot/start 缺省回填、上线音色解析三处共用此常量，避免口径漂移。
+ * 与《设备端接口文档》4.1 节「默认 zh」一致。loginMac 响应体的 lang 与
+ * bot/start 缺省回填两处共用此常量，避免口径漂移。
  */
 export const DEVICE_DEFAULT_LANG = "zh";
 
@@ -286,60 +284,6 @@ export const TIMBRE_LANGUAGE_BY_LANG: Readonly<Record<string, string>> = {
   en: "english",
   ja: "japanese",
 };
-
-/**
- * 设备上线（loginMac）时下发给固件的音色载荷形态。
- *
- * - `timbreId`：只下发裸音色 id。严格对应机芯厂 2026-11-17 的原话
- *   「响应体里面加一个音色id的参数，我解析后在创建百度实例的时候拼接进去」，
- *   由固件自行拼 tts 串。**代价：语速传不过去**，只能事后靠 switchSceneRole。
- * - `tts`：下发完整配置串（形如 `DEFAULT{"vcn":"1000063","spd":0.8}`）。
- *   百度文档明确 switchSceneRole 的 tts 取值等价于创建实例接口的 tts_url，
- *   固件「拼接」退化为「原样填入」，音色与语速一次到位。
- *
- * TODO(Q12): 两种形态选哪种需机芯厂确认；确认前默认走 timbreId（有据可依的那一种），
- * 确认后只改 LOGIN_VOICE_PAYLOAD_FORMAT 配置，无需改代码。
- */
-export const LOGIN_VOICE_PAYLOAD_FORMATS = ["timbreId", "tts"] as const;
-export type LoginVoicePayloadFormat =
-  (typeof LOGIN_VOICE_PAYLOAD_FORMATS)[number];
-export const DEFAULT_LOGIN_VOICE_PAYLOAD_FORMAT: LoginVoicePayloadFormat =
-  "timbreId";
-
-/**
- * loginMac 响应体 `data` 内承载音色的字段名，按载荷形态取。
- *
- * TODO(Q11): 字段名未经机芯厂书面确认（对方只说了「加一个音色id的参数」）。
- * 确认前不改；确认后只改本表，响应体组装与固件解析自动对齐。
- * TODO(Q14): 老固件对 data 内新增未知字段的容忍度未确认（忽略 or 报错）。
- * 因此本字段只在解析成功时出现，且默认配置下（音色目录为空）永不出现。
- */
-export const LOGIN_VOICE_FIELD_BY_FORMAT: Readonly<
-  Record<LoginVoicePayloadFormat, string>
-> = {
-  timbreId: "timbreId",
-  tts: "tts",
-};
-
-/** 已按载荷形态组装好、可直接展开进 loginMac 响应体 data 的一个键值对 */
-export interface LoginVoiceField {
-  key: string;
-  value: string;
-}
-
-/**
- * 上线初始音色的解析结果。
- *
- * - `none`：没有可下发的音色期望值（正常态）。不下发字段，
- *   固件沿用百度互动应用自身的默认 tts。只配了语速、没配音色也归此类——
- *   创建实例时无法只表达 spd（见 TODO(Q12)）。
- * - `blocked`：有期望值但不可下发（fail-closed），带可归因 reason。
- * - `ready`：可下发，`field` 已按 LOGIN_VOICE_PAYLOAD_FORMAT 组装完毕。
- */
-export type InitialVoiceResolution =
-  | { status: "none" }
-  | { status: "blocked"; reason: VoiceApplyBlockReason }
-  | { status: "ready"; timbreId: string; field: LoginVoiceField };
 
 /**
  * DeviceConfig.payload 中保存音色期望值的键。

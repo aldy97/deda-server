@@ -853,17 +853,9 @@ describe("VoiceReconcileService", () => {
   });
 
   // ==========================================================================
-  // resolveInitialVoice — loginMac 下发给固件的初始音色
+  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表
   // ==========================================================================
-  describe("resolveInitialVoice", () => {
-    const TIMBRE = {
-      timbreId: "1000063",
-      name: "度小熊",
-      status: "TRAINED",
-      language: "chinese",
-    };
-    const TTS = 'DEFAULT{"vcn":"1000063","spd":1}';
-
+  describe("getTimbreForCharacter", () => {
     const rebuild = () => {
       service = new VoiceReconcileService(
         prisma as unknown as PrismaService,
@@ -873,376 +865,64 @@ describe("VoiceReconcileService", () => {
         mockClient,
       );
     };
-    const resolve = (
-      overrides: {
-        characterKey?: string | null;
-        lang?: string;
-      } = {},
-    ) =>
-      service.resolveInitialVoice({
-        deviceInternalId: DEVICE_UUID,
-        characterKey:
-          overrides.characterKey === undefined
-            ? "elly"
-            : overrides.characterKey,
-        lang: overrides.lang ?? "zh",
-      });
 
-    beforeEach(() => {
-      (buildTtsConfig as jest.Mock).mockReturnValue(TTS);
-      mockCatalog.available = true;
-      mockCatalog.find.mockReturnValue(TIMBRE);
-    });
-
-    it("should return none when neither DeviceConfig nor a character default exists", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = {};
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-    });
-
-    it("should return none when only a speech rate is configured (never guesses a timbre)", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "normal",
-        payload: null,
-      });
-      configValues = { SPEECH_RATE_MAP_JSON: '{"normal":1}' };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-      expect(buildTtsConfig).not.toHaveBeenCalled();
-    });
-
-    it("should never touch Redis, the instance record or the Baidu client", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = {};
-      rebuild();
-
-      await resolve();
-
-      expect(redis.getValue).not.toHaveBeenCalled();
-      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
-      expect(mockClient.interrupt).not.toHaveBeenCalled();
-    });
-
-    it("should return blocked disabled when the master switch is off", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      mockClient.enabled = false;
-      configValues = {};
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "blocked",
-        reason: "disabled",
-      });
-    });
-
-    it("should return blocked empty_catalog when the catalog placeholder is unfilled", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      mockCatalog.available = false;
-      configValues = {};
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "blocked",
-        reason: "empty_catalog",
-      });
-    });
-
-    it("should return blocked voice_not_in_catalog when the timbre or its language does not match", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "9999999" } },
-      });
-      mockCatalog.find.mockReturnValue(null);
-      configValues = {};
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "blocked",
-        reason: "voice_not_in_catalog",
-      });
-      expect(mockCatalog.find).toHaveBeenCalledWith("9999999", "zh");
-    });
-
-    it("should return ready with a bare timbreId field by default", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = {};
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-      // 默认形态只下发裸 id，由固件自己拼 tts 串
-      expect(buildTtsConfig).not.toHaveBeenCalled();
-    });
-
-    it("should return ready with the full tts config when the format is tts", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "normal",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
+    it("should return the mapped timbreId for a known character", () => {
       configValues = {
-        LOGIN_VOICE_PAYLOAD_FORMAT: "tts",
-        SPEECH_RATE_MAP_JSON: '{"normal":1}',
+        CHARACTER_TIMBRE_JSON: '{"elly":"1000063","polly":"1000064"}',
       };
       rebuild();
 
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "tts", value: TTS },
-      });
-      expect(buildTtsConfig).toHaveBeenCalledWith({ vcn: "1000063", spd: 1 });
+      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
+      expect(service.getTimbreForCharacter("polly")).toBe("1000064");
     });
 
-    it("should build tts without spd when no speech rate is configured", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = { LOGIN_VOICE_PAYLOAD_FORMAT: "tts" };
+    it("should return null for an unmapped, null or empty character key", () => {
+      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":"1000063"}' };
       rebuild();
 
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "tts", value: TTS },
-      });
-      expect(buildTtsConfig).toHaveBeenCalledWith({ vcn: "1000063" });
+      expect(service.getTimbreForCharacter("polly")).toBeNull();
+      expect(service.getTimbreForCharacter(null)).toBeNull();
+      expect(service.getTimbreForCharacter("")).toBeNull();
     });
 
-    it("should fall back to an unknown format by using the documented default", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = { LOGIN_VOICE_PAYLOAD_FORMAT: "carrier-pigeon" };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-    });
-
-    it("should fall back to the character default timbre when DeviceConfig has no vcn", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-    });
-
-    it("should prefer an explicit DeviceConfig vcn over the character default", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000064" } },
-      });
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
-
-      await expect(resolve({ characterKey: "elly" })).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000064",
-        field: { key: "timbreId", value: "1000064" },
-      });
-      expect(mockCatalog.find).toHaveBeenCalledWith("1000064", "zh");
-    });
-
-    it("should pick the default of the actual characterKey, not a hardcoded one", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = {
-        CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":"1000063","polly":"1000064"}',
-      };
-      mockCatalog.find.mockReturnValue({ ...TIMBRE, timbreId: "1000064" });
-      rebuild();
-
-      await expect(resolve({ characterKey: "polly" })).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000064",
-        field: { key: "timbreId", value: "1000064" },
-      });
-    });
-
-    it("should return none when characterKey is null and no explicit vcn exists", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
-
-      await expect(resolve({ characterKey: null })).resolves.toEqual({
-        status: "none",
-      });
-    });
-
-    it("should return none when the characterKey has no default configured", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
-
-      await expect(resolve({ characterKey: "unknown-ip" })).resolves.toEqual({
-        status: "none",
-      });
-    });
-
-    it("should ignore a malformed character default map and stay fail-closed", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: "not json" };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-    });
-
-    it("should ignore a character default map that is valid JSON but not an object", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '["1000063"]' };
-      rebuild();
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '"1000063"' };
-      rebuild();
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-    });
-
-    it("should ignore non-string and empty entries in the character default map", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = {
-        CHARACTER_DEFAULT_TIMBRE_JSON:
-          '{"elly":"","polly":null,"other":["x"],"flag":true}',
-      };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({ status: "none" });
-      await expect(resolve({ characterKey: "polly" })).resolves.toEqual({
-        status: "none",
-      });
-    });
-
-    it("should accept a numeric timbreId in the character default map", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      configValues = { CHARACTER_DEFAULT_TIMBRE_JSON: '{"elly":1000063}' };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-    });
-
-    it("should degrade to the timbre alone when the rate map lacks the tier, and log it", async () => {
-      const warn = jest
-        .spyOn(Logger.prototype, "warn")
-        .mockImplementation(() => undefined);
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "fast",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = { SPEECH_RATE_MAP_JSON: '{"normal":1}' };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "timbreId", value: "1000063" },
-      });
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("speech rate map missing"),
-      );
-      warn.mockRestore();
-    });
-
-    it("should keep spd out of the tts payload when degrading", async () => {
-      jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "fast",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        LOGIN_VOICE_PAYLOAD_FORMAT: "tts",
-      };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "tts", value: TTS },
-      });
-      expect(buildTtsConfig).toHaveBeenCalledWith({ vcn: "1000063" });
-      jest.restoreAllMocks();
-    });
-
-    it("should still apply the rate when the map does contain the tier", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "fast",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"normal":1,"fast":1.25}',
-        LOGIN_VOICE_PAYLOAD_FORMAT: "tts",
-      };
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "ready",
-        timbreId: "1000063",
-        field: { key: "tts", value: TTS },
-      });
-      expect(buildTtsConfig).toHaveBeenCalledWith({
-        vcn: "1000063",
-        spd: 1.25,
-      });
-    });
-
-    it("should return blocked invalid_request when tts assembly throws", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
-      configValues = { LOGIN_VOICE_PAYLOAD_FORMAT: "tts" };
-      (buildTtsConfig as jest.Mock).mockImplementation(() => {
-        throw new Error("vcn must be a non-empty string");
-      });
-      rebuild();
-
-      await expect(resolve()).resolves.toEqual({
-        status: "blocked",
-        reason: "invalid_request",
-      });
-    });
-
-    it("should return blocked internal_error and never throw on unexpected failure", async () => {
-      jest.spyOn(Logger.prototype, "warn").mockImplementation();
-      prisma.deviceConfig.findFirst.mockRejectedValue(new Error("db down"));
+    it("should return null and never throw when unconfigured or malformed", () => {
       configValues = {};
       rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
 
-      await expect(resolve()).resolves.toEqual({
-        status: "blocked",
-        reason: "internal_error",
-      });
-      jest.restoreAllMocks();
+      configValues = { CHARACTER_TIMBRE_JSON: "bad json" };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+
+      // 顶层不是对象：数组与标量都视为未配置，不猜
+      configValues = { CHARACTER_TIMBRE_JSON: '["1000063"]' };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+
+      configValues = { CHARACTER_TIMBRE_JSON: '"1000063"' };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+    });
+
+    it("should accept a numeric timbreId and normalise it to a string", () => {
+      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":1000063}' };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
+    });
+
+    it("should skip empty and non-string entries without failing the map", () => {
+      configValues = {
+        CHARACTER_TIMBRE_JSON:
+          '{"elly":"","polly":null,"other":["x"],"flag":true,"ok":"1000063"}',
+      };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+      expect(service.getTimbreForCharacter("polly")).toBeNull();
+      expect(service.getTimbreForCharacter("other")).toBeNull();
+      expect(service.getTimbreForCharacter("flag")).toBeNull();
+      expect(service.getTimbreForCharacter("ok")).toBe("1000063");
     });
   });
 });
