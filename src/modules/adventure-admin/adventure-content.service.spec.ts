@@ -536,6 +536,57 @@ describe("AdventureContentService", () => {
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
+    /**
+     * 「新加了一段还没来得及写字」是写作过程中最常见的中间态。存不进库等于
+     * 浏览器一关整集内容全丢，所以草稿 payload 必须无损。真正该拦它的是发布：
+     * SEGMENT_TEXT_REQUIRED 在发布标准下是 error。
+     */
+    it("persists a segment whose text is still empty instead of refusing the whole draft", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+
+      const result = await service.saveDraft(
+        "ep1",
+        {
+          ...content,
+          segments: [
+            ...content.segments,
+            { order: 2, kind: "narration", text: "" },
+          ],
+        },
+        actor,
+        { reason: "先存下来，最后一段明天再写" },
+      );
+
+      const created = tx.adventureEpisodeVersion.create.mock.calls[0][0];
+      expect(created.data.payload.segments).toHaveLength(3);
+      expect(created.data.payload.segments[2]).toMatchObject({
+        order: 2,
+        text: "",
+      });
+      expect(result).toMatchObject({ created: true });
+    });
+
+    it("still refuses a draft whose segments are structurally malformed rather than merely unfinished", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.saveDraft(
+          "ep1",
+          {
+            ...content,
+            segments: [
+              ...content.segments,
+              { order: 2, kind: "banana" as never, text: "类型非法" },
+            ],
+          },
+          actor,
+          { reason: "畸形段落必须被明确拒绝，不能静默吃掉" },
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
     it("blocks identity-level lint errors but still saves content-level ones", async () => {
       query.checkContent.mockResolvedValue(errorReport("BUSINESS_KEY_TAKEN"));
       await expect(
@@ -695,6 +746,43 @@ describe("AdventureContentService", () => {
         expect.anything(),
         expect.objectContaining({ forPublish: true }),
       );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
+    });
+
+    /**
+     * 发布读草稿必须无损：如果这里把空段悄悄吃掉，lint 就看不见它，
+     * 发布出去的段数会比作者屏幕上少一段——那等于把「编辑器吃字」搬到了发布环节。
+     */
+    it("hands the empty segment to the publish lint instead of silently dropping it", async () => {
+      const draftWithEmpty = versionRow({
+        id: "v3",
+        version: 3,
+        status: "draft",
+        payload: {
+          title: "新标题",
+          recap: "新回顾",
+          segments: [
+            ...content.segments,
+            { order: 2, kind: "narration", text: "" },
+          ],
+        },
+      });
+      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
+        draftWithEmpty,
+      ]);
+      query.checkContent.mockResolvedValue(
+        errorReport("SEGMENT_TEXT_REQUIRED"),
+      );
+
+      await expect(
+        service.publish("ep1", actor, { reason: "空段必须被发布闸口拦下" }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      const checked = query.checkContent.mock.calls.at(-1)?.[1] as {
+        segments: unknown[];
+      };
+      expect(checked.segments).toHaveLength(3);
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
     });

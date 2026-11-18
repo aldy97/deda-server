@@ -28,7 +28,7 @@ import {
   BundleEpisode,
   SegmentDiff,
   diffEpisodes,
-  toBundleEpisode,
+  toDraftEpisode,
 } from "./adventure-bundle";
 import {
   ContentAdminProfile,
@@ -49,8 +49,9 @@ import {
  * 现在编辑的草稿是基于哪一个版本。破坏性操作的确认弹窗全靠这些数字，
  * 所以「影响面」是读侧的一等公民，不是附带信息。
  *
- * 内容一律经 `toBundleEpisode` 的白名单补全后再返回：表单拿到的每一段字段齐全，
- * 不会出现 undefined 空洞，也不会把历史脏字段透传给前端。
+ * 内容一律经 `toDraftEpisode` 的白名单补全后再返回：表单拿到的每一段字段齐全，
+ * 不会出现 undefined 空洞，也不会把历史脏字段透传给前端。读侧用无损口径，是为了
+ * 让「还没写字」的空段能原样回到编辑器；bundle 一侧仍走严格的 `toBundleEpisode`。
  */
 
 export const SEGMENT_KINDS = ["narration", "interaction"] as const;
@@ -430,11 +431,13 @@ export class AdventureContentQueryService {
       this.loadVersion(episodeId, leftVersionId),
       this.loadVersion(episodeId, rightVersionId),
     ]);
-    const leftEpisode = toBundleEpisode(
+    // 两侧都用无损口径：草稿侧可能存着空文本段，若在这里走严格规范化，
+    // 对比结果会把那一段整个抹掉，作者看到的是「两边一样」——比不显示更糟。
+    const leftEpisode = toDraftEpisode(
       identity,
       contentFromPayload(identity, left.payload),
     );
-    const rightEpisode = toBundleEpisode(
+    const rightEpisode = toDraftEpisode(
       identity,
       contentFromPayload(identity, right.payload),
     );
@@ -620,13 +623,20 @@ export function episodeIdentity(episode: AdventureEpisode): EpisodeIdentity {
   };
 }
 
-/** 版本 payload → 可编辑草稿。白名单补全，脏字段在这里被丢掉。 */
+/**
+ * 版本 payload → 可编辑草稿。白名单补全，脏字段在这里被丢掉。
+ *
+ * 用无损口径（toDraftEpisode）：草稿行里可能存着「还没写字」的空段，读回来必须
+ * 原样还在，否则 (a) 作者刷新一次页面就少一段，(b) 发布时 lint 看不到那个空段，
+ * 会静默发布出比屏幕上少一段的内容。已发布 / superseded 的快照本来就是严格口径
+ * 写进去的，对它们这个函数是恒等变换，不需要数据迁移。
+ */
 export function contentFromPayload(
   identity: EpisodeIdentity,
   payload: unknown,
 ): EpisodeContentDraft {
   const source = (payload ?? {}) as Partial<EpisodeContentDraft>;
-  const normalized = toBundleEpisode(identity, {
+  const normalized = toDraftEpisode(identity, {
     title: typeof source.title === "string" ? source.title : "",
     recap: source.recap ?? null,
     segments: Array.isArray(source.segments) ? source.segments : [],

@@ -21,7 +21,11 @@ import {
   draftToken,
 } from "./adventure-content.types";
 import { LintReport } from "./adventure-linter";
-import { episodeContentHash, toBundleEpisode } from "./adventure-bundle";
+import {
+  episodeContentHash,
+  toBundleEpisode,
+  toDraftEpisode,
+} from "./adventure-bundle";
 
 /**
  * 冒险内容写侧。三条不可让步的原则：
@@ -1044,8 +1048,10 @@ function assertNoBlockingCodes(report: LintReport, codes: string[]): void {
 }
 
 /**
- * 规范化会丢掉空文本段（对外来 bundle 是对的，对草稿不是）。
- * 草稿存一次就少一段等于编辑器吃字，所以这里把静默丢段变成一次明确的报错。
+ * 把「静默丢段」变成一次明确的报错。
+ * 比对基准是**实际要写进去的那份**规范化结果（toDraftEpisode，无损口径）：
+ * 空文本段现在能存下来了，所以这里只会因段号非法或段落类型非法而触发——
+ * 那两类是垃圾数据，不是「写到一半」，丢掉之前必须先说清楚。
  */
 function assertNoSegmentLoss(
   identity: EpisodeIdentity,
@@ -1055,14 +1061,14 @@ function assertNoSegmentLoss(
   const incoming = Array.isArray(content?.segments)
     ? content.segments.length
     : 0;
-  const kept = toBundleEpisode(identity, content).segments.length;
+  const kept = toDraftEpisode(identity, content).segments.length;
   if (kept === incoming) {
     return;
   }
   throw new BadRequestException({
     message: `有 ${
       incoming - kept
-    } 段因为缺文本、段号非法或段落类型非法而无法保存。草稿不会偷偷吃掉你写的段落——请先补齐标红的段。`,
+    } 段因为段号非法或段落类型非法而无法保存。草稿不会偷偷吃掉你写的段落——请先补齐标红的段。`,
     code: "SEGMENT_WOULD_BE_DROPPED",
     lint: report,
   });
@@ -1095,11 +1101,16 @@ function throwIfBusinessKeyTaken(error: unknown, key: string): void {
   }
 }
 
+/**
+ * 写进草稿行的 payload 用无损规范化：空文本段必须原样留着。
+ * 草稿是可变行，作者要能把「新加一段还没写字」的中间态存下来；
+ * 这里若沿用 bundle 的严格规范化，存一次就少一段，等于编辑器吃字。
+ */
 function buildPayload(
   identity: EpisodeIdentity,
   content: EpisodeContentDraft,
 ): EpisodePayload {
-  const normalized = toBundleEpisode(identity, content);
+  const normalized = toDraftEpisode(identity, content);
   return {
     title: normalized.title,
     recap: normalized.recap,
@@ -1107,6 +1118,13 @@ function buildPayload(
   };
 }
 
+/**
+ * 内容哈希刻意继续走**严格**规范化（bundle 口径），不跟 payload 一起改成无损。
+ * 理由：contentHash 是跨环境比对的身份证，staging 与 prod 必须对同样的内容算出
+ * 同样的值；改口径会让线上已存的哈希全部失配，导入永远判成 replace。
+ * 代价（已知并接受）：只差一个空段的两份草稿哈希相同——乐观锁靠 baseDraftUpdatedAt
+ * 兜住不受影响，导入的「内容相同可覆盖」判断会认为它们相同，覆盖时丢掉那个空段。
+ */
 function payloadHash(identity: EpisodeIdentity, content: EpisodeContentDraft) {
   return episodeContentHash(toBundleEpisode(identity, content));
 }

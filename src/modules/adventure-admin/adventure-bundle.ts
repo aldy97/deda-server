@@ -227,7 +227,10 @@ function normalizeOptions(
   return null;
 }
 
-function normalizeSegment(raw: Record<string, unknown>): BundleSegment | null {
+function normalizeSegment(
+  raw: Record<string, unknown>,
+  allowEmptyText = false,
+): BundleSegment | null {
   const order = Number(raw.order);
   const kind = raw.kind;
   const text = asString(raw.text);
@@ -237,7 +240,7 @@ function normalizeSegment(raw: Record<string, unknown>): BundleSegment | null {
   if (kind !== "narration" && kind !== "interaction") {
     return null;
   }
-  if (!text) {
+  if (!text && !allowEmptyText) {
     return null;
   }
   const rawType = raw.interactionType;
@@ -261,16 +264,19 @@ function normalizeSegment(raw: Record<string, unknown>): BundleSegment | null {
   };
 }
 
-/** 把身份 + 内容草稿压成 bundle 里的白名单形状：外壳字段在此被剥掉。 */
-export function toBundleEpisode(
+function normalizeEpisode(
   identity: EpisodeIdentity,
   content: EpisodeContentDraft,
+  allowEmptyText: boolean,
 ): BundleEpisode {
   const rawSegments = Array.isArray(content?.segments) ? content.segments : [];
   const segments = rawSegments
     .map((segment) =>
       segment && typeof segment === "object"
-        ? normalizeSegment(segment as unknown as Record<string, unknown>)
+        ? normalizeSegment(
+            segment as unknown as Record<string, unknown>,
+            allowEmptyText,
+          )
         : null,
     )
     .filter((segment): segment is BundleSegment => segment !== null)
@@ -284,6 +290,35 @@ export function toBundleEpisode(
     recap: asNullableString(content?.recap),
     segments,
   };
+}
+
+/** 把身份 + 内容草稿压成 bundle 里的白名单形状：外壳字段在此被剥掉。 */
+export function toBundleEpisode(
+  identity: EpisodeIdentity,
+  content: EpisodeContentDraft,
+): BundleEpisode {
+  return normalizeEpisode(identity, content, false);
+}
+
+/**
+ * 草稿 / 版本快照用的无损规范化：与 toBundleEpisode 唯一的区别是**不因文本为空而丢段**。
+ *
+ * 「新加一段还没来得及写字」是写作过程中最常见的中间态；存不进库等于浏览器一关
+ * 整集内容全丢，所以草稿 payload 必须无损。空段最终由发布闸口拦下
+ * （SEGMENT_TEXT_REQUIRED 在发布标准下是 error），不会到达孩子。
+ *
+ * 畸形的 order / kind 仍然丢弃：那不是「写到一半」而是垃圾数据，
+ * 而且 EpisodeSegmentDraft.kind 是严格联合类型，留着也过不了类型关。
+ * 丢掉段落这件事本身仍由 assertNoSegmentLoss 明确报错，不会静默发生。
+ *
+ * bundle 一侧刻意保持严格（不给 toBundleEpisode 加开关）：跨环境运输件里
+ * 不该出现沉默段，而开关迟早会被误用到导出链路上。
+ */
+export function toDraftEpisode(
+  identity: EpisodeIdentity,
+  content: EpisodeContentDraft,
+): BundleEpisode {
+  return normalizeEpisode(identity, content, true);
 }
 
 export function buildBundle(
