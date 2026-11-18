@@ -9,12 +9,12 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `baidu-agent.types.ts` | 唯一契约：端口 token、端口接口、常量、`VoiceApplyBlockReason`、`parseVoicePayload` |
+| `baidu-agent.types.ts` | 唯一契约：端口 token、端口接口、常量（含 `DEVICE_DEFAULT_LANG`、`TTS_SPD_MIN/MAX`）、`VoiceApplyBlockReason`、`parseVoicePayload` |
 | `bce-auth-string.util.ts` | 解析 BCE v1 认证字符串、判定过期、校验必需签名头；返回值不含 AK 与 signature |
 | `tts-config.util.ts` | 组装 tts 配置串 `DEFAULT{"vcn":...,"spd":...}`；只含 vcn/spd，不含 vol |
 | `baidu-agent-client.service.ts` | 出站 HTTP 客户端：守卫链 → 手工拼 body → axios 调用 → 归一化结果 |
 | `voice-catalog.service.ts` | 音色目录（`VOICE_CATALOG_JSON` placeholder，权威来源是百度 timbres 接口） |
-| `voice-reconcile.service.ts` | 编排：读期望值 → fail-closed 判定 → 下发或归因 deferred |
+| `voice-reconcile.service.ts` | 编排：读期望值 → fail-closed 判定 → 下发或归因 deferred；另含 `getTimbreForCharacter`（IP/角色 → timbreId 纯查表，不出网） |
 | `baidu-agent.module.ts` | 装配，只导出三个端口 token |
 
 ## 端口（消费方只依赖 token，不依赖实现类）

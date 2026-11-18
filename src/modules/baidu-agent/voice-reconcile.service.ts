@@ -40,7 +40,12 @@ interface BotInstanceRecordView {
  * 职责：
  * 1. 从 DeviceConfig 读取设备当前期望的音色与语速；
  * 2. 对活跃百度实例实时下发（通过 switchSceneRole），或在条件不满足时返回
- *    可归因的 deferred 原因，留给下一轮 bot/start 追平。
+ *    可归因的 deferred 原因，留给下一轮 bot/start 追平；
+ * 3. 提供 IP/角色 → timbreId 查表（CHARACTER_TIMBRE_JSON），是平台侧「某个 IP 用哪个
+ *    音色」的唯一真相。设备端协议 v1.4（2026-11-18）新增 POST /client/bot/bot/getvalue：
+ *    固件每轮创建百度实例前拉取 vcn/vol/spd 且**不缓存**，vcn 即取自这张表；
+ *    剧情内多 IP 同剧时按角色切音色也查同一张表。
+ *    TODO(v1.4): getvalue 的服务端实现在后续 PR，本 PR 只提供数据源。
  */
 @Injectable()
 export class VoiceReconcileService implements VoiceReconcilePort {
@@ -50,6 +55,18 @@ export class VoiceReconcileService implements VoiceReconcilePort {
    * 档位→倍数是产品决策，走配置注入，代码里不出现魔法数字。
    */
   private readonly spdMap: ReadonlyMap<string, number>;
+
+  /**
+   * IP（Device.characterKey，如 elly / polly）→ timbreId 权威映射。
+   *
+   * 产品决策，走配置注入：音色目录本身还是 placeholder（TODO(Q1)），把具体 id
+   * 写进代码等于把待确认值固化。默认空表 → 查表一律返回 null，由调用方决定降级。
+   *
+   * 产品定义（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色，
+   * 家长不在小程序端选择音色——所以本映射的键就是 IP，值就是它唯一的音色。
+   * 消费方见 getTimbreForCharacter（getvalue 与剧情内切音色共用）。
+   */
+  private readonly characterTimbre: ReadonlyMap<string, string>;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -61,6 +78,9 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   ) {
     this.spdMap = this.parseSpdMap(
       this.configService.get<string>("SPEECH_RATE_MAP_JSON"),
+    );
+    this.characterTimbre = this.parseCharacterTimbre(
+      this.configService.get<string>("CHARACTER_TIMBRE_JSON"),
     );
   }
 
@@ -95,6 +115,17 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   }
 
   /**
+   * 角色/IP → timbreId 查表；未配置或未命中返回 null，由调用方决定降级。
+   *
+   * 纯查表，不校验 timbreId 是否在音色目录内：目录本身还是 placeholder
+   * （TODO(Q1)），此刻校验只会把「待确认」误判为「不合法」。
+   */
+  getTimbreForCharacter(characterKey: string | null): string | null {
+    if (!characterKey) return null;
+    return this.characterTimbre.get(characterKey) ?? null;
+  }
+
+  /**
    * 对设备当前活跃实例下发期望值；永不抛错。
    *
    * 与 onInstanceRegistered 的差别只在实例来源：这里要自己查 botCurrentKey，
@@ -109,7 +140,9 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     }
 
     if (!this.client.enabled) {
-      this.logger.warn(`Voice apply deferred: client disabled, mac=${mac}`);
+      // 配置态而非异常态：暗启动期间每次调用都会命中，记 warn 会刷屏。
+      // 可观测性由 App 接口响应里的 reason 字段保证。
+      this.logger.debug(`Voice apply deferred: client disabled, mac=${mac}`);
       return { applied: "deferred", reason: "disabled" };
     }
 
@@ -131,19 +164,25 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   async onInstanceRegistered(
     mac: string,
     instanceId: string,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome> {
     try {
-      const device = await this.prisma.device.findUnique({
-        where: { deviceId: mac },
-      });
-      if (!device) {
-        this.logger.warn(
-          `Voice reconcile deferred: device not found, mac=${mac}`,
-        );
-        return { applied: "deferred", reason: "invalid_request" };
+      // bot/start 已经查过 Device（401 校验），传进来就免掉这次重复查询。
+      let internalId = deviceInternalId;
+      if (!internalId) {
+        const device = await this.prisma.device.findUnique({
+          where: { deviceId: mac },
+        });
+        if (!device) {
+          this.logger.warn(
+            `Voice reconcile deferred: device not found, mac=${mac}`,
+          );
+          return { applied: "deferred", reason: "invalid_request" };
+        }
+        internalId = device.id;
       }
 
-      const desired = await this.readDesired(device.id);
+      const desired = await this.readDesired(internalId);
       return this.dispatchToInstance(mac, instanceId, desired);
     } catch (error) {
       this.logger.warn(
@@ -210,7 +249,8 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     }
 
     if (!this.client.enabled) {
-      this.logger.warn(
+      // 同 applyToActiveInstance：配置态，暗启动期间每轮 start 都会命中。
+      this.logger.debug(
         `Voice reconcile deferred: client disabled, mac=${mac}, instanceId=${instanceId}`,
       );
       return { applied: "deferred", reason: "disabled" };
@@ -297,7 +337,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   }
 
   // ---------------------------------------------------------------------------
-  // spd map parsing
+  // config parsing
   // ---------------------------------------------------------------------------
 
   private parseSpdMap(raw: string | undefined): ReadonlyMap<string, number> {
@@ -325,6 +365,53 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       if (typeof value !== "number" || !Number.isFinite(value)) continue;
       if (value < TTS_SPD_MIN || value > TTS_SPD_MAX) continue;
       map.set(key, value);
+    }
+    return map;
+  }
+
+  /**
+   * 解析 IP/角色 → timbreId 映射（供剧情内切音色时查表）。
+   *
+   * timbreId 在百度侧是 Long，配置里写数字或字符串都接受（与
+   * VoiceCatalogService 对 timbreId 的宽容度保持一致），统一转字符串。
+   * 结构非法或值为空一律跳过该条，不整体失败——一个 IP 配错不该拖垮另一个。
+   */
+  private parseCharacterTimbre(
+    raw: string | undefined,
+  ): ReadonlyMap<string, string> {
+    if (!raw || raw.trim().length === 0) return new Map();
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      this.logger.warn(
+        "CHARACTER_TIMBRE_JSON is not valid JSON; character timbre lookups will always miss",
+      );
+      return new Map();
+    }
+
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      this.logger.warn(
+        "CHARACTER_TIMBRE_JSON must be a JSON object of characterKey -> timbreId",
+      );
+      return new Map();
+    }
+
+    const map = new Map<string, string>();
+    for (const [key, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (trimmed.length > 0) map.set(key, trimmed);
+      } else if (typeof value === "number" && Number.isFinite(value)) {
+        map.set(key, String(value));
+      }
     }
     return map;
   }

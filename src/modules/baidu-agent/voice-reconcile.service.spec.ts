@@ -18,7 +18,7 @@ import {
   botInstanceKey,
 } from "../client-api/client-api.constants";
 
-// Mock buildTtsConfig — the other sub-agent is creating this file in parallel
+// buildTtsConfig 被 mock：本 spec 只验证编排，tts 串的组装由 tts-config.util.spec.ts 覆盖
 jest.mock("./tts-config.util", () => ({
   buildTtsConfig: jest.fn(),
 }));
@@ -820,6 +820,109 @@ describe("VoiceReconcileService", () => {
         reason: "internal_error",
       });
       // Should not throw
+    });
+
+    it("should skip the device lookup when deviceInternalId is provided", async () => {
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+
+      const result = await service.onInstanceRegistered(
+        MAC,
+        INSTANCE_ID,
+        DEVICE_UUID,
+      );
+
+      expect(result).toEqual({ applied: "noop" });
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+      expect(prisma.deviceConfig.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deviceId: DEVICE_UUID, isActive: true },
+        }),
+      );
+    });
+
+    it("should fall back to looking up the device when deviceInternalId is omitted", async () => {
+      prisma.device.findUnique.mockResolvedValue({ id: DEVICE_UUID });
+      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+
+      await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(prisma.device.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: MAC },
+      });
+    });
+  });
+
+  // ==========================================================================
+  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表
+  // ==========================================================================
+  describe("getTimbreForCharacter", () => {
+    const rebuild = () => {
+      service = new VoiceReconcileService(
+        prisma as unknown as PrismaService,
+        redis as unknown as RedisService,
+        { get: (key: string) => configValues[key] } as ConfigService,
+        mockCatalog,
+        mockClient,
+      );
+    };
+
+    it("should return the mapped timbreId for a known character", () => {
+      configValues = {
+        CHARACTER_TIMBRE_JSON: '{"elly":"1000063","polly":"1000064"}',
+      };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
+      expect(service.getTimbreForCharacter("polly")).toBe("1000064");
+    });
+
+    it("should return null for an unmapped, null or empty character key", () => {
+      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":"1000063"}' };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("polly")).toBeNull();
+      expect(service.getTimbreForCharacter(null)).toBeNull();
+      expect(service.getTimbreForCharacter("")).toBeNull();
+    });
+
+    it("should return null and never throw when unconfigured or malformed", () => {
+      configValues = {};
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+
+      configValues = { CHARACTER_TIMBRE_JSON: "bad json" };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+
+      // 顶层不是对象：数组与标量都视为未配置，不猜
+      configValues = { CHARACTER_TIMBRE_JSON: '["1000063"]' };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+
+      configValues = { CHARACTER_TIMBRE_JSON: '"1000063"' };
+      rebuild();
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+    });
+
+    it("should accept a numeric timbreId and normalise it to a string", () => {
+      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":1000063}' };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
+    });
+
+    it("should skip empty and non-string entries without failing the map", () => {
+      configValues = {
+        CHARACTER_TIMBRE_JSON:
+          '{"elly":"","polly":null,"other":["x"],"flag":true,"ok":"1000063"}',
+      };
+      rebuild();
+
+      expect(service.getTimbreForCharacter("elly")).toBeNull();
+      expect(service.getTimbreForCharacter("polly")).toBeNull();
+      expect(service.getTimbreForCharacter("other")).toBeNull();
+      expect(service.getTimbreForCharacter("flag")).toBeNull();
+      expect(service.getTimbreForCharacter("ok")).toBe("1000063");
     });
   });
 });

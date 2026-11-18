@@ -36,7 +36,9 @@ describe("ClientApiService", () => {
     zRemRangeByScore: jest.Mock;
   };
   let configValues: Record<string, string | undefined>;
-  let voiceReconcile: { onInstanceRegistered: jest.Mock };
+  let voiceReconcile: {
+    onInstanceRegistered: jest.Mock;
+  };
 
   const createService = async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -57,7 +59,9 @@ describe("ClientApiService", () => {
   beforeEach(async () => {
     prisma = {
       device: {
-        upsert: jest.fn().mockResolvedValue({ id: "device-uuid-1" }),
+        upsert: jest
+          .fn()
+          .mockResolvedValue({ id: "device-uuid-1", characterKey: "elly" }),
         findUnique: jest.fn().mockResolvedValue({ id: "device-uuid-1" }),
       },
     };
@@ -91,7 +95,10 @@ describe("ClientApiService", () => {
         password: GOLDEN_PASSWORD,
       });
 
-      expect(result).toEqual({ mac: MAC, apiKey: TEST_LLM_API_KEY });
+      expect(result).toEqual({
+        mac: MAC,
+        apiKey: TEST_LLM_API_KEY,
+      });
       expect(prisma.device.upsert).toHaveBeenCalledWith({
         where: { deviceId: MAC },
         create: { deviceId: MAC, macAddress: MAC },
@@ -272,10 +279,13 @@ describe("ClientApiService", () => {
       await service.botStart(startDto);
 
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
+      // 第三个参数是 bot/start 401 校验时已经查到的 Device.id，避免重复查询
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
+        "device-uuid-1",
       );
+      expect(prisma.device.findUnique).toHaveBeenCalledTimes(1);
     });
 
     it("passes the normalized mac to the hook", async () => {
@@ -284,7 +294,25 @@ describe("ClientApiService", () => {
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
+        "device-uuid-1",
       );
+    });
+
+    it("does not wait for the reconcile to settle before resolving (protocol 4.2 latency)", async () => {
+      let release: () => void = () => undefined;
+      voiceReconcile.onInstanceRegistered.mockReturnValue(
+        new Promise((resolve) => {
+          release = () => resolve({ applied: "live" });
+        }),
+      );
+
+      // 出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS(5000)；bot/start 必须
+      // 先返回 200，否则设备会按协议 6.2 重试，把一次慢调用放大成多次。
+      await expect(service.botStart(startDto)).resolves.toBeUndefined();
+      expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
+      expect(redisStore.get(botCurrentKey(MAC))).toBe(startDto.instanceid);
+
+      release();
     });
 
     it("reconciles again on a repeated start (signature refresh)", async () => {

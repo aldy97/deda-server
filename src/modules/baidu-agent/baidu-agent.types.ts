@@ -229,11 +229,29 @@ export interface VoiceReconcilePort {
    * 设备 start 登记成功后的追平入口；永不抛错。
    * 协议 4.2 要求 start 幂等返回 {"code":200}，追平失败绝不能影响该响应，
    * 否则设备会按协议 6.2 做无意义重试。
+   *
+   * @param deviceInternalId 可选。调用方（bot/start）已经查过 Device，
+   *   传入即免去本方法内的重复查询；不传则自行按 mac 查。
    */
   onInstanceRegistered(
     mac: string,
     instanceId: string,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
+  /**
+   * IP/角色 → timbreId 权威映射查表；纯读配置，不出网、不查库、永不抛错。
+   *
+   * 用途是让服务端知道「某个 IP 对应哪个音色」，两个消费方：
+   * 1. 设备端协议 v1.4（2026-11-18）新增的 POST /client/bot/bot/getvalue——固件每轮
+   *    创建百度实例前拉取 vcn/vol/spd 且不缓存，vcn 即取自本映射
+   *    （TODO(v1.4)：该接口的服务端实现在后续 PR）；
+   * 2. 剧情内按角色切换音色：冒险故事里非本机芯 IP 的角色说话时用该角色
+   *    自己的音色，故事结束后再切回本 IP 的音色。
+   *
+   * @param characterKey Device.characterKey（elly / polly）；null 或空串返回 null
+   * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
+   */
+  getTimbreForCharacter(characterKey: string | null): string | null;
   /** 语速档位 → spd 倍数；映射未配置时返回 null */
   resolveSpd(speechRate: string | null): number | null;
 }
@@ -246,13 +264,22 @@ export const SPEECH_RATES = ["slow", "normal", "fast"] as const;
 export type SpeechRate = (typeof SPEECH_RATES)[number];
 
 /**
+ * 设备默认语种。
+ *
+ * 机芯厂 2026-11-17 书面确认：固件 bot/start 上报的 lang 取值就是 `zh`，
+ * 与《设备端接口文档》4.1 节「默认 zh」一致。loginMac 响应体的 lang 与
+ * bot/start 缺省回填两处共用此常量，避免口径漂移。
+ */
+export const DEVICE_DEFAULT_LANG = "zh";
+
+/**
  * 实例语种（机芯厂文档 4.1 的 lang，如 zh）→ 音色 language（timbres 接口枚举）。
  *
  * 依据：timbres 响应参数 language 取值为 chinese/english/japanese，
  * 且 switchSceneRole 明确「不可跨语言互切角色」，因此必须按语种过滤音色。
+ * `zh` 一侧已由机芯厂 2026-11-17 确认；`en`/`ja` 仍是由两页文档取值域推得。
  *
- * TODO(Q1): 该映射由两页文档的取值域推得，未经机芯厂/百度确认；
- * 未确认前保持严格策略——映射不到的语种一律返回空目录（fail-closed）。
+ * TODO(Q1): en/ja 映射未经确认；映射不到的语种一律返回空目录（fail-closed）。
  */
 export const TIMBRE_LANGUAGE_BY_LANG: Readonly<Record<string, string>> = {
   zh: "chinese",

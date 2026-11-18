@@ -1,6 +1,7 @@
 import { Body, Controller, Post, Res } from "@nestjs/common";
 import { ApiExcludeController } from "@nestjs/swagger";
 import { Response } from "express";
+import { DEVICE_DEFAULT_LANG } from "@/modules/baidu-agent/baidu-agent.types";
 import { ClientApiService } from "./client-api.service";
 import { LoginMacDto } from "./dto/login-mac.dto";
 import { BotStartDto } from "./dto/bot-start.dto";
@@ -28,6 +29,12 @@ export class ClientApiController {
 
   /**
    * 设备上线登记：校验成功后在响应头 Authorization 返回三方 LLM API KEY。
+   *
+   * 响应体按《设备端接口文档》v1.2 的 3.2 节返回 {id, nickname, lang}。
+   *
+   * TODO(v1.4): 2026-11-18 的 v1.4 已删除响应体里的 lang（loginMac 只作登录用），
+   * 音色/语速/音量改由新接口 POST /client/bot/bot/getvalue 每轮下发；
+   * 该对齐在后续 PR 完成，本 PR 不改现有响应体。
    */
   @Post("user/user/loginMac")
   async loginMac(
@@ -41,7 +48,7 @@ export class ClientApiController {
       data: {
         id: mac,
         nickname: `设备 ${mac.slice(-6)}`,
-        lang: "zh",
+        lang: DEVICE_DEFAULT_LANG,
       },
       msg: "success",
     });
