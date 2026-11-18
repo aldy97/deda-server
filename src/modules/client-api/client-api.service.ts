@@ -19,12 +19,17 @@ import {
 } from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
+  DEFAULT_SPEECH_RATE,
   PROVISION_RECENT_KEY,
+  TTS_BASE_SPD,
   botCurrentKey,
   botInstanceKey,
+  deviceNickname,
   resolveProvisionWindowMs,
+  resolveTtsDefaultVol,
 } from "./client-api.constants";
 import { LoginMacDto } from "./dto/login-mac.dto";
+import { BotGetValueDto } from "./dto/bot-getvalue.dto";
 import { BotStartDto } from "./dto/bot-start.dto";
 import { BotStopDto } from "./dto/bot-stop.dto";
 
@@ -53,14 +58,16 @@ interface BotInstanceRecord {
 }
 
 /**
- * 机芯厂设备侧 HTTP 接口（《设备端接口文档》v1.2）。
+ * 机芯厂设备侧 HTTP 接口（《设备端接口文档》v1.4）。
  *
  * - loginMac：设备联网后上报 MAC + 校验密码，服务端建档并在响应头返回
  *   三方 LLM API KEY；成功上线写入认领窗口（Redis sorted set），
  *   供小程序 GET /devices/provision-candidates 轮询认领。
+ * - bot/getvalue：每轮创建百度实例前下发本轮 TTS 配置（vcn/vol/spd），
+ *   固件不缓存，是平台侧音色配置到达设备的唯一通道。
  * - bot/start、bot/stop：每轮百度智能体实例的登记与结束，
  *   登记存 Redis（带 TTL），不建数据库表；登记状态丢失时设备按 401
- *   重新 loginMac 后重试，协议自恢复（文档 6.2 节）。
+ *   重新 loginMac 后重试，协议自恢复（v1.4 §7.2）。
  *
  * MAC 口径：本模块一律小写（协议约定）。注意 DeviceLinkService 的 MQTT
  * 旧链路归一化为大写，仅影响其自有 Redis key，不与此处冲突；新固件
@@ -72,6 +79,11 @@ export class ClientApiService {
   private readonly macKey?: string;
   private readonly llmApiKey?: string;
   private readonly provisionWindowMs: number;
+  /**
+   * getvalue 响应体 `vol` 的唯一来源（全局配置，不做每设备可调）。
+   * null 表示配置缺失或越界，此时 getvalue 一律 500。
+   */
+  private readonly ttsDefaultVol: number | null;
 
   constructor(
     private readonly configService: ConfigService,
@@ -95,6 +107,16 @@ export class ClientApiService {
     this.provisionWindowMs = resolveProvisionWindowMs(
       this.configService.get<string>("PROVISION_CLAIM_WINDOW_SEC"),
     );
+    this.ttsDefaultVol = resolveTtsDefaultVol(
+      this.configService.get<string>("TTS_DEFAULT_VOL"),
+    );
+    if (this.ttsDefaultVol === null) {
+      // 启动自检：v1.4 §4.3 下 vol 非法会让设备每轮对话都创建失败，
+      // 且固件不会自动重新 loginMac，只能在服务端日志里看见原因。
+      this.logger.error(
+        "TTS_DEFAULT_VOL is not a number within [0.5, 2.0]; bot/getvalue will fail with 500 and devices cannot create agent instances",
+      );
+    }
   }
 
   /**
@@ -111,7 +133,7 @@ export class ClientApiService {
       throw new UnauthorizedException("invalid password");
     }
     if (!this.llmApiKey) {
-      // 服务端配置缺失；文档 6.2：设备对 500 退避重试
+      // 服务端配置缺失；v1.4 §7.1：设备对 500 保留原参数退避重试
       this.logger.error("LLM_ADAPTER_API_KEY is not configured");
       throw new InternalServerErrorException("llm api key not configured");
     }
@@ -132,6 +154,61 @@ export class ClientApiService {
 
     this.logger.log(`loginMac ok, mac=${mac}`);
     return { mac, apiKey: this.llmApiKey };
+  }
+
+  /**
+   * 每轮创建百度实例前下发本轮 TTS 配置（《设备端接口文档》v1.4 §4）。
+   *
+   * 三个字段都是必填且必须落在 v1.4 §4.2 的取值域内，任一不满足固件就停止
+   * 本轮创建、不发 start 也不发 stop（§4.3），且不会自动重新 loginMac——
+   * 所以这里宁可抛 500 也不返回编造的兜底值：一个假的 vcn 会让设备用错音色
+   * 且无人察觉，一个 500 至少在服务端日志里留下可归因的原因。
+   *
+   * vcn 只取 `CHARACTER_TIMBRE_JSON`（IP → timbreId）：产品定义是一个机芯一个
+   * IP、一个 IP 一个专属音色，家长端不选音色。运维经
+   * `/device-configs/:deviceId/voice` 写入的 `desired.vcn` 在这里**刻意不采信**，
+   * 否则同一个设备会出现「本轮实例用运维值、下一轮实例用角色值」的漂移；
+   * 该端点的定位是实时修正与可观测归因，见 docs/voice-switching.md §2.1。
+   */
+  async botGetValue(
+    dto: BotGetValueDto,
+  ): Promise<{ vcn: string; vol: number; spd: number }> {
+    // id 是 loginMac 返回的原值；我方 loginMac 的 id 就是归一化 MAC，
+    // 因此复用同一套归一化规则，非法形态同样按 400 拒绝。
+    const mac = this.normalizeMac(dto.id);
+    const device = await this.assertDeviceRegistered(mac);
+
+    const expectedNickname = deviceNickname(mac);
+    if (dto.nickname !== expectedNickname) {
+      // v1.4 §4.1 要求原值回传；不一致只 warn——nickname 不参与定位设备，
+      // 拒答会让设备整轮无法对话（§4.3），代价远大于一个展示名不符。
+      this.logger.warn(`getvalue nickname mismatch, mac=${mac}`);
+    }
+
+    if (this.ttsDefaultVol === null) {
+      this.logger.error(`getvalue cannot resolve vol, mac=${mac}`);
+      throw new InternalServerErrorException("tts volume not configured");
+    }
+
+    const vcn = this.voiceReconcile.getTimbreForCharacter(device.characterKey);
+    if (!vcn) {
+      // TODO(Q1): timbreId 待机芯公司/熊总提供；CHARACTER_TIMBRE_JSON 填上即恢复，
+      // 代码无需改动。这是 v1.4 落地的发布闸口——固件升级到 v1.4 前必须填好。
+      this.logger.error(
+        `getvalue cannot resolve vcn: CHARACTER_TIMBRE_JSON has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
+      );
+      throw new InternalServerErrorException("timbre not configured");
+    }
+
+    const desired = await this.voiceReconcile.readDesired(device.id);
+    // 未设档位 → 走中档；档位无法映射为倍数（SPEECH_RATE_MAP_JSON 缺该项）→
+    // 回落 v1.4 §4.2 的基础语速。spd 与 vcn 不同：它有书面兜底值，不会让设备停摆。
+    const spd =
+      this.voiceReconcile.resolveSpd(
+        desired.speechRate ?? DEFAULT_SPEECH_RATE,
+      ) ?? TTS_BASE_SPD;
+
+    return { vcn, vol: this.ttsDefaultVol, spd };
   }
 
   /**
@@ -196,8 +273,8 @@ export class ClientApiService {
     }
 
     // 不 await：出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS（默认 5000ms），
-    // 而协议 4.2 要求本接口幂等快速返回 {"code":200}。等追平完成再响应会把
-    // 一次慢调用放大成设备的多轮重试（协议 6.2）。
+    // 而 v1.4 §5.2 要求本接口幂等快速返回 {"code":200}。等追平完成再响应会把
+    // 一次慢调用放大成设备的多轮重试（v1.4 §7.2）。
     void this.reconcileVoice(mac, dto.instanceid, device.id);
   }
 
@@ -208,7 +285,7 @@ export class ClientApiService {
    * 只有在这里才可能变成 live。
    *
    * 本方法由 botStart 以 fire-and-forget 方式触发，因此绝不允许未捕获的
-   * rejection 冒泡：协议 4.2 要求 start 幂等返回 {"code":200}，追平失败也不能
+   * rejection 冒泡：v1.4 §5.2 要求 start 幂等返回 {"code":200}，追平失败也不能
    * 影响该响应。onInstanceRegistered 自身已保证不抛，这里的 try/catch 是对
    * 该响应契约的第二层保险。
    *
@@ -267,8 +344,8 @@ export class ClientApiService {
   }
 
   /**
-   * MAC 归一化：删除 `:`、`-` 分隔符并转小写（协议 3.1 节规则），
-   * 非法形态按 400 拒绝（文档 6.1：参数/MAC 错误不自动重试）。
+   * MAC 归一化：删除 `:`、`-` 分隔符并转小写（v1.4 §1.4 通用约定），
+   * 非法形态按 400 拒绝（v1.4 §7.1：参数/MAC 错误「修正请求，不自动重复」）。
    */
   private normalizeMac(raw: string): string {
     const normalized = raw.replace(/[:-]/g, "").toLowerCase();
@@ -297,14 +374,16 @@ export class ClientApiService {
   }
 
   /**
-   * 校验设备已上线登记（协议 4.1/5.1：未上线返回 401）。
+   * 校验设备已上线登记（v1.4 §7.1：设备尚未上线登记 → 401）。
    * 返回查到的 Device 投影，供调用方复用——追平钩子需要内部 id，
-   * 否则每轮 start 会为同一个 id 多查一次库。
+   * getvalue 需要 characterKey，否则每轮都要为同一台设备多查一次库。
    */
-  private async assertDeviceRegistered(mac: string): Promise<{ id: string }> {
+  private async assertDeviceRegistered(
+    mac: string,
+  ): Promise<{ id: string; characterKey: string }> {
     const device = await this.prisma.device.findUnique({
       where: { deviceId: mac },
-      select: { id: true },
+      select: { id: true, characterKey: true },
     });
     if (!device) {
       throw new UnauthorizedException("device not registered");

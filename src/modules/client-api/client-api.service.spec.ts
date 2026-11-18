@@ -38,6 +38,9 @@ describe("ClientApiService", () => {
   let configValues: Record<string, string | undefined>;
   let voiceReconcile: {
     onInstanceRegistered: jest.Mock;
+    readDesired: jest.Mock;
+    getTimbreForCharacter: jest.Mock;
+    resolveSpd: jest.Mock;
   };
 
   const createService = async () => {
@@ -62,7 +65,9 @@ describe("ClientApiService", () => {
         upsert: jest
           .fn()
           .mockResolvedValue({ id: "device-uuid-1", characterKey: "elly" }),
-        findUnique: jest.fn().mockResolvedValue({ id: "device-uuid-1" }),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ id: "device-uuid-1", characterKey: "elly" }),
       },
     };
     redisStore = new Map();
@@ -84,6 +89,9 @@ describe("ClientApiService", () => {
     };
     voiceReconcile = {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
+      readDesired: jest.fn().mockResolvedValue({ vcn: null, speechRate: null }),
+      getTimbreForCharacter: jest.fn().mockReturnValue("1000957"),
+      resolveSpd: jest.fn().mockReturnValue(1.2),
     };
     service = await createService();
   });
@@ -298,7 +306,7 @@ describe("ClientApiService", () => {
       );
     });
 
-    it("does not wait for the reconcile to settle before resolving (protocol 4.2 latency)", async () => {
+    it("does not wait for the reconcile to settle before resolving (protocol 5.2 latency)", async () => {
       let release: () => void = () => undefined;
       voiceReconcile.onInstanceRegistered.mockReturnValue(
         new Promise((resolve) => {
@@ -307,7 +315,7 @@ describe("ClientApiService", () => {
       );
 
       // 出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS(5000)；bot/start 必须
-      // 先返回 200，否则设备会按协议 6.2 重试，把一次慢调用放大成多次。
+      // 先返回 200，否则设备会按 v1.4 §7.2 重试，把一次慢调用放大成多次。
       await expect(service.botStart(startDto)).resolves.toBeUndefined();
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
       expect(redisStore.get(botCurrentKey(MAC))).toBe(startDto.instanceid);
@@ -325,7 +333,7 @@ describe("ClientApiService", () => {
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(2);
     });
 
-    it("still resolves when the hook rejects (protocol 4.2 requires 200)", async () => {
+    it("still resolves when the hook rejects (protocol 5.2 requires 200)", async () => {
       voiceReconcile.onInstanceRegistered.mockRejectedValue(
         new Error("redis down"),
       );
@@ -435,6 +443,112 @@ describe("ClientApiService", () => {
       expect(cutoff).toBeGreaterThanOrEqual(
         before - DEFAULT_PROVISION_WINDOW_SECONDS * 1000,
       );
+    });
+  });
+
+  describe("botGetValue", () => {
+    const NICKNAME = "设备 ddeeff";
+    const dto = { id: MAC, nickname: NICKNAME };
+
+    it("returns vcn/vol/spd for a registered device", async () => {
+      voiceReconcile.readDesired.mockResolvedValue({
+        vcn: null,
+        speechRate: "fast",
+      });
+      voiceReconcile.resolveSpd.mockReturnValue(1.5);
+
+      await expect(service.botGetValue(dto)).resolves.toEqual({
+        vcn: "1000957",
+        vol: 1,
+        spd: 1.5,
+      });
+      expect(voiceReconcile.getTimbreForCharacter).toHaveBeenCalledWith("elly");
+      expect(voiceReconcile.resolveSpd).toHaveBeenCalledWith("fast");
+      expect(voiceReconcile.readDesired).toHaveBeenCalledWith("device-uuid-1");
+    });
+
+    it("normalizes the id the same way loginMac does", async () => {
+      await expect(
+        service.botGetValue({ id: "AA:BB-CC-DD-EE-FF", nickname: NICKNAME }),
+      ).resolves.toEqual({ vcn: "1000957", vol: 1, spd: 1.2 });
+    });
+
+    it("falls back to the default speech-rate key when none is set", async () => {
+      voiceReconcile.readDesired.mockResolvedValue({
+        vcn: null,
+        speechRate: null,
+      });
+
+      await service.botGetValue(dto);
+      expect(voiceReconcile.resolveSpd).toHaveBeenCalledWith("normal");
+    });
+
+    it("falls back to the base spd when the rate map cannot resolve", async () => {
+      voiceReconcile.resolveSpd.mockReturnValue(null);
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({ spd: 1 });
+    });
+
+    it("uses TTS_DEFAULT_VOL when configured", async () => {
+      configValues.TTS_DEFAULT_VOL = "1.5";
+      service = await createService();
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        vol: 1.5,
+      });
+    });
+
+    it("rejects with 500 when TTS_DEFAULT_VOL is outside the allowed range", async () => {
+      configValues.TTS_DEFAULT_VOL = "9";
+      service = await createService();
+
+      await expect(service.botGetValue(dto)).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
+    });
+
+    it("rejects with 500 when the character has no timbreId configured", async () => {
+      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+
+      await expect(service.botGetValue(dto)).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
+    });
+
+    it("rejects with 401 when the device never logged in", async () => {
+      prisma.device.findUnique.mockResolvedValue(null);
+
+      await expect(service.botGetValue(dto)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it("rejects with 400 when the id is not a mac", async () => {
+      await expect(
+        service.botGetValue({ id: "platform-returned-id", nickname: NICKNAME }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("still succeeds when the echoed nickname differs, only warning", async () => {
+      const warn = jest.spyOn(service["logger"], "warn");
+
+      await expect(
+        service.botGetValue({ id: MAC, nickname: "别的名字" }),
+      ).resolves.toEqual({ vcn: "1000957", vol: 1, spd: 1.2 });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("nickname mismatch"),
+      );
+    });
+
+    it("ignores an operator-set vcn so the character table stays authoritative", async () => {
+      voiceReconcile.readDesired.mockResolvedValue({
+        vcn: "9999999",
+        speechRate: "slow",
+      });
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        vcn: "1000957",
+      });
     });
   });
 });
