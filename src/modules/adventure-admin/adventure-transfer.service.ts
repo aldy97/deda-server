@@ -14,7 +14,7 @@ import {
 import {
   AdventureContentService,
   MutationOptions,
-  assertDraftSavable,
+  assertImportable,
   assertReason,
 } from "./adventure-content.service";
 import {
@@ -619,7 +619,9 @@ export class AdventureTransferService {
         entry.identity,
       );
       try {
-        assertDraftSavable(entry.identity, entry.content, report);
+        // 比编辑器的存草稿门槛严一档（多拦禁用词）：导入跨环境边界，目标环境的
+        // 运营没有逐字看过这份内容，不能指望「反正发布时还会拦」。
+        assertImportable(entry.identity, entry.content, report);
       } catch (error) {
         rejects.set(item.businessKey, describeBlockingError(error, report));
       }

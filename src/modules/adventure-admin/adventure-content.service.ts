@@ -43,14 +43,26 @@ export const MIN_REASON_CHARS = 8;
 export const MAX_REASON_CHARS = 300;
 
 /**
- * 身份与儿童安全类错误：连草稿都不许落库。
- * 其余（缺文本、段号断档、选项不全……）属于「写到一半」，允许存草稿，只拦发布。
+ * 身份级错误：连草稿都不许落库。
+ * 这些不是「没写完」，是「这一行写坏了」——落库会污染
+ * @@unique([characterKey, season, episodeNumber])，或指向根本不存在的 IP / 季。
+ * 其余（缺文本、段号断档、选项不全、禁用词……）都属于内容级，允许存草稿，只拦发布：
+ * 草稿对孩子不可见，而发布时会按发布标准重新校验一次。
  */
 export const DRAFT_BLOCKING_CODES = [
   "SEASON_UNSUPPORTED",
   "UNKNOWN_CHARACTER_KEY",
   "INVALID_EPISODE_NUMBER",
   "BUSINESS_KEY_TAKEN",
+];
+
+/**
+ * 跨环境导入比「存草稿」严一档：禁用词同样拦下。
+ * 导入校验走的是草稿标准（禁用词在那个标准下已降级为 warning），若按 severity 判
+ * 就会开出一条泄漏通道——staging 的禁用词草稿能被整包搬进 prod。所以这里按 code 判。
+ */
+export const IMPORT_BLOCKING_CODES = [
+  ...DRAFT_BLOCKING_CODES,
   "FORBIDDEN_WORD",
 ];
 
@@ -986,21 +998,40 @@ function assertConfirmText(
 }
 
 /**
- * 草稿入库门槛：身份/禁用词类错误直接拒绝，规范化会丢段也直接拒绝。
- * 导出给搬运服务复用——导入写的也是草稿，必须过同一道门，不能因为是「从别的环境搬来的」就放宽。
+ * 草稿入库门槛：身份级错误直接拒绝，规范化会丢段也直接拒绝。
+ * 内容级问题（含禁用词）一律放行——草稿对孩子不可见，发布才是唯一的闸口，
+ * 而发布必定按发布标准重新校验一次（见 publish / revert 里的 assertPublishable）。
  */
 export function assertDraftSavable(
   identity: EpisodeIdentity,
   content: EpisodeContentDraft,
   report: LintReport,
 ): void {
-  assertNoDraftBlocking(report);
+  assertNoBlockingCodes(report, DRAFT_BLOCKING_CODES);
   assertNoSegmentLoss(identity, content, report);
 }
 
-function assertNoDraftBlocking(report: LintReport): void {
-  const blocking = report.errors.filter((issue) =>
-    DRAFT_BLOCKING_CODES.includes(issue.code),
+/**
+ * 跨环境导入门槛：比「存草稿」多拦一道禁用词。
+ * 导入写的也是草稿，但它跨越环境边界——目标环境的运营并没有逐字看过这份内容，
+ * 不能指望「反正发布时还会拦」，因为导入落地后可能隔很久才有人去发布。
+ */
+export function assertImportable(
+  identity: EpisodeIdentity,
+  content: EpisodeContentDraft,
+  report: LintReport,
+): void {
+  assertNoBlockingCodes(report, IMPORT_BLOCKING_CODES);
+  assertNoSegmentLoss(identity, content, report);
+}
+
+/**
+ * 扫 issues 而不是 errors：严重度会随校验阶段变（禁用词在草稿标准下是 warning），
+ * code 不会。所有阻断判定一律按 code，这是导入链路不被降级波及的唯一保证。
+ */
+function assertNoBlockingCodes(report: LintReport, codes: string[]): void {
+  const blocking = (report.issues ?? []).filter((issue) =>
+    codes.includes(issue.code),
   );
   if (blocking.length === 0) {
     return;
