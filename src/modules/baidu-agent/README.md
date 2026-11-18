@@ -9,12 +9,12 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `baidu-agent.types.ts` | 唯一契约：端口 token、端口接口、常量（含 `DEVICE_DEFAULT_LANG`、`LOGIN_VOICE_*`）、`VoiceApplyBlockReason`、`InitialVoiceResolution`、`parseVoicePayload` |
+| `baidu-agent.types.ts` | 唯一契约：端口 token、端口接口、常量（含 `DEVICE_DEFAULT_LANG`、`TTS_SPD_MIN/MAX`）、`VoiceApplyBlockReason`、`parseVoicePayload` |
 | `bce-auth-string.util.ts` | 解析 BCE v1 认证字符串、判定过期、校验必需签名头；返回值不含 AK 与 signature |
 | `tts-config.util.ts` | 组装 tts 配置串 `DEFAULT{"vcn":...,"spd":...}`；只含 vcn/spd，不含 vol |
 | `baidu-agent-client.service.ts` | 出站 HTTP 客户端：守卫链 → 手工拼 body → axios 调用 → 归一化结果 |
 | `voice-catalog.service.ts` | 音色目录（`VOICE_CATALOG_JSON` placeholder，权威来源是百度 timbres 接口） |
-| `voice-reconcile.service.ts` | 编排：读期望值 → fail-closed 判定 → 下发或归因 deferred；另含 `resolveInitialVoice`（loginMac 下发，不出网） |
+| `voice-reconcile.service.ts` | 编排：读期望值 → fail-closed 判定 → 下发或归因 deferred；另含 `getTimbreForCharacter`（IP/角色 → timbreId 纯查表，不出网） |
 | `baidu-agent.module.ts` | 装配，只导出三个端口 token |
 
 ## 端口（消费方只依赖 token，不依赖实现类）
@@ -44,10 +44,6 @@
 | `speech_rate_map_missing` | reconcile | `SPEECH_RATE_MAP_JSON` 未配置该档位，或值越界 `[0.5, 2.0]` |
 | `incomplete_tts_target` | reconcile | vcn 与 spd 未同时齐备（见 `TODO(Q9)`） |
 | `internal_error` | reconcile / device-configs | 编排抛出未预期异常，已吞掉以保住主流程响应 |
-
-`resolveInitialVoice`（loginMac 下发路径）复用同一套 reason，但以 `InitialVoiceResolution` 的 `{status:"blocked", reason}` 形式返回，不走 `VoiceApplyOutcome`。该路径不出网、不读 Redis，因此 `signature_*`、`signed_headers_unexpected`、`unsupported_cloud_node`、`no_active_instance`、`incomplete_tts_target`、`upstream_error` 都不会在它这里出现；`none`（无期望值，正常态）也不是 blocked。
-
-`speech_rate_map_missing` 同样不会由该路径返回：语速档位映射缺失时上线下发**降级为只发音色**（音色是设备开口第一句就必须对的那个属性，语速可以等映射补齐后下次上线再生效），warn 日志照打，不静默。实时/追平路径仍保持 `speech_rate_map_missing` 的 fail-closed 语义。
 
 ## 三条硬约束
 
