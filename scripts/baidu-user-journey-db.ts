@@ -237,7 +237,6 @@ async function prepare() {
                 ],
               },
               fallbackText: "没关系，我们先沿着小河慢慢走。",
-              exitText: "好呀，我们先休息，等你准备好再陪 Elly 出发。",
             },
             {
               order: 2,
@@ -250,7 +249,6 @@ async function prepare() {
               interactionType: "open_question",
               text: "Elly 有点不好意思求助。你觉得它可以对小松鼠说什么呢？",
               fallbackText: "开口求助有点难，我们陪 Elly 一起鼓起勇气。",
-              exitText: "好呀，我们先陪 Elly 休息一下。",
             },
             {
               order: 4,
@@ -264,7 +262,6 @@ async function prepare() {
               text: "跟 Elly 一起说：请帮我一下，好吗？",
               options: { praise: "说得真好！勇敢求助，也是在照顾朋友。" },
               fallbackText: "这次 Elly 替你说：请帮我一下，好吗？",
-              exitText: "好呀，我们下次再一起练习。",
             },
             {
               order: 6,
@@ -277,7 +274,6 @@ async function prepare() {
               interactionType: "open_question",
               text: "小萤火虫收到纸船后，你觉得它会对 Elly 和小松鼠说什么？",
               fallbackText: "小萤火虫轻轻说：谢谢你们，我不再害怕黑夜啦。",
-              exitText: "好呀，我们先在这里休息，下次再陪纸船到对岸。",
             },
             {
               order: 8,
@@ -304,7 +300,6 @@ async function prepare() {
                 ],
               },
               fallbackText: "没关系，我们请纸船顺着旁边的小水流绕过去。",
-              exitText: "好呀，我们先休息，下次再陪纸船到对岸。",
             },
             {
               order: 10,

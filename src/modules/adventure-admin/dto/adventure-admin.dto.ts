@@ -223,7 +223,8 @@ export class CreateEpisodeDto {
   @ApiProperty({
     description:
       "内容草稿 {title, recap?, segments[]}；segments 每段 " +
-      "{order, kind: narration|interaction, text, interactionType?, options?, fallbackText?, exitText?, rewardStar?}",
+      "{order, kind: narration|interaction, text, interactionType?, options?, fallbackText?, rewardStar?}。" +
+      "退出话术不是内容字段：孩子说不玩时一律念全局那句（见 capabilities.fixedExitText），传入 exitText 会被忽略。",
   })
   @IsDefined()
   @IsObject()

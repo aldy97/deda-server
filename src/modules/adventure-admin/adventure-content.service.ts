@@ -1148,7 +1148,6 @@ function toSegmentRows(episodeId: string, content: EpisodeContentDraft) {
     interactionType: segment.interactionType ?? null,
     options: jsonOf(segment.options ?? null),
     fallbackText: segment.fallbackText ?? null,
-    exitText: segment.exitText ?? null,
     rewardStar: segment.rewardStar === true,
   }));
 }

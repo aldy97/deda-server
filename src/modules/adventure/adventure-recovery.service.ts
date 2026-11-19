@@ -748,7 +748,6 @@ export class AdventureRecoveryService implements OnModuleInit, OnModuleDestroy {
       interactionType: row.interactionType,
       options: row.options,
       fallbackText: row.fallbackText,
-      exitText: row.exitText,
       rewardStar: row.rewardStar,
     }));
   }

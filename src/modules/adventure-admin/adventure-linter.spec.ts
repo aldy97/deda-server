@@ -41,7 +41,6 @@ describe("adventure-linter", () => {
       ],
     },
     fallbackText: "没关系，那我替你选森林吧！",
-    exitText: "好呀，那我们明天接着玩。",
     rewardStar: true,
     ...extra,
   });
@@ -235,17 +234,25 @@ describe("adventure-linter", () => {
       );
     });
 
-    it("requires fallback and exit text on every reply-waiting interaction", () => {
+    it("requires fallback text on every reply-waiting interaction", () => {
       const report = lintEpisode(identity, {
         ...valid(),
         segments: [
           narration(0, "a"),
-          twoChoice(1, { fallbackText: null, exitText: "" }),
+          twoChoice(1, { fallbackText: null }),
           narration(2, "b"),
         ],
       });
       expect(codes(report.errors)).toContain("FALLBACK_TEXT_REQUIRED");
-      expect(codes(report.errors)).toContain("EXIT_TEXT_REQUIRED");
+    });
+
+    // 退出话术已收归全局常量（ADVENTURE_EXIT_TEXT），不再是逐段字段：看板上
+    // 没有输入框了，服务端也就不许再因为它缺失而拦住发布——否则没有一集发得出去。
+    it("no longer requires a per-segment exit text", () => {
+      const report = lintEpisode(identity, valid());
+
+      expect(codes(report.errors)).not.toContain("EXIT_TEXT_REQUIRED");
+      expect(report.errors).toEqual([]);
     });
 
     it("does not demand fallback text from a reward segment that never waits", () => {
@@ -264,7 +271,6 @@ describe("adventure-linter", () => {
         ],
       });
       expect(codes(report.errors)).not.toContain("FALLBACK_TEXT_REQUIRED");
-      expect(codes(report.errors)).not.toContain("EXIT_TEXT_REQUIRED");
     });
 
     it("warns about a reward segment that awards no star", () => {
@@ -492,7 +498,6 @@ describe("adventure-linter", () => {
           interactionType: "repeat_after_me" as const,
           options: options as never,
           fallbackText: "没关系，我们继续。",
-          exitText: "好呀，明天接着玩。",
         },
         narration(2, "b"),
       ],

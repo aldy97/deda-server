@@ -116,8 +116,14 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 | 脱离语境（首次） | 与故事无关但未达兜底条件 | 确定性匹配失败后：开关开→调一次小模型二选一判定（判出来则走正常作答路径，判不出则引回一次）；开关关→接住+轻引回一次 | 调（开关开/关都调） |
 | 超前发挥/编剧情 | 内容涉及后续剧情 | 不确认不否认不跟随，接话后照常播原文；禁止按孩子想象续写主线 | 调 |
 | 持续不配合 | offTopicCount ≥ 1 再次跑题 | 开关开→调一次小模型二选一判定，命中视同正常作答，未命中播 fallbackText 推进；开关关→播 fallbackText 推进，不引回 | 开关开时调 |
-| 明确拒绝 | 含「不要听/不想玩」等 | 播 exitText，退出冒险回自由对话，进度保留当天可续 | 不调 |
+| 明确拒绝 | 命中全局退出词表 `ADVENTURE_EXIT_KEYWORDS`（与粘滞会话的显式退出共用同一份词表） | **任何阶段**都播同一句全局话术 `ADVENTURE_EXIT_TEXT`，退出冒险回自由对话，进度落 `exited` 当天可续 | 不调 |
 | 沉默 | 10s 无上行（第 6 节） | 播 fallbackText 推进 | 不调 |
+
+> **退出话术是全局的，不是内容字段。** 原 `AdventureSegment.exitText` 已下线（bundle schema v2 起从段落形状中删除）：孩子在任何 IP、任何一集、任何互动点、甚至**打断旁白**时退出，听到的都是 `ADVENTURE_EXIT_TEXT`（定义在 `adventure.constants.ts`），看板侧只读展示为 `capabilities.fixedExitText`。
+>
+> 接管范围是 `in_progress` / `awaiting_reply` / `exited` 三种状态；`completed` / `abandoned` / `failed_over` 是终态，一律**不接管**——既不覆盖终态，也不念一句做不到的承诺，这句话交回正常意图路由。已 `exited` 时幂等：只重复那句话，不写库、不 resume（否则孩子喊「不想玩」反而会把刚退出的故事又开起来）。
+>
+> 退出词表 `ADVENTURE_EXIT_KEYWORDS` 与粘滞会话的显式退出判定（`ConversationSessionService.isExplicitExit`）**共用同一份**，此前两边各有一份导致同一句话在两条链路上结论不同。
 
 > `ADVENTURE_CHOICE_LLM_ENABLED` 默认 `false`（开关关）时，行为与旧版完全一致。开关打开后，二选一确定性匹配不中时会追加一次小模型 LLM 兜底判定。
 

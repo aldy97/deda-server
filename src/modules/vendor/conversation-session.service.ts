@@ -4,6 +4,7 @@ import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { isInSleepWindow } from "@/modules/sleep-configs/sleep-window.util";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
 
 export type ConversationIntent =
   | "free_chat"
@@ -366,10 +367,14 @@ export class ConversationSessionService {
     );
   }
 
+  /**
+   * 显式退出。词表与冒险引擎共用 ADVENTURE_EXIT_KEYWORDS（单一真相源）：
+   * 此前这里是一条独立正则，缺「不想玩 / 不要玩了」，于是同一句「我不想玩了」
+   * 在冒险里算退出、在粘滞会话里不算，孩子在英语故事里说了这句反而被送去模型分类。
+   * 合并之后任何一侧加词都自动对另一侧生效。
+   */
   private isExplicitExit(asrText: string): boolean {
-    return /不想听|不要听|不玩了|停止|退出|结束|别讲了|stop|quit|exit/i.test(
-      asrText,
-    );
+    return isAdventureExitRequest(asrText);
   }
 
   private fallbackIntent(asrText: string): ConversationIntent {

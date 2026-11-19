@@ -20,6 +20,66 @@ export const ADVENTURE_DEGRADED_REPLIES = {
   lastResort: "我在这儿呢，我们等一会儿再玩好不好？",
 } as const;
 
+/**
+ * 全局唯一的退出话术。
+ *
+ * 刻意不做成每段可写的字段（原 `AdventureSegment.exitText` 已下线）：孩子在任何
+ * IP、任何一集、任何一个互动点、甚至打断旁白时退出，都该听到同一句温柔收尾——
+ * 逐段自定义只会让同一句话术在几十个段落里漂移出几十种说法，人设反而不一致。
+ *
+ * 与 ADVENTURE_DEGRADED_REPLIES 那条「不承诺继续冒险」的铁律**不冲突**：降级是
+ * 「我们兜不住了」，退出是「孩子说不玩了，我们尊重他」。退出走 `exited` 状态，
+ * 当日进度原样保留、孩子明确要求时可以从未答完的互动点续玩，所以这句承诺是真的。
+ *
+ * 这句话通过 admin capabilities 的 `fixedExitText` 下发给看板只读展示，
+ * 前端不得内联硬编码（单一真相源在这里）。
+ */
+export const ADVENTURE_EXIT_TEXT = "好的，那么我们之后再一起继续冒险吧";
+
+/**
+ * 明确拒绝/退出的关键词。命中即温柔退出，绝不调模型、绝不追问。
+ *
+ * 这份词表是**引擎与会话层的唯一真相**：`AdventureService` 用它接管冒险轮次，
+ * `ConversationSessionService.isExplicitExit` 用它中断 english_story / idiom_story /
+ * sleep_story 的粘滞会话。此前两边各有一份（引擎 5 个词、会话层一条正则），
+ * 于是孩子说「退出」时冒险不接管、说「不想玩」时粘滞会话不中断——同一句话在
+ * 两条链路上结论不同。合成一份之后，任何一侧加词都自动对另一侧生效。
+ *
+ * 英文词按小写比较（见 isAdventureExitRequest）。
+ */
+export const ADVENTURE_EXIT_KEYWORDS = [
+  "不要听",
+  "不想听",
+  "不想玩",
+  "不玩了",
+  "不要玩了",
+  "退出",
+  "停止",
+  "结束",
+  "别讲了",
+  "stop",
+  "quit",
+  "exit",
+] as const;
+
+/**
+ * 孩子这句话是不是「不想玩了」。
+ *
+ * 纯子串匹配、不调模型：退出是唯一一条**宁可多判也不能漏判**的路径——漏判的代价
+ * 是孩子说了不玩还被继续追问，多判的代价只是提前温柔收尾且当日可续玩。
+ */
+export function isAdventureExitRequest(
+  asrText: string | null | undefined,
+): boolean {
+  const normalized = (asrText ?? "").toLowerCase();
+  if (!normalized.trim()) {
+    return false;
+  }
+  return ADVENTURE_EXIT_KEYWORDS.some((keyword) =>
+    normalized.includes(keyword),
+  );
+}
+
 /** 巡检与熔断的默认阈值。全部可被环境变量覆盖（见 ADVENTURE_RECOVERY_ENV）。 */
 export const ADVENTURE_RECOVERY_DEFAULTS = {
   /** 总开关：关掉后巡检不启动、不注册失败监听 */

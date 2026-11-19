@@ -40,6 +40,7 @@ import {
   SimulationThresholds,
   simulateEpisode,
 } from "./adventure-simulator";
+import { ADVENTURE_EXIT_TEXT } from "@/modules/adventure/adventure.constants";
 
 /**
  * 冒险内容读侧。
@@ -70,6 +71,11 @@ export interface ContentAdminProfileCapabilities {
   segmentKinds: string[];
   lintThresholds: LintThresholds;
   simulationThresholds: SimulationThresholds;
+  /**
+   * 全局唯一的退出话术，供看板只读展示（原逐段 `exitText` 字段已下线）。
+   * 前端不得内联这句话：单一真相源是 adventure.constants 的 ADVENTURE_EXIT_TEXT。
+   */
+  fixedExitText: string;
   /** authoring / readonly，来自 CONTENT_ADMIN_PROFILE；缺省按 readonly 处理（fail-safe） */
   profile: ContentAdminProfile;
   authoring: boolean;
@@ -260,6 +266,7 @@ export class AdventureContentQueryService {
         ...DEFAULT_SIMULATION_THRESHOLDS,
         ...this.simulationOverrides,
       },
+      fixedExitText: ADVENTURE_EXIT_TEXT,
       profile: this.profile,
       authoring: this.profile === "authoring",
     };

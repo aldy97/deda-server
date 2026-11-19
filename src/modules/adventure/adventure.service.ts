@@ -11,8 +11,10 @@ import {
   ADVENTURE_CHOICE_LLM_DEFAULTS,
   ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
+  ADVENTURE_EXIT_TEXT,
   AdventureFailurePhase,
   AdventureFailureReport,
+  isAdventureExitRequest,
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
 import {
@@ -54,7 +56,6 @@ export interface PlayableSegment {
   interactionType?: string | null;
   options?: unknown;
   fallbackText?: string | null;
-  exitText?: string | null;
   rewardStar?: boolean;
 }
 
@@ -66,8 +67,14 @@ export interface EpisodeContent {
 /** 沉默超时：引导词最后一个 chunk ack 后 10s 无上行则兜底续播 */
 const REPLY_TIMEOUT_MS = 10000;
 
-/** 明确拒绝关键词（命中即温柔退出，进度保留当天可续玩） */
-const REFUSAL_KEYWORDS = ["不要听", "不想听", "不想玩", "不玩了", "不要玩了"];
+/**
+ * 允许被「不想玩了」接管的进度状态（词表见 ADVENTURE_EXIT_KEYWORDS）。
+ *
+ * 终态一律不在其中：completed / abandoned 是「任何路径都不得覆盖」的进度终态，
+ * failed_over 是这一集已被自愈收走。这三种情况下念「之后再一起继续冒险」是假承诺，
+ * 所以不接管，让这句话掉回正常的意图路由。
+ */
+const EXITABLE_PROGRESS_STATUSES = ["in_progress", "awaiting_reply", "exited"];
 
 /** 进度终态：选集时永久排除，且任何路径都不得覆盖 */
 const CLOSED_PROGRESS_STATUSES = ["completed", "abandoned"];
@@ -110,7 +117,7 @@ export function parseEpisodePayload(payload: unknown): EpisodeContent | null {
       options: row.options ?? null,
       fallbackText:
         typeof row.fallbackText === "string" ? row.fallbackText : null,
-      exitText: typeof row.exitText === "string" ? row.exitText : null,
+      // 旧版本快照里的 exitText 刻意不读：退出话术已全局统一，见 ADVENTURE_EXIT_TEXT
       rewardStar: row.rewardStar === true,
     });
   }
@@ -709,8 +716,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 孩子在交互等待中的回答：五类处置。
-   * 非等待态返回 null（不接管上行）。
+   * 孩子回话：明确拒绝在任何阶段都接管（见 exitAdventure），其余四类处置只在
+   * 交互等待态生效；非等待态返回 null（不接管上行）。
    */
   /** 孩子回话入口。兜底口径同 startToday。 */
   async handleChildReply(
@@ -729,29 +736,27 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     asrText: string,
   ): Promise<AdventureReply | null> {
     const current = await this.findCurrentAdventure(deviceInternalId);
-    if (!current || current.progress.status !== "awaiting_reply") {
+    if (!current) {
       return null;
     }
     const { daily, progress } = current;
+
+    // 明确拒绝优先于一切判定，且与状态机停在哪一格无关：等回答时、旁白还在播时、
+    // 甚至已经退出过又喊一次，都只念同一句全局话术。放在最前面是因为它绝不能被
+    // 后面的分支吃掉——二选一匹配、跑题引回、开放提问接话都不该先于「孩子说不玩了」。
+    if (isAdventureExitRequest(asrText)) {
+      return this.exitAdventure(deviceInternalId, progress);
+    }
+
+    if (progress.status !== "awaiting_reply") {
+      return null;
+    }
     this.clearTimer(deviceInternalId);
 
     const segments = await this.loadSegmentsForPlay(progress);
     const interaction = this.currentInteraction(progress, segments);
     if (!interaction) {
       return null;
-    }
-
-    // 明确拒绝：温柔退出，每日档案与进度保留，之后只能续玩这一集。
-    if (REFUSAL_KEYWORDS.some((kw) => asrText.includes(kw))) {
-      await this.prisma.adventureProgress.update({
-        where: { id: progress.id },
-        data: { status: "exited", waitingSince: null },
-      });
-      return {
-        texts: [interaction.exitText || "好呀，那我们下次接着玩。"],
-        action: "exit",
-        result: "exit",
-      };
     }
 
     if (interaction.interactionType === "two_choice") {
@@ -782,6 +787,39 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     );
     const reply = await this.playFrom(progress, segments, [bridge], daily);
     return { ...reply, result: "answered" };
+  }
+
+  /**
+   * 温柔退出：任何阶段都念同一句全局话术，进度落 exited（当日可续玩）。
+   *
+   * 三点刻意的取舍：
+   * 1. **不看当前停在旁白还是互动段。** 孩子打断旁白说「不想玩了」和在互动点说，
+   *    对他是同一件事，引擎不该因为状态机停在哪一格而给出不同回应。
+   * 2. **终态不接管。** completed / abandoned / failed_over 返回 null：既不覆盖终态，
+   *    也不念一句做不到的承诺，这句话交回正常意图路由。
+   * 3. **已退出时幂等。** 只重复那句话，不再写库——否则 updatedAt 被无意义刷动，
+   *    看板上「最后活动时间」会变成孩子喊退出的时间；也绝不触发 resume。
+   */
+  private async exitAdventure(
+    deviceInternalId: string,
+    progress: AdventureProgress,
+  ): Promise<AdventureReply | null> {
+    if (!EXITABLE_PROGRESS_STATUSES.includes(progress.status)) {
+      return null;
+    }
+    // 等待中的 10s 沉默超时必须取消：孩子已经走了，定时器不该再追一句兜底话术
+    this.clearTimer(deviceInternalId);
+    if (progress.status !== "exited") {
+      await this.prisma.adventureProgress.update({
+        where: { id: progress.id },
+        data: { status: "exited", waitingSince: null },
+      });
+    }
+    return {
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    };
   }
 
   private isChoiceLlmEnabled(): boolean {
