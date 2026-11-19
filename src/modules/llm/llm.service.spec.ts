@@ -218,6 +218,48 @@ describe("LlmService", () => {
     });
   });
 
+  describe("buildAdventureChoiceMatchPrompt", () => {
+    it("should return a system message with the verdict contract and a user message with choice context", () => {
+      const messages = service.buildAdventureChoiceMatchPrompt({
+        characterPersona: "小象 Elly：温暖好奇，喜欢用「呀」结尾。",
+        segmentText: "我们去森林还是去河边？",
+        choiceA: "森林",
+        choiceB: "河边",
+        childReply: "我要去那个地方",
+      });
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0].role).toBe("system");
+      expect(messages[0].content).toContain("小象 Elly");
+      expect(messages[0].content).toContain("我们去森林还是去河边？");
+      expect(messages[0].content).toContain("0");
+      expect(messages[0].content).toContain("1");
+      expect(messages[0].content).toContain("NONE");
+      expect(messages[0].content).toContain("森林");
+      expect(messages[0].content).toContain("河边");
+      expect(messages[1].role).toBe("user");
+      expect(messages[1].content).toContain("我要去那个地方");
+      expect(messages[1].content).toContain("A. 森林");
+      expect(messages[1].content).toContain("B. 河边");
+    });
+
+    it("should not contain story generation or interaction bridging instructions", () => {
+      const messages = service.buildAdventureChoiceMatchPrompt({
+        characterPersona: "小马 Polly",
+        segmentText: "选小路还是小桥？",
+        choiceA: "小路",
+        choiceB: "小桥",
+        childReply: "那个吧",
+      });
+
+      // This is a classifier, not a bridge — it must NOT include
+      // bridging language from buildAdventureInteractionPrompt.
+      expect(messages[0].content).not.toContain("禁止续写");
+      expect(messages[0].content).not.toContain("先接住孩子的话题");
+      expect(messages[0].content).not.toContain("redirect");
+    });
+  });
+
   describe("buildEnglishTutorPrompt", () => {
     it("should include open English chat rules and user message", () => {
       const messages = service.buildEnglishTutorPrompt("How are you?");

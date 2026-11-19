@@ -1,4 +1,5 @@
 import { Test, TestingModule } from "@nestjs/testing";
+import { ConfigService } from "@nestjs/config";
 import { AdventureService } from "./adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
@@ -12,6 +13,7 @@ describe("AdventureService", () => {
   let service: AdventureService;
   let prisma: any;
   let llm: any;
+  let configService: any;
 
   const episode = {
     id: "ep1",
@@ -150,10 +152,18 @@ describe("AdventureService", () => {
               { role: "system", content: JSON.stringify(params) },
               { role: "user", content: params.childReply },
             ]),
+            buildAdventureChoiceMatchPrompt: jest.fn((params) => [
+              { role: "system", content: JSON.stringify(params) },
+              { role: "user", content: params.childReply },
+            ]),
             get smallModelName() {
               return "small-llm";
             },
           },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn() },
         },
       ],
     }).compile();
@@ -161,6 +171,7 @@ describe("AdventureService", () => {
     service = module.get<AdventureService>(AdventureService);
     prisma = module.get(PrismaService);
     llm = module.get(LlmService);
+    configService = module.get(ConfigService);
 
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
@@ -371,6 +382,234 @@ describe("AdventureService", () => {
     expect(llm.complete).not.toHaveBeenCalled();
     expect(reply.texts[0]).toBe(segments[2].fallbackText);
     expect(reply.texts).toContain(segments[3].text); // 兜底后推进主线
+  });
+
+  // ── LLM 混合判别（ADVENTURE_CHOICE_LLM_ENABLED=true）──
+
+  describe("LLM choice matching", () => {
+    beforeEach(() => {
+      // Enable LLM choice matching for these tests
+      (configService.get as jest.Mock).mockImplementation((key: string) => {
+        if (key === "ADVENTURE_CHOICE_LLM_ENABLED") return "true";
+        return undefined;
+      });
+    });
+
+    it("matches option A via LLM verdict and plays the pre-generated reply", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "0\n好呀，我们去森林吧！",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我要去大树那边",
+      );
+
+      expect(reply.texts[0]).toBe("好呀，我们去森林！"); // pre-generated reply
+      expect(reply.texts).toContain(segments[3].text); // 汇流续播
+      expect(reply.result).toBe("answered");
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it("matches option B via LLM verdict when the child's phrase is vague", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "1\n走，我们去河边！",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我喜欢有水的地方",
+      );
+
+      expect(reply.texts[0]).toBe("走，我们去河边！");
+      expect(reply.result).toBe("answered");
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it("awards a star when the LLM-matched option has rewardStar", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0" });
+
+      await service.handleChildReply("dev-uuid-1", "去大树底下");
+
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ stars: 1 }),
+        }),
+      );
+    });
+
+    it("LLM补判命中 after negation guard rejected the deterministic match", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      // "不要走河边" → 否定守卫触发 → deterministic 返回 null
+      // LLM should still judge and match option B (陆地)
+      llm.complete.mockResolvedValueOnce({ text: "1\n好的我们走陆地" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "不要走河边，走陆地",
+      );
+
+      expect(reply.texts[0]).toBe("走，我们去河边！"); // 选项B的reply
+      expect(reply.result).toBe("answered");
+    });
+
+    it("falls through to off-topic redirect when LLM returns NONE (both wanted)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "NONE\n孩子两个都想要，分不清",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "森林和河边都想去",
+      );
+
+      // NONE → 等同于没命中 → 走首次跑题路径
+      expect(reply.result).toBe("off_topic");
+      expect(reply.action).toBe("await_reply");
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ offTopicCount: 1 }),
+        }),
+      );
+    });
+
+    it("falls through to off-topic when LLM returns garbage first line", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "哎呀这个问题有点难",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "随便吧",
+      );
+
+      // garbage → parseChoiceVerdict returns null → 走跑题
+      expect(reply.result).toBe("off_topic");
+    });
+
+    it("degrades to off-topic redirect when the LLM call throws", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockRejectedValueOnce(new Error("timeout"));
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "去森林吧",
+      );
+
+      // LLM 失败 → 降级到首次跑题路径
+      expect(reply.result).toBe("off_topic");
+      expect(reply.action).toBe("await_reply");
+    });
+
+    it("treats the second off-topic as answered when LLM gets a hit", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+        offTopicCount: 1,
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0\n去森林啦" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "去树多的那边",
+      );
+
+      // 第二次跑题但 LLM 成功命中 → 当作正常作答，推进主线
+      expect(reply.result).toBe("answered");
+      expect(reply.texts[0]).toBe("好呀，我们去森林！");
+      expect(reply.texts).toContain(segments[3].text);
+    });
+  });
+
+  describe("LLM choice matching disabled", () => {
+    it("keeps old behavior when the switch is off", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      // 默认：ConfigService.get returns undefined for ADVENTURE_CHOICE_LLM_ENABLED
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "去树多的那边",
+      );
+
+      // 开关关 → deterministic 返回 null → 走首次跑题路径（旧行为）
+      expect(reply.result).toBe("off_topic");
+      // LLM 只被 generateBridge（redirect）调用，不被 choice match 调用
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it("still applies negation guard with the switch off (no LLM补判)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "不要走河边，走陆地",
+      );
+
+      // 否定守卫触发 → 走跑题（旧行为）
+      expect(reply.result).toBe("off_topic");
+      // Only generateBridge was called, not judgeAndRedirect
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("should not match a negated two-choice option (negation guard)", async () => {
