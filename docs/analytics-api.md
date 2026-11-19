@@ -631,7 +631,9 @@ content = {
     text,
     interactionType?,           // open_question | two_choice | repeat_after_me | reward
     options?,                   // two_choice 用 choices[{key,text,reply}]；repeat_after_me 用 praise
-    fallbackText?, exitText?,   // 需要孩子开口的三种原语必须有兜底与退出话术
+    fallbackText?,              // 需要孩子开口的三种原语必须有兜底话术。
+                                // 退出话术**不是**内容字段：全局统一一句，见 capabilities.fixedExitText；
+                                // 传 exitText 会被忽略（bundle schema v2 起该键已从段落形状里删除）
     rewardStar?
   }]
 }
@@ -644,8 +646,10 @@ content = {
 ```
 GET /analytics/adventure-admin/capabilities
 → { season, characterKeys, interactionTypes, replyWaitingInteractionTypes, segmentKinds,
-    lintThresholds, simulationThresholds, profile, authoring }
+    lintThresholds, simulationThresholds, fixedExitText, profile, authoring }
    // 编辑器启动时先拿这个：枚举、阈值、能不能写，全部由服务端说了算，前端不硬编码
+   // fixedExitText = 全局唯一的退出话术（孩子说「不想玩了」时念的那句）。
+   // 看板只读展示，不得在前端内联这句话——单一真相源在服务端 adventure.constants
 
 GET /analytics/adventure-admin/episodes?characterKey=&published=&includeRetired=&search=&page=&pageSize=
 → { items: [EpisodeSummary], total }
