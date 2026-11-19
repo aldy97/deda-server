@@ -573,7 +573,13 @@ describe("LlmAdapterModule", () => {
         texts: ["好呀，我们去森林！", "继续故事"],
         action: "await_reply",
         result: "answered",
-        matchedChoice: { index: 0, source: "deterministic" },
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
       });
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["好呀，我们去森林！", "继续故事"]);

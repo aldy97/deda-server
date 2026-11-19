@@ -333,6 +333,7 @@ model AdventureEpisodeVersion {
   updatedAt   DateTime @updatedAt
 
   episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Restrict)
+  events AdventureEvent[]
 
   @@unique([episodeId, version])
   @@index([episodeId, status])
@@ -442,6 +443,7 @@ model AdventureEvent {
   dailyRecordId String
   turnId        String?
   messageId     String?  // 关联 Message 获取孩子原话（choice_matched 等事件）
+  episodeVersionId String?  // 命中时锁定的版本快照；为空表示走 segments 物化表
   eventType     String
   segmentOrder  Int?
   payload       Json?
@@ -451,10 +453,12 @@ model AdventureEvent {
   episode     AdventureEpisode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   dailyRecord AdventureDailyRecord @relation(fields: [dailyRecordId], references: [id], onDelete: Cascade)
   message     Message?             @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  episodeVersion AdventureEpisodeVersion? @relation(fields: [episodeVersionId], references: [id], onDelete: SetNull)
 
   @@index([deviceId, createdAt])
   @@index([dailyRecordId, createdAt])
   @@index([eventType, createdAt])
+  @@index([episodeId, eventType, createdAt])
   @@map("adventure_events")
 }
 
