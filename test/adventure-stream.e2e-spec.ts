@@ -466,11 +466,33 @@ describe("Adventure streaming pipeline (e2e)", () => {
         "answered",
         "timeout",
         "completed",
+        "choice_matched",
       ]),
     );
     expect(
       events.filter((event) => event.eventType === "completed"),
     ).toHaveLength(1);
+
+    // 二选一命中遥测：第 2 步说「森林」确定性命中 index 0。事件只落
+    // {index, source} 两个枚举，孩子原话靠 messageId 外键关联 Message，不复制。
+    const choiceEvents = events.filter(
+      (event) => event.eventType === "choice_matched",
+    );
+    expect(choiceEvents).toHaveLength(1);
+    expect(choiceEvents[0].payload).toEqual({
+      index: 0,
+      source: "deterministic",
+    });
+    expect(Object.keys(choiceEvents[0].payload).sort()).toEqual([
+      "index",
+      "source",
+    ]);
+    expect(JSON.stringify(choiceEvents[0].payload)).not.toContain("森林");
+    const forestUserRow = messages.find(
+      (row) => row.role === "user" && row.content === "森林",
+    );
+    expect(forestUserRow).toBeDefined();
+    expect(choiceEvents[0].messageId).toBe(forestUserRow.id);
 
     const assistantRows = messages.filter((row) => row.role === "assistant");
     expect(assistantRows).toHaveLength(4);
@@ -484,6 +506,7 @@ describe("Adventure streaming pipeline (e2e)", () => {
       filler: null,
       answer: [segments[5].fallbackText, segments[6].text].join("\n"),
       interactionResult: "timeout",
+      matchedChoice: null,
     });
     expect(assistantRows.every((row) => row.mode === "adventure_story")).toBe(
       true,

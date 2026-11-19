@@ -560,10 +560,44 @@ describe("LlmAdapterModule", () => {
         "dev-internal-1",
         userCall.data.turnId,
         expect.objectContaining({ action: "await_reply" }),
+        undefined,
       );
       // 降级锁定：新链路无推送通道，绝不启用 10s 沉默超时机制
       expect(adventure.markPromptPlaybackComplete).not.toHaveBeenCalled();
       expect(adventure.registerTimeoutListener).not.toHaveBeenCalled();
+    });
+
+    it("includes matchedChoice in assistant rawPayload when handleChildReply returns a match", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["好呀，我们去森林！", "继续故事"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: { index: 0, source: "deterministic" },
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["好呀，我们去森林！", "继续故事"]);
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        matchedChoice: { index: 0, source: "deterministic" },
+      });
+    });
+
+    it("sets matchedChoice to null in assistant rawPayload when no match is returned", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["没关系，我们继续吧。"],
+        action: "await_reply",
+        result: "off_topic",
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["没关系，我们继续吧。"]);
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        matchedChoice: null,
+      });
     });
 
     it("enters adventure on adventure_story intent when today is not completed", async () => {

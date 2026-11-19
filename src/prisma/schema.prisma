@@ -245,6 +245,8 @@ model Message {
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  adventureEvents AdventureEvent[]
+
   @@unique([conversationId, role])
   @@index([deviceId, spokeAt])
   @@index([turnId])
@@ -437,6 +439,7 @@ model AdventureEvent {
   episodeId     String
   dailyRecordId String
   turnId        String?
+  messageId     String?  // 关联 Message 获取孩子原话（choice_matched 等事件）
   eventType     String
   segmentOrder  Int?
   payload       Json?
@@ -445,9 +448,11 @@ model AdventureEvent {
   device      Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   episode     AdventureEpisode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   dailyRecord AdventureDailyRecord @relation(fields: [dailyRecordId], references: [id], onDelete: Cascade)
+  message     Message?             @relation(fields: [messageId], references: [id], onDelete: SetNull)
 
   @@index([deviceId, createdAt])
   @@index([dailyRecordId, createdAt])
+  @@index([eventType, createdAt])
   @@map("adventure_events")
 }
 
