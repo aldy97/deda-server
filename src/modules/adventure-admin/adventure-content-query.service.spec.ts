@@ -685,6 +685,67 @@ describe("AdventureContentQueryService", () => {
         "PREDECESSOR_NOT_PUBLISHED",
       );
     });
+
+    it("applies publish standard via 4th param when episodeId resolves identity", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(ellyEpisode);
+      prisma.adventureEpisode.findMany.mockResolvedValue([]);
+
+      const report = await service.checkContent(
+        "ep1",
+        draftContent,
+        undefined,
+        true,
+      );
+
+      expect(report.errors.map((issue) => issue.code)).toContain(
+        "PREDECESSOR_NOT_PUBLISHED",
+      );
+    });
+
+    it("applies draft standard via 4th param undefined when episodeId resolves identity", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(ellyEpisode);
+      prisma.adventureEpisode.findMany.mockResolvedValue([]);
+
+      const report = await service.checkContent(
+        "ep1",
+        draftContent,
+        undefined,
+        undefined,
+      );
+
+      expect(report.errors.map((issue) => issue.code)).not.toContain(
+        "PREDECESSOR_NOT_PUBLISHED",
+      );
+    });
+
+    it("runs lintContextFor (hitting findMany) when forPublish is true and no identity at all", async () => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([]);
+
+      await service.checkContent(null, draftContent, undefined, true);
+
+      expect(prisma.adventureEpisode.findMany).toHaveBeenCalled();
+    });
+
+    it("skips lintContextFor (and findMany) when forPublish is undefined and no identity at all", async () => {
+      await service.checkContent(null, draftContent, undefined, undefined);
+
+      expect(prisma.adventureEpisode.findMany).not.toHaveBeenCalled();
+    });
+
+    it("still reads forPublish from identity when the 4th param is omitted (backward compat)", async () => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([]);
+
+      const report = await service.checkContent(null, draftContent, {
+        characterKey: "elly",
+        season: 1,
+        episodeNumber: 5,
+        forPublish: true,
+      });
+
+      expect(report.errors.map((issue) => issue.code)).toContain(
+        "PREDECESSOR_NOT_PUBLISHED",
+      );
+    });
   });
 
   describe("simulate", () => {

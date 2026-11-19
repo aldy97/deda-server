@@ -119,6 +119,7 @@ model ParentReport {
   feedbacks ParentReportFeedback[]
 
   @@unique([deviceId, reportDate])
+  @@index([generationStatus, nextRetryAt])
   @@map("parent_reports")
 }
 
