@@ -32,6 +32,8 @@ export interface AdventureReply {
   action: "narrate" | "await_reply" | "completed" | "exit";
   /** 本轮交互处置结果；开集/续播等非交互回复为 undefined。 */
   result?: "answered" | "off_topic" | "fallback" | "exit" | "timeout";
+  /** 二选一命中信息：命中了第几个选项以及判定来源（确定性/LLM）。 */
+  matchedChoice?: { index: number; source: "deterministic" | "llm" };
 }
 
 interface InteractionChoice {
@@ -854,7 +856,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         [matched.reply],
         daily,
       );
-      return { ...reply, result: "answered" };
+      return {
+        ...reply,
+        result: "answered",
+        matchedChoice: { index: hitIndex, source: "deterministic" },
+      };
     }
 
     // LLM 兜底判定（开关打开时）：确定性匹配未命中，调一次小模型再试
@@ -877,7 +883,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           [matchedChoice.reply],
           daily,
         );
-        return { ...reply, result: "answered" };
+        return {
+          ...reply,
+          result: "answered",
+          matchedChoice: { index: verdict.index!, source: "llm" },
+        };
       }
 
       if (progress.offTopicCount === 0) {
@@ -1145,11 +1155,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     return this.playFrom(nextProgress, segments, prefix, targetDaily);
   }
 
-  /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。 */
+  /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。
+   * @param userMessageId 用户消息 ID，用于 choice_matched 事件关联孩子原话（仅含 index/source，不存原话本身）。 */
   async recordPresented(
     deviceInternalId: string,
     turnId: string,
     reply: AdventureReply,
+    userMessageId?: string,
   ): Promise<void> {
     const daily = await this.prisma.adventureDailyRecord.findFirst({
       where: { deviceId: deviceInternalId },
@@ -1182,6 +1194,22 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           ...base,
           eventKey: `turn:${turnId}:result:${reply.result}`,
           eventType: reply.result,
+        },
+      });
+    }
+    if (reply.matchedChoice) {
+      await this.prisma.adventureEvent.upsert({
+        where: { eventKey: `turn:${turnId}:choice_matched` },
+        update: { messageId: userMessageId ?? null },
+        create: {
+          ...base,
+          eventKey: `turn:${turnId}:choice_matched`,
+          eventType: "choice_matched",
+          messageId: userMessageId ?? null,
+          payload: {
+            index: reply.matchedChoice.index,
+            source: reply.matchedChoice.source,
+          },
         },
       });
     }

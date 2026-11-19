@@ -725,8 +725,9 @@ export class LlmAdapterService {
     // 段落已经生成好了，落库只是审计。首条 create 发生在任何 chunk 之前，
     // 一旦抛错整轮就静音——这是本文件最容易让孩子听不到声音的一处，
     // 所以三次写库全部 best-effort：失败只记日志，内容照常播出。
+    let userMessageId: string | undefined;
     try {
-      await this.prisma.message.create({
+      const msg = await this.prisma.message.create({
         data: {
           deviceId: device.id,
           turnId,
@@ -738,6 +739,7 @@ export class LlmAdapterService {
           spokeAt: new Date(),
         },
       });
+      userMessageId = msg.id;
     } catch (error) {
       this.logger.error(
         `Failed to persist adventure user message for device=${device.deviceId}: ${this.describeError(error)}`,
@@ -761,6 +763,7 @@ export class LlmAdapterService {
             filler: null,
             answer: responseText,
             interactionResult: adventureReply.result ?? null,
+            matchedChoice: adventureReply.matchedChoice ?? null,
           },
           spokeAt: new Date(),
         },
@@ -771,7 +774,12 @@ export class LlmAdapterService {
       );
     }
     try {
-      await this.adventure.recordPresented(device.id, turnId, adventureReply);
+      await this.adventure.recordPresented(
+        device.id,
+        turnId,
+        adventureReply,
+        userMessageId,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to record adventure presentation for device=${device.deviceId}: ${this.describeError(error)}`,

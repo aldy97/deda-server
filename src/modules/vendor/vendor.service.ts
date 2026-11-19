@@ -730,11 +730,12 @@ export class VendorService {
       ttsOptions: {},
     };
 
+    let userMessageId: string | undefined;
     if (asrText) {
       // best-effort：这次 create 发生在任何 chunk 之前，抛错就等于整轮静音，
       // 而段落内容此时已经由引擎生成好了，没有理由因为它播不出去。
       try {
-        await this.prisma.message.create({
+        const msg = await this.prisma.message.create({
           data: {
             deviceId: device.id,
             turnId,
@@ -746,6 +747,7 @@ export class VendorService {
             spokeAt: new Date(),
           },
         });
+        userMessageId = msg.id;
       } catch (error) {
         this.logger.error(
           `Failed to persist adventure user message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
@@ -813,6 +815,7 @@ export class VendorService {
             filler: null,
             answer: responseText,
             interactionResult: adventureReply.result ?? null,
+            matchedChoice: adventureReply.matchedChoice ?? null,
           },
           spokeAt: new Date(),
         },
@@ -827,6 +830,7 @@ export class VendorService {
         device.id,
         turnId,
         adventureReply,
+        userMessageId,
       );
     } catch (error) {
       this.logger.error(

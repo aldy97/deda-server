@@ -212,7 +212,7 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 4. 今日完成后不再调用 `startToday`，记录 `entry_blocked_completed` 与 `routed_other_mode`，再进入对应故事链路；
 5. 非故事普通聊天不自动开冒险，按设备当前配置进入英语对话或自由对话流程。
 
-冒险回复复用 `VendorReplyUploader`：`source=answer`、seq 连续、逐 chunk await ack、最后发送 `vendor:text:out` 全量兜底；WS DTO 不变。落库后追加 `segments_presented` 和交互结果事件。
+冒险回复复用 `VendorReplyUploader`：`source=answer`、seq 连续、逐 chunk await ack、最后发送 `vendor:text:out` 全量兜底；WS DTO 不变。落库后追加 `segments_presented`、交互结果事件和 `choice_matched` 事件（payload 仅含 `{index, source}`，原话通过 `messageId` 外键关联 Message）。
 
 ## 8. 小模型 prompt
 
