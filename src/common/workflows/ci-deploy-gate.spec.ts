@@ -204,18 +204,22 @@ describe("部署 job 的超时与传输加固", () => {
     }
   });
 
-  it("ci.yml 的部署调用 job 也必须设 timeout-minutes，且不小于被调用方（让内层先失败，便于归因）", () => {
+  it("ci.yml 的 uses 型调用 job 禁止出现 timeout-minutes：GitHub 不接受，会让整个 workflow 非法", () => {
+    // 实测（2026-11-19，run 44471518994）：给 uses 型调用 job 加 timeout-minutes 后，
+    // GitHub 直接判 workflow 文件非法——run 0 秒失败、一个 job 都没起来，
+    // 反而把 deploy 全堵死，比不加更糟。
+    // 上界只能由被调用方内层承担；保护链依然成立：内层 job 超时 → 可复用 workflow 结束
+    // → 调用 job 结束 → concurrency group 释放。
     const ci = workflows.get("ci.yml") as Workflow;
     const callers = deployJobs(ci);
     expect(callers.length).toBe(2);
     for (const [, job] of callers) {
       const callee = (job.uses ?? "").replace("./.github/workflows/", "");
-      const outer = job["timeout-minutes"];
-      const inner = reusableDeployJob(callee)?.["timeout-minutes"];
       expect(REUSABLE_DEPLOY_FILES).toContain(callee);
-      expect(typeof outer).toBe("number");
-      expect(typeof inner).toBe("number");
-      expect(outer as number).toBeGreaterThanOrEqual(inner as number);
+      expect(typeof reusableDeployJob(callee)?.["timeout-minutes"]).toBe(
+        "number",
+      );
+      expect("timeout-minutes" in job).toBe(false);
     }
   });
 
