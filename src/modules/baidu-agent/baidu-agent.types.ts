@@ -244,7 +244,7 @@ export interface VoiceReconcilePort {
    * 用途是让服务端知道「某个 IP 对应哪个音色」，两个消费方：
    * 1. 设备端协议 v1.4（2026-11-18）新增的 POST /client/bot/bot/getvalue——固件每轮
    *    创建百度实例前拉取 vcn/vol/spd 且不缓存，vcn 即取自本映射
-   *    （TODO(v1.4)：该接口的服务端实现在后续 PR）；
+   *    （实现见 ClientApiService.botGetValue；返回 null 时该接口按 v1.4 §4.3 抛 500）；
    * 2. 剧情内按角色切换音色：冒险故事里非本机芯 IP 的角色说话时用该角色
    *    自己的音色，故事结束后再切回本 IP 的音色。
    *

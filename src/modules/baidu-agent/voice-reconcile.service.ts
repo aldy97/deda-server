@@ -45,7 +45,7 @@ interface BotInstanceRecordView {
  *    音色」的唯一真相。设备端协议 v1.4（2026-11-18）新增 POST /client/bot/bot/getvalue：
  *    固件每轮创建百度实例前拉取 vcn/vol/spd 且**不缓存**，vcn 即取自这张表；
  *    剧情内多 IP 同剧时按角色切音色也查同一张表。
- *    TODO(v1.4): getvalue 的服务端实现在后续 PR，本 PR 只提供数据源。
+ *    getvalue 的服务端实现见 ClientApiService.botGetValue。
  */
 @Injectable()
 export class VoiceReconcileService implements VoiceReconcilePort {
