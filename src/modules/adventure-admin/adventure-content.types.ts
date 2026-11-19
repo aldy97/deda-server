@@ -25,7 +25,10 @@ export const ADVENTURE_INTERACTION_TYPES = [
 export type AdventureInteractionType =
   (typeof ADVENTURE_INTERACTION_TYPES)[number];
 
-/** 需要孩子开口作答、因而必须有兜底与退出话术的原语。reward 不等回答，不在此列。 */
+/**
+ * 需要孩子开口作答、因而必须有兜底话术的原语。reward 不等回答，不在此列。
+ * 退出话术不按原语区分：任何阶段孩子说不玩，念的都是全局那一句。
+ */
 export const REPLY_WAITING_INTERACTION_TYPES: AdventureInteractionType[] = [
   "open_question",
   "two_choice",
@@ -55,7 +58,6 @@ export interface EpisodeSegmentDraft {
   interactionType?: AdventureInteractionType | null;
   options?: SegmentOptions | null;
   fallbackText?: string | null;
-  exitText?: string | null;
   rewardStar?: boolean;
 }
 

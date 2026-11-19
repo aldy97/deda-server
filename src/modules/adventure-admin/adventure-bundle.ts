@@ -26,7 +26,20 @@ import {
  * 解析侧一律白名单重建对象，手改过的 bundle 无法夹带字段，也不会污染原型。
  */
 
-export const BUNDLE_SCHEMA_VERSION = 1;
+/**
+ * bundle 结构版本。
+ *
+ * 2：段落形状里删掉 `exitText`（退出话术收归全局 ADVENTURE_EXIT_TEXT，见
+ * adventure.constants）。删字段会改变 canonicalJson 的输出，因而**改变内容指纹**：
+ * 同一集在新旧代码下算出的 hash 不同，部署后第一次跨环境导入会把每一集都判成
+ * replace（而不是 already_up_to_date），需要重新发布一次——这是诚实的结果，
+ * 孩子听到的退出话术确实变了，所以刻意不写脚本去回填历史版本的 contentHash。
+ *
+ * 版本号提升只是「形状变了」的告示，不是拒绝旧文件的理由：parseBundle 对更低的
+ * 版本只出 warning 并按当前结构解析，所以 v1 的历史导出文件仍能导入，
+ * 其中多余的 exitText 会被白名单重建时丢弃。
+ */
+export const BUNDLE_SCHEMA_VERSION = 2;
 
 export interface BundleSegment {
   order: number;
@@ -35,7 +48,6 @@ export interface BundleSegment {
   interactionType: AdventureInteractionType | null;
   options: SegmentOptions | null;
   fallbackText: string | null;
-  exitText: string | null;
   rewardStar: boolean;
 }
 
@@ -132,7 +144,6 @@ const SEGMENT_FIELDS = [
   "interactionType",
   "options",
   "fallbackText",
-  "exitText",
   "rewardStar",
 ] as const;
 
@@ -259,7 +270,6 @@ function normalizeSegment(
         ? normalizeOptions(raw.options, interactionType)
         : null,
     fallbackText: asNullableString(raw.fallbackText),
-    exitText: asNullableString(raw.exitText),
     rewardStar: raw.rewardStar === true,
   };
 }

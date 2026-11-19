@@ -17,7 +17,8 @@ import {
  * 每一条 error 都对应一个「上线后孩子会遇到什么」的真实故障，而不是风格偏好：
  * - order 不连续 → 引擎 `order >= segments.length` 会提前判完集，孩子听到半截就被记完成；
  * - 二选一 key/text 过短或互为子串 → 引擎用 `asrText.includes(...)` 匹配，会静默走错分支；
- * - 交互点缺兜底/退出话术 → 孩子沉默或跑题时只能落回硬编码的通用句，人设崩塌；
+ * - 交互点缺兜底话术 → 孩子沉默或跑题时只能落回硬编码的通用句，人设崩塌
+ *   （退出话术不在此列：它已收归全局 ADVENTURE_EXIT_TEXT，不再逐段填写）；
  * - 发布顺序断档 → 引擎在未发布集处硬停播，后面所有已发布集全部播不到。
  *
  * warning 是可发布的质量提示（时长、星光密度、开场节奏），不阻断。
@@ -392,7 +393,6 @@ function lintSegment(
     index,
     error,
   );
-  lintForbiddenWords(segment.exitText ?? "", thresholds, order, index, error);
 
   if (type === "two_choice") {
     lintTwoChoice(segment, index, thresholds, error, warn);
@@ -430,13 +430,9 @@ function lintSegment(
       at("fallbackText"),
     );
   }
-  if (typeof segment.exitText !== "string" || !segment.exitText.trim()) {
-    error(
-      "EXIT_TEXT_REQUIRED",
-      `第 ${order} 段等孩子作答，必须填退出话术：孩子说「不想玩了」时要温柔收尾。`,
-      at("exitText"),
-    );
-  }
+  // 刻意没有「退出话术必填」这条规则（原 EXIT_TEXT_REQUIRED 已删除）：孩子说
+  // 「不想玩了」时念的是全局统一的 ADVENTURE_EXIT_TEXT，与这一段是谁写的无关，
+  // 看板上也不再有这个输入框。若在这里继续要求它，就没有任何一集能发布出去。
 
   if (index === segments.length - 1) {
     warn(

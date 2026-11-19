@@ -54,7 +54,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
         ],
       },
       fallbackText: "没关系，那我们先去森林吧！",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: true,
     },
     {
@@ -73,7 +72,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
       text: "你觉得 Elly 会对小松鼠说什么呢？",
       options: null,
       fallbackText: "没关系，我们一起接着看。",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: false,
     },
     {
@@ -97,7 +95,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
         ],
       },
       fallbackText: "没关系，那我们就唱着歌回去吧！",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: false,
     },
     {

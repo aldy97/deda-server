@@ -47,7 +47,6 @@ describe("adventure-bundle", () => {
           ],
         },
         fallbackText: "没关系，那我替你选森林吧！",
-        exitText: "好呀，那我们明天接着玩。",
         rewardStar: true,
       },
       { order: 2, kind: "narration", text: "森林里有只小松鼠。" },
@@ -198,9 +197,29 @@ describe("adventure-bundle", () => {
         interactionType: null,
         options: null,
         fallbackText: null,
-        exitText: null,
         rewardStar: false,
       });
+    });
+
+    // 历史内容里还带着逐段退出话术（旧版本快照、旧 bundle 都是这个形状），但它
+    // 已经收归全局常量：既不进形状，也不进指纹。否则同一集只因为删掉一句再也没人
+    // 会念的话术，就会被跨环境导入判成「内容变了」，白制造一次全量 replace。
+    it("drops a legacy per-segment exitText from both the shape and the hash", () => {
+      const withLegacyExitText = {
+        ...content(),
+        segments: content().segments.map((segment) =>
+          segment.order === 1
+            ? { ...segment, exitText: "好呀，那我们明天接着玩。" }
+            : segment,
+        ),
+      } as unknown as EpisodeContentDraft;
+
+      const episode = toBundleEpisode(identity, withLegacyExitText);
+
+      expect(episode.segments[1]).not.toHaveProperty("exitText");
+      expect(episodeContentHash(episode)).toBe(
+        episodeContentHash(toBundleEpisode(identity, content())),
+      );
     });
 
     it("sorts segments by order so the array order never affects the hash", () => {
@@ -331,6 +350,37 @@ describe("adventure-bundle", () => {
         return;
       }
       expect(parsed.errors.join(" ")).toContain("bundleSchemaVersion");
+    });
+
+    // 版本号提升是「形状变了」的告示，不是拒绝旧文件的理由：早先从 staging 导出的
+    // v1 bundle 里还带着 exitText，必须仍能导入（只出 warning、字段被白名单丢弃），
+    // 否则一次字段下线会让所有历史导出文件变成废纸。
+    it("still imports an older v1 bundle and drops its exitText with a warning", () => {
+      const bundle = buildBundle([{ identity, content: content() }], {
+        sourceProfile: "authoring",
+      });
+      const legacyRaw = JSON.parse(JSON.stringify(bundle)) as Record<
+        string,
+        unknown
+      >;
+      legacyRaw.bundleSchemaVersion = 1;
+      const episodes = legacyRaw.episodes as Array<{
+        segments: Array<Record<string, unknown>>;
+      }>;
+      episodes[0].segments[1].exitText = "好呀，那我们明天接着玩。";
+
+      const parsed = parseBundle(legacyRaw);
+
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) {
+        return;
+      }
+      expect(parsed.warnings.join(" ")).toContain("bundleSchemaVersion");
+      expect(parsed.bundle.episodes[0].segments[1]).not.toHaveProperty(
+        "exitText",
+      );
+      // 丢掉那句没人会念的话术之后，指纹与新导出的 bundle 完全一致
+      expect(bundleContentHash(parsed.bundle)).toBe(bundleContentHash(bundle));
     });
 
     it("rejects malformed input with actionable messages", () => {

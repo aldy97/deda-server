@@ -54,7 +54,6 @@ async function main() {
               },
               fallbackText:
                 "没关系，那我们先沿着鲜花小路走吧，也许能在路口遇见朋友。",
-              exitText: "好呀，我们先休息，等你准备好再陪 Elly 出发。",
             },
             {
               order: 2,
@@ -68,7 +67,6 @@ async function main() {
               text: "Elly 搬不动枯枝，又有点不好意思求助。你觉得它可以对小松鼠说什么呢？",
               fallbackText:
                 "有时候开口并不容易。没关系，我们陪 Elly 一起鼓起勇气。",
-              exitText: "好呀，我们先陪 Elly 休息一下，下次再想办法。",
             },
             {
               order: 4,
@@ -85,7 +83,6 @@ async function main() {
               },
               fallbackText:
                 "没关系，这次 Elly 替你大声说：请帮我一下，好吗？下次我们再一起试试。",
-              exitText: "好呀，我们先休息，下次再陪 Elly 练习。",
             },
             {
               order: 6,

@@ -12,6 +12,7 @@ import {
 } from "./adventure-content.types";
 import { DEFAULT_LINT_THRESHOLDS } from "./adventure-linter";
 import { DEFAULT_SIMULATION_THRESHOLDS } from "./adventure-simulator";
+import { ADVENTURE_EXIT_TEXT } from "@/modules/adventure/adventure.constants";
 
 /**
  * 读侧的全部价值在于「让 admin 在动手之前看见真相」：
@@ -62,7 +63,6 @@ describe("AdventureContentQueryService", () => {
         text: "你看到了什么？",
         interactionType: "open_question",
         fallbackText: "没关系",
-        exitText: "那我们先休息一下",
       },
     ],
   };
@@ -124,12 +124,16 @@ describe("AdventureContentQueryService", () => {
         "repeat_after_me",
         "reward",
       ]);
-      // reward 不等回答，编辑器据此决定是否要求填 fallback/exit
+      // reward 不等回答，编辑器据此决定是否要求填 fallback
       expect(caps.replyWaitingInteractionTypes).toEqual([
         "open_question",
         "two_choice",
         "repeat_after_me",
       ]);
+      // 退出话术全局唯一，由服务端下发给看板只读展示，前端不得内联这句话。
+      // 字面值在这里断言一次：它是孩子真正会听到的内容，属于对外契约。
+      expect(caps.fixedExitText).toBe(ADVENTURE_EXIT_TEXT);
+      expect(caps.fixedExitText).toBe("好的，那么我们之后再一起继续冒险吧");
       expect(caps.segmentKinds).toEqual(["narration", "interaction"]);
       expect(caps.lintThresholds).toEqual(DEFAULT_LINT_THRESHOLDS);
       expect(caps.simulationThresholds).toEqual(DEFAULT_SIMULATION_THRESHOLDS);
@@ -277,7 +281,6 @@ describe("AdventureContentQueryService", () => {
         kind: "interaction",
         interactionType: "open_question",
         fallbackText: "没关系",
-        exitText: "那我们先休息一下",
       });
       expect(detail.summary.businessKey).toBe("elly/1/3");
     });
@@ -613,7 +616,6 @@ describe("AdventureContentQueryService", () => {
             interactionType: null,
             options: null,
             fallbackText: null,
-            exitText: null,
             rewardStar: false,
           },
         ],

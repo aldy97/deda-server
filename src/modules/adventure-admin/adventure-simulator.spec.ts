@@ -45,7 +45,6 @@ describe("adventure-simulator", () => {
       ],
     },
     fallbackText: "那我替你选森林吧。",
-    exitText: "那明天接着玩。",
     rewardStar: true,
     ...overrides,
   });
@@ -60,7 +59,6 @@ describe("adventure-simulator", () => {
     interactionType: "open_question",
     options: null,
     fallbackText: "我们一起接着看。",
-    exitText: "那明天接着玩。",
     rewardStar: false,
     ...overrides,
   });
@@ -273,7 +271,6 @@ describe("adventure-simulator", () => {
           interactionType: "repeat_after_me",
           options: { praise },
           fallbackText: "没关系。",
-          exitText: "明天见。",
           rewardStar: false,
         },
         narration(1, "结尾。"),

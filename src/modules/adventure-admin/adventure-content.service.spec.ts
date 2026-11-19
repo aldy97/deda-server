@@ -93,7 +93,6 @@ describe("AdventureContentService", () => {
         text: "你看到了什么？",
         interactionType: "open_question",
         fallbackText: "没关系",
-        exitText: "先休息一下",
       },
     ],
   };
@@ -663,7 +662,6 @@ describe("AdventureContentService", () => {
           text: "你看到了什么？",
           interactionType: "open_question",
           fallbackText: "没关系",
-          exitText: "先休息一下",
         },
       ]);
     });

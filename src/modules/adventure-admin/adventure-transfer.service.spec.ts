@@ -50,7 +50,6 @@ describe("AdventureTransferService", () => {
       interactionType: null,
       options: null,
       fallbackText: null,
-      exitText: null,
       rewardStar: false,
     };
   }
@@ -252,7 +251,9 @@ describe("AdventureTransferService", () => {
       const result = await service.exportBundle({}, actor);
 
       expect(result.bundle.sourceProfile).toBe("authoring");
-      expect(result.bundle.bundleSchemaVersion).toBe(1);
+      // 刻意写死字面值而不是引用 BUNDLE_SCHEMA_VERSION：2 = 段落形状删掉 exitText
+      // 之后的版本。形状再变时必须有人有意识地改这一行，而不是让断言跟着常量漂。
+      expect(result.bundle.bundleSchemaVersion).toBe(2);
     });
 
     it("produces a hash that ignores the profile and the export timestamp", async () => {
@@ -539,7 +540,6 @@ describe("AdventureTransferService", () => {
               ],
             },
             fallbackText: "没关系",
-            exitText: "先休息一下",
             rewardStar: false,
           },
         ],
