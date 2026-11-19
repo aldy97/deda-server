@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { load } from "js-yaml";
 
-type Step = { run?: string; uses?: string };
+type Step = { name?: string; run?: string; uses?: string };
 type Concurrency = {
   group?: string;
   "cancel-in-progress"?: boolean;
@@ -13,6 +13,7 @@ type Job = {
   uses?: string;
   steps?: Step[];
   concurrency?: string | Concurrency;
+  "timeout-minutes"?: number;
 };
 type Workflow = {
   on?: Record<string, unknown> | string;
@@ -164,6 +165,84 @@ describe("部署 job 的并发策略", () => {
   it("进行中的部署绝不被取消：取消等于把服务器留在半部署状态", () => {
     for (const [, job] of jobs) {
       expect(concurrencyOf(job)?.["cancel-in-progress"]).toBe(false);
+    }
+  });
+});
+
+/**
+ * 2026-11-19 事故口径：staging 部署的「Transfer image to ECS」步骤僵死 1h21m，
+ * `concurrency: {group: deploy-staging, cancel-in-progress: false}` 被它占住，
+ * 后续两次合并的部署全部堵在队列里；runner 侧取消之后 ECS 上仍留下
+ * `gunzip | docker load` 孤儿进程（CPU 时间 0，永不退出）。
+ *
+ * 因此超时必须三层都有界，缺一层就还会重演：
+ * job 级 `timeout-minutes`（兜住所有步骤，含其余 ssh/scp）、
+ * 本地管道 `timeout 600`（兜住传输本身）、
+ * 远端命令自带 `timeout`（兜住 runner 先死时的 ECS 孤儿进程）。
+ */
+describe("部署 job 的超时与传输加固", () => {
+  const REUSABLE_DEPLOY_FILES = ["deploy-staging.yml", "deploy-prod.yml"];
+  const TRANSFER_STEP = "Transfer image to ECS";
+
+  function reusableDeployJob(file: string): Job | undefined {
+    return workflows.get(file)?.jobs?.deploy;
+  }
+
+  function transferRun(file: string): string {
+    const step = (reusableDeployJob(file)?.steps ?? []).find(
+      (candidate) => candidate.name === TRANSFER_STEP,
+    );
+    return step?.run ?? "";
+  }
+
+  it("两个可复用部署 workflow 的 deploy job 都必须设 timeout-minutes，且在 (0, 30] 内", () => {
+    for (const file of REUSABLE_DEPLOY_FILES) {
+      const timeout = reusableDeployJob(file)?.["timeout-minutes"];
+      expect(typeof timeout).toBe("number");
+      expect(timeout as number).toBeGreaterThan(0);
+      expect(timeout as number).toBeLessThanOrEqual(30);
+    }
+  });
+
+  it("ci.yml 的部署调用 job 也必须设 timeout-minutes，且不小于被调用方（让内层先失败，便于归因）", () => {
+    const ci = workflows.get("ci.yml") as Workflow;
+    const callers = deployJobs(ci);
+    expect(callers.length).toBe(2);
+    for (const [, job] of callers) {
+      const callee = (job.uses ?? "").replace("./.github/workflows/", "");
+      const outer = job["timeout-minutes"];
+      const inner = reusableDeployJob(callee)?.["timeout-minutes"];
+      expect(REUSABLE_DEPLOY_FILES).toContain(callee);
+      expect(typeof outer).toBe("number");
+      expect(typeof inner).toBe("number");
+      expect(outer as number).toBeGreaterThanOrEqual(inner as number);
+    }
+  });
+
+  it("镜像传输的本地管道必须套 timeout 600，并开启 SSH 保活与建连超时", () => {
+    for (const file of REUSABLE_DEPLOY_FILES) {
+      const run = transferRun(file);
+      expect(run).toMatch(/timeout\s+600\s+ssh\b/);
+      expect(run).toMatch(/ServerAliveInterval=15/);
+      expect(run).toMatch(/ServerAliveCountMax=\d+/);
+      expect(run).toMatch(/ConnectTimeout=\d+/);
+    }
+  });
+
+  it("远端 docker load 必须自带 timeout：runner 先死也不许在 ECS 留僵死进程", () => {
+    for (const file of REUSABLE_DEPLOY_FILES) {
+      expect(transferRun(file)).toMatch(
+        /timeout\s+600\s+sh -c\s+'gunzip \| docker load'/,
+      );
+    }
+  });
+
+  it("传输步骤仍必须保留 docker save | gzip | ssh 直传形态（不得改成经镜像仓库）", () => {
+    for (const file of REUSABLE_DEPLOY_FILES) {
+      const run = transferRun(file);
+      expect(run).toMatch(/docker save\b/);
+      expect(run).toMatch(/\|\s*gzip\s*\|/);
+      expect(run).toMatch(/gunzip \| docker load/);
     }
   });
 });

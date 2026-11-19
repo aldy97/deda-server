@@ -88,6 +88,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
     uses: ./.github/workflows/deploy-staging.yml
     secrets: inherit
+    # 外层上界必须 ≥ 被调用 workflow 内层的 20 分钟：让内层先超时，
+    # 失败归因落在真正卡住的那个步骤上，而不是被外层笼统砍掉。
+    # 取值口径由 src/common/workflows/ci-deploy-gate.spec.ts 钉住。
+    timeout-minutes: 25
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
@@ -99,6 +103,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-prod.yml
     secrets: inherit
+    # 同上：外层 ≥ 内层。prod 多了部署前备份与自动回滚两步，故比 staging 多留 5 分钟。
+    timeout-minutes: 30
     concurrency:
       group: deploy-prod
       cancel-in-progress: false

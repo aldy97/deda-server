@@ -17,6 +17,10 @@ jobs:
     # GitHub Environments：如需「人工确认后发布」，在仓库 Settings → Environments
     # → production 中开启 Required reviewers 即可，无需改动本文件
     environment: production
+    # 比 staging 的 20 分钟多 5 分钟：prod 另有「部署前备份」与「健康检查失败自动回滚」两步，
+    # 回滚路径（health check 重试 8×5s + 再次 compose up）必须能在上界内跑完，
+    # 否则 job 被砍在回滚中途，服务器会停在半部署状态。
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -30,11 +34,21 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.ECS_HOST }}" >> ~/.ssh/known_hosts
 
-      # 不用镜像仓库：构建产物经 SSH 直传 ECS 并加载
+      # 不用镜像仓库：构建产物经 SSH 直传 ECS 并加载。
+      # 三层超时缺一不可（2026-11-19 staging 侧本步骤僵死 1h21m，把 cancel-in-progress:false 的
+      # concurrency group 占住，后续两次合并的部署全被堵死）：
+      #   1) job 级 timeout-minutes —— 兜住所有步骤，含备份/回滚等其余 ssh；
+      #   2) 本地 timeout 600 —— 兜住传输管道本身；
+      #   3) 远端命令自带 timeout 600 —— runner 侧取消或超时后 ssh 会话消失，
+      #      ECS 上的 `gunzip | docker load` 会变成永不退出的孤儿进程（实测 CPU 时间恒为 0），
+      #      只有远端自己限时才不会留下僵死进程堵住下一次 docker load。
+      # ServerAliveInterval=15 × ServerAliveCountMax=4 → 半开连接 60 秒内判死；ConnectTimeout 管建连。
       - name: Transfer image to ECS
         run: |
           docker save "deda-server:prod-${{ github.sha }}" | gzip | \
-            ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" "gunzip | docker load"
+            timeout 600 ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=15 \
+              "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+              "timeout 600 sh -c 'gunzip | docker load'"
 
       - name: Sync compose files to ECS
         run: |
