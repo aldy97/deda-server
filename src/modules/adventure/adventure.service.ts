@@ -4,15 +4,21 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import {
+  ADVENTURE_CHOICE_LLM_DEFAULTS,
+  ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   AdventureFailurePhase,
   AdventureFailureReport,
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
-import { matchChoiceDeterministic } from "./adventure-match";
+import {
+  matchChoiceDeterministic,
+  parseChoiceVerdict,
+} from "./adventure-match";
 import {
   AdventureDailyRecord,
   AdventureEpisode,
@@ -143,6 +149,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
+    private readonly configService: ConfigService,
   ) {}
 
   onModuleInit() {
@@ -775,6 +782,53 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     return { ...reply, result: "answered" };
   }
 
+  private isChoiceLlmEnabled(): boolean {
+    const raw = this.configService.get<string>(
+      ADVENTURE_CHOICE_LLM_ENV.enabled,
+    ) as string | undefined;
+    if (raw === undefined || raw === null || String(raw).trim() === "") {
+      return ADVENTURE_CHOICE_LLM_DEFAULTS.enabled;
+    }
+    const normalized = String(raw).trim().toLowerCase();
+    return normalized !== "false" && normalized !== "0";
+  }
+
+  /** 小模型二选一兜底判定，失败返回 index=null 降级给上层走旧跑题逻辑 */
+  private async judgeAndRedirect(
+    deviceInternalId: string,
+    interaction: PlayableSegment,
+    asrText: string,
+    choices: InteractionChoice[],
+  ): Promise<{ index: number | null; redirectText: string }> {
+    try {
+      const characterKey = await this.getCharacterKey(deviceInternalId);
+      const characterPersona =
+        CHARACTER_PERSONAS[characterKey] || CHARACTER_PERSONAS.elly;
+      const result = await this.llmService.complete({
+        scene: "adventure_interaction",
+        deviceId: deviceInternalId,
+        messages: this.llmService.buildAdventureChoiceMatchPrompt({
+          characterPersona,
+          segmentText: interaction.text,
+          choiceA: choices[0]?.text ?? "",
+          choiceB: choices[1]?.text ?? "",
+          childReply: asrText,
+        }),
+        model: this.llmService.smallModelName,
+        maxTokens: 160,
+        timeoutMs: 3500,
+      });
+      return parseChoiceVerdict(result.text, choices.length);
+    } catch (error) {
+      this.logger.warn(
+        `Adventure choice LLM failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { index: null, redirectText: "" };
+    }
+  }
+
   private async handleTwoChoice(
     deviceInternalId: string,
     daily: AdventureDailyRecord,
@@ -803,7 +857,55 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return { ...reply, result: "answered" };
     }
 
-    // 首次跑题：小模型接住 + 轻引回一次，仍停在该交互点，不推进主线
+    // LLM 兜底判定（开关打开时）：确定性匹配未命中，调一次小模型再试
+    if (this.isChoiceLlmEnabled()) {
+      const verdict = await this.judgeAndRedirect(
+        deviceInternalId,
+        interaction,
+        asrText,
+        choices,
+      );
+
+      if (verdict.index !== null) {
+        const matchedChoice = choices[verdict.index];
+        if (interaction.rewardStar) {
+          progress.stars += 1;
+        }
+        const reply = await this.playFrom(
+          progress,
+          segments,
+          [matchedChoice.reply],
+          daily,
+        );
+        return { ...reply, result: "answered" };
+      }
+
+      if (progress.offTopicCount === 0) {
+        const redirect =
+          verdict.redirectText ||
+          interaction.fallbackText ||
+          "没关系，我们继续吧。";
+        await this.prisma.adventureProgress.update({
+          where: { id: progress.id },
+          data: { offTopicCount: 1, waitingSince: null },
+        });
+        return {
+          texts: [redirect],
+          action: "await_reply",
+          result: "off_topic",
+        };
+      }
+
+      const reply = await this.playFrom(
+        progress,
+        segments,
+        [interaction.fallbackText || "没关系，我们继续吧。"],
+        daily,
+      );
+      return { ...reply, result: "fallback" };
+    }
+
+    // 首次跑题（开关关闭时）：小模型接住 + 轻引回一次，仍停在该交互点，不推进主线
     if (progress.offTopicCount === 0) {
       const redirect = await this.generateBridge(
         deviceInternalId,
@@ -818,7 +920,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return { texts: [redirect], action: "await_reply", result: "off_topic" };
     }
 
-    // 第二次跑题：预生成兜底话术推进，不再引回、不调 LLM
+    // 第二次跑题（开关关闭时）：预生成兜底话术推进，不再引回、不调 LLM
     const reply = await this.playFrom(
       progress,
       segments,
