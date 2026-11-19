@@ -8,7 +8,7 @@
 
 - 新增 `POST /client/bot/bot/getvalue`（§2.2）：固件每轮创建百度实例前拉取本轮 TTS 配置 `{vcn, vol, spd}`，我方额外附带 `lang`。
 - `loginMac` 响应体删除 `lang`（§2.1）：上线接口只作登录用，语种参数移到 getvalue 响应体。
-- 上述两处**已实现并可联调**；`CHARACTER_TIMBRE_JSON` 尚未填入真实 timbreId（见 §2.2 的「上线前必须由我方填好的配置」），在填好之前 getvalue 会返回 500。
+- 上述两处**已实现并可联调**；`CHARACTER_TIMBRE_JSON` 的取值已定（两个 IP 暂统一用 `1000957`，后续按 IP 换成各自专属音色），但**尚未填入任何环境的部署配置**（见 §2.2 的「上线前必须由我方填好的配置」），在填好之前 getvalue 会返回 500。
 
 1.2 变更（保留供追溯）：`bot/start` 的音色追平改为不阻塞响应（§2.3）。
 
@@ -81,7 +81,7 @@
 
 | 配置 | 缺失后果 | 状态 |
 | --- | --- | --- |
-| `CHARACTER_TIMBRE_JSON` | `vcn` 无法解析 → 500 | **待填**（timbreId 待机芯公司/百度控制台提供，Q1） |
+| `CHARACTER_TIMBRE_JSON` | `vcn` 无法解析 → 500 | 取值已定（两个 IP 暂统一用 `1000957`），**部署配置待填**；填好前 getvalue 返回 500，填好后另行通知联调 |
 | `TTS_DEFAULT_VOL` | `vol` 越界 → 500 | 有默认值 `1.0`，无需显式配置 |
 | `SPEECH_RATE_MAP_JSON` | `spd` 回落 `1.0` | 不会导致失败，但语速设置会失效 |
 
@@ -129,4 +129,4 @@ v1.2 固件应发送上述两个必填字段，不再发送单 `authorization`�
 6. 异常路径抽查：错误密码（401）、未上线先 getvalue（401）、未上线先 start（401）、
    getvalue 携带未声明字段（400）、start 缺少 `authorization_Role` 或 `authorization_TTS`（400）、
    stop 未知实例（404）、stop 后再 start 同实例（409）。
-7. 我方在 `CHARACTER_TIMBRE_JSON` 填入真实 timbreId 之前，getvalue 会返回 500——这是预期行为，不是固件问题。
+7. 我方在部署配置里填好 `CHARACTER_TIMBRE_JSON` 之前，getvalue 会返回 500——这是预期行为，不是固件问题；取值已定（两个 IP 暂统一用 `1000957`），填入并重启后会另行通知固件侧联调。

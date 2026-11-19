@@ -192,7 +192,8 @@ export class ClientApiService {
 
     const vcn = this.voiceReconcile.getTimbreForCharacter(device.characterKey);
     if (!vcn) {
-      // TODO(Q1): timbreId 待机芯公司/熊总提供；CHARACTER_TIMBRE_JSON 填上即恢复，
+      // TODO(Q1): timbreId 取值已定（熊总 2026-11-19：两个 IP 暂统一用 1000957），
+      // 但 staging/prod 的 env 都还没填；CHARACTER_TIMBRE_JSON 填上即恢复，
       // 代码无需改动。这是 v1.4 落地的发布闸口——固件升级到 v1.4 前必须填好。
       this.logger.error(
         `getvalue cannot resolve vcn: CHARACTER_TIMBRE_JSON has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
