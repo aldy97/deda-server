@@ -296,23 +296,73 @@ describe("adventure-linter", () => {
       ],
     });
 
-    it("requires at least two choices", () => {
-      expect(
-        codes(lintEpisode(identity, withChoices({ choices: [] })).errors),
-      ).toContain("CHOICES_REQUIRED");
-      expect(
-        codes(
-          lintEpisode(
-            identity,
-            withChoices({
-              choices: [{ key: "forest", text: "森林", reply: "好" }],
-            }),
-          ).errors,
-        ),
-      ).toContain("CHOICES_REQUIRED");
+    it("rejects non-array choices as structurally invalid", () => {
       expect(codes(lintEpisode(identity, withChoices(null)).errors)).toContain(
         "CHOICES_REQUIRED",
       );
+    });
+
+    it("rejects 0 or 1 choices with CHOICES_REQUIRED and not CHOICES_COUNT_INVALID", () => {
+      // 0 选项 → 写到一半，不是写坏了
+      const r0 = lintEpisode(identity, withChoices({ choices: [] }));
+      expect(codes(r0.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r0.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r0.ok).toBe(false);
+
+      // 1 选项 → 也是写到一半
+      const r1 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [{ key: "forest", text: "森林", reply: "好" }],
+        }),
+      );
+      expect(codes(r1.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r1.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r1.ok).toBe(false);
+    });
+
+    it("rejects 3 or 4 choices with CHOICES_COUNT_INVALID", () => {
+      // 3 选项 → 写坏了：多出的选项是静默失效的死分支
+      const r3 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "river", text: "河边", reply: "走" },
+            { key: "mountain", text: "山上", reply: "爬" },
+          ],
+        }),
+      );
+      expect(codes(r3.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r3.ok).toBe(false);
+
+      // 4 选项
+      const r4 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "a", text: "一", reply: "1" },
+            { key: "b", text: "二", reply: "2" },
+            { key: "c", text: "三", reply: "3" },
+            { key: "d", text: "四", reply: "4" },
+          ],
+        }),
+      );
+      expect(codes(r4.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r4.ok).toBe(false);
+    });
+
+    it("accepts exactly 2 valid choices", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "river", text: "河边", reply: "走" },
+          ],
+        }),
+      );
+      expect(report.ok).toBe(true);
     });
 
     it("requires key, text and reply on every choice", () => {
@@ -329,7 +379,7 @@ describe("adventure-linter", () => {
       expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
     });
 
-    it("rejects a one-character key because ASR matching uses substring includes", () => {
+    it("allows a one-character key now that key-length validation is removed", () => {
       const report = lintEpisode(
         identity,
         withChoices({
@@ -339,10 +389,11 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(report.errors)).toContain("CHOICE_KEY_INVALID");
+      expect(codes(report.errors)).not.toContain("CHOICE_KEY_INVALID");
+      expect(report.ok).toBe(true);
     });
 
-    it("rejects a key containing whitespace because ASR never emits it", () => {
+    it("allows a key containing whitespace now that key-format validation is removed", () => {
       const report = lintEpisode(
         identity,
         withChoices({
@@ -352,7 +403,8 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(report.errors)).toContain("CHOICE_KEY_INVALID");
+      expect(codes(report.errors)).not.toContain("CHOICE_KEY_INVALID");
+      expect(report.ok).toBe(true);
     });
 
     it("rejects a one-character choice text for the same substring reason", () => {
@@ -368,7 +420,7 @@ describe("adventure-linter", () => {
       expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
     });
 
-    it("rejects duplicated keys or texts", () => {
+    it("warns on duplicated keys but still reports ok since key dup is not an error", () => {
       const dupKey = lintEpisode(
         identity,
         withChoices({
@@ -378,7 +430,9 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(dupKey.errors)).toContain("CHOICE_KEY_DUPLICATE");
+      expect(codes(dupKey.warnings)).toContain("CHOICE_KEY_DUPLICATE");
+      expect(codes(dupKey.errors)).not.toContain("CHOICE_KEY_DUPLICATE");
+      expect(dupKey.ok).toBe(true);
 
       const dupText = lintEpisode(
         identity,
@@ -403,6 +457,20 @@ describe("adventure-linter", () => {
         }),
       );
       expect(codes(report.errors)).toContain("CHOICE_TEXT_SUBSTRING");
+    });
+
+    it("does not reject when only the key is a substring, since key matching is not substring-based", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "pine_forest", text: "松树林", reply: "走" },
+          ],
+        }),
+      );
+      expect(codes(report.errors)).not.toContain("CHOICE_TEXT_SUBSTRING");
+      expect(report.ok).toBe(true);
     });
 
     it("attaches the offending segment order to the issue", () => {

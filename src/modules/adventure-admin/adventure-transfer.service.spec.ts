@@ -517,6 +517,64 @@ describe("AdventureTransferService", () => {
       expect(rejected?.reason).toContain("禁用词");
     });
 
+    it("rejects a bundle episode whose two-choice segment does not have exactly 2 options", async () => {
+      mockTargetEnvironment();
+      const episodeWith3Choices: BundleEpisode = {
+        characterKey: "elly",
+        season: 1,
+        episodeNumber: 3,
+        title: "第三集",
+        recap: null,
+        segments: [
+          {
+            order: 0,
+            kind: "interaction",
+            text: "你想去哪里？",
+            interactionType: "two_choice",
+            options: {
+              choices: [
+                { key: "forest", text: "森林", reply: "好" },
+                { key: "river", text: "河边", reply: "走" },
+                { key: "mountain", text: "山上", reply: "爬" },
+              ],
+            },
+            fallbackText: "没关系",
+            exitText: "先休息一下",
+            rewardStar: false,
+          },
+        ],
+      };
+      const errors: LintIssue[] = [
+        {
+          severity: "error",
+          code: "CHOICES_COUNT_INVALID",
+          message: "第 0 段是二选一交互点，必须恰好 2 个选项，收到 3 个。",
+          businessKey: "elly/1/3",
+        },
+      ];
+      query.checkContent.mockImplementation(
+        async (
+          _episodeId: string | null,
+          _c: unknown,
+          identity?: { episodeNumber?: number },
+        ) =>
+          identity?.episodeNumber === 3
+            ? { ok: false, issues: errors, errors, warnings: [] }
+            : okReport,
+      );
+
+      const preview = await service.planImport(
+        makeBundle([episodeA(), episodeWith3Choices]),
+      );
+
+      expect(preview.ok).toBe(false);
+      const rejected = preview.plan.items.find(
+        (item) => item.businessKey === "elly/1/3",
+      );
+      expect(rejected?.action).toBe("reject");
+      expect(rejected?.reason).toContain("恰好 2 个选项");
+    });
+
     /**
      * 空壳集是导入链路唯一能造成的**持久性**伤害：它自己发布不出去（lint 的 NO_SEGMENTS
      * 会挡），但一旦落地就成了「目标环境这一集有未发布本地草稿」，之后每一次正常导入都会

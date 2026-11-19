@@ -595,10 +595,23 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      // CHOICES_COUNT_INVALID 只对选项过多(>2)产出，那是「写坏了」——多出的选项
+      // 是静默失效的死分支，草稿也拦。
+      query.checkContent.mockResolvedValue(
+        errorReport("CHOICES_COUNT_INVALID"),
+      );
+      await expect(
+        service.saveDraft("ep1", content, actor, {
+          reason: "3个选项太多了，多出来的孩子永远选不到",
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // CHOICES_REQUIRED（选项不足 0 或 1 个）属于「写到一半」，
+      // 刻意未进 DRAFT_BLOCKING_CODES，草稿应能存下来。
       query.checkContent.mockResolvedValue(errorReport("CHOICES_REQUIRED"));
       await expect(
         service.saveDraft("ep1", content, actor, {
-          reason: "二选一的选项还没填完",
+          reason: "只有一个选项，还没写完，让我存一下",
         }),
       ).resolves.toBeDefined();
 
@@ -746,6 +759,21 @@ describe("AdventureContentService", () => {
         expect.anything(),
         expect.objectContaining({ forPublish: true }),
       );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("blocks publish when choices count is not exactly 2 even though the draft saved fine earlier", async () => {
+      query.checkContent.mockResolvedValue(
+        errorReport("CHOICES_COUNT_INVALID"),
+      );
+
+      await expect(
+        service.publish("ep1", actor, {
+          reason: "选项数不是2个，发布必须拦住",
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
     });
