@@ -1,15 +1,9 @@
 import { matchChoiceDeterministic, MatchableChoice } from "./adventure-match";
 
 describe("matchChoiceDeterministic", () => {
-  const riverLand: MatchableChoice[] = [
-    { text: "河边" },
-    { text: "陆地" },
-  ];
+  const riverLand: MatchableChoice[] = [{ text: "河边" }, { text: "陆地" }];
 
-  const pathBridge: MatchableChoice[] = [
-    { text: "小路" },
-    { text: "小桥" },
-  ];
+  const pathBridge: MatchableChoice[] = [{ text: "小路" }, { text: "小桥" }];
 
   // ── 非字符串 / 空字符串 ──
 
@@ -34,7 +28,9 @@ describe("matchChoiceDeterministic", () => {
   // ── 零命中 ──
 
   it("returns null when no choice text is present in asrText", () => {
-    expect(matchChoiceDeterministic(riverLand, "有水的地方太危险了")).toBeNull();
+    expect(
+      matchChoiceDeterministic(riverLand, "有水的地方太危险了"),
+    ).toBeNull();
   });
 
   it("returns null when asrText mentions neither choice", () => {
@@ -60,28 +56,26 @@ describe("matchChoiceDeterministic", () => {
   // ── 否定守卫 ──
 
   it("returns null when the matched text is preceded by 不", () => {
-    expect(matchChoiceDeterministic(riverLand, "不要走河边，走陆地")).toBeNull();
+    expect(
+      matchChoiceDeterministic(riverLand, "不要走河边，走陆地"),
+    ).toBeNull();
   });
 
   it("returns null when the matched text is preceded by 别", () => {
-    expect(matchChoiceDeterministic(
-      [{ text: "河边" }],
-      "别去河边",
-    )).toBeNull();
+    expect(matchChoiceDeterministic([{ text: "河边" }], "别去河边")).toBeNull();
   });
 
   it("returns the index when a negation word appears outside the 4-char lookbehind window", () => {
-    expect(matchChoiceDeterministic(riverLand, "我不喜欢下雨，我们去河边")).toBe(0);
+    expect(
+      matchChoiceDeterministic(riverLand, "我不喜欢下雨，我们去河边"),
+    ).toBe(0);
   });
 
   // ── key 绝不参与匹配 ──
 
   it("returns null when asrText matches only key, not text (English key exclusion)", () => {
     expect(
-      matchChoiceDeterministic(
-        [{ key: "river", text: "河边" }],
-        "river",
-      ),
+      matchChoiceDeterministic([{ key: "river", text: "河边" }], "river"),
     ).toBeNull();
   });
 
@@ -110,10 +104,7 @@ describe("matchChoiceDeterministic", () => {
 
   it("returns index 1 when an empty-text choice is skipped and the other matches", () => {
     expect(
-      matchChoiceDeterministic(
-        [{ text: "" }, { text: "陆地" }],
-        "我要去陆地",
-      ),
+      matchChoiceDeterministic([{ text: "" }, { text: "陆地" }], "我要去陆地"),
     ).toBe(1);
   });
 });
