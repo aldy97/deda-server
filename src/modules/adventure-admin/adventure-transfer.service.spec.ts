@@ -572,7 +572,7 @@ describe("AdventureTransferService", () => {
         (item) => item.businessKey === "elly/1/3",
       );
       expect(rejected?.action).toBe("reject");
-      expect(rejected?.reason).toContain("CHOICES_COUNT_INVALID");
+      expect(rejected?.reason).toContain("恰好 2 个选项");
     });
 
     /**

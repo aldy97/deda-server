@@ -211,10 +211,6 @@ export class AdventureContentQueryService {
         "ADVENTURE_LINT_MAX_STARS_PER_EPISODE",
         DEFAULT_LINT_THRESHOLDS.maxStarsPerEpisode,
       ),
-      minChoiceKeyChars: this.number(
-        "ADVENTURE_LINT_MIN_CHOICE_KEY_CHARS",
-        DEFAULT_LINT_THRESHOLDS.minChoiceKeyChars,
-      ),
       minChoiceTextChars: this.number(
         "ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS",
         DEFAULT_LINT_THRESHOLDS.minChoiceTextChars,

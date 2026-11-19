@@ -745,7 +745,7 @@ body { content, reason, baseVersionId?, baseDraftUpdatedAt?, force? }
    //   否则会被自己刚存的那一次顶成 409（自己锁死自己）。
    // 入库门槛分两类，别混：
    //   身份级（SEASON_UNSUPPORTED / UNKNOWN_CHARACTER_KEY / INVALID_EPISODE_NUMBER /
-   //     BUSINESS_KEY_TAKEN）+ 规范化会丢段 → 400 CONTENT_REJECTED / SEGMENT_WOULD_BE_DROPPED。
+   //     BUSINESS_KEY_TAKEN / CHOICES_COUNT_INVALID）+ 规范化会丢段 → 400 CONTENT_REJECTED / SEGMENT_WOULD_BE_DROPPED。
    //     这些不是「没写完」，是「这一行写坏了」，落库会污染业务键唯一约束。
    //   内容级（缺文本、段号断档、选项不全、**禁用词**……）→ 放行。草稿对孩子不可见，
    //     发布必定按发布标准重新校验一次（PUBLISH_BLOCKED），那才是儿童内容的闸口。

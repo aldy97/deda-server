@@ -595,7 +595,9 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      query.checkContent.mockResolvedValue(errorReport("CHOICES_COUNT_INVALID"));
+      query.checkContent.mockResolvedValue(
+        errorReport("CHOICES_COUNT_INVALID"),
+      );
       await expect(
         service.saveDraft("ep1", content, actor, {
           reason: "二选一必须是恰好2个选项，多了少了都不行",
