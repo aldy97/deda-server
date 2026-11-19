@@ -373,7 +373,9 @@ model AdventureSegment {
   interactionType String?  // open_question / two_choice / repeat_after_me / reward
   options         Json?    // 二选一：{ choices: [{key, text, reply}] }，回应预生成
   fallbackText    String?  // 兜底话术（跑题/沉默/不配合）
-  exitText        String?  // 明确拒绝时的温柔收尾
+  // 刻意没有 exitText 列：孩子说「不想玩了」时念的是全局统一话术
+  // （adventure.constants 的 ADVENTURE_EXIT_TEXT），不分 IP / 集 / 段 / 互动类型，
+  // 也不分是打断旁白还是在互动点退出。历史文案仍可在 AdventureEpisodeVersion.payload 里查到。
   rewardStar      Boolean  @default(false) // 通过该交互点奖励一颗星光
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
