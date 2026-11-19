@@ -34,8 +34,28 @@ export interface AdventureReply {
   action: "narrate" | "await_reply" | "completed" | "exit";
   /** 本轮交互处置结果；开集/续播等非交互回复为 undefined。 */
   result?: "answered" | "off_topic" | "fallback" | "exit" | "timeout";
-  /** 二选一命中信息：命中了第几个选项以及判定来源（确定性/LLM）。 */
-  matchedChoice?: { index: number; source: "deterministic" | "llm" };
+  /**
+   * 本轮处置发生在哪个交互点：类型 + 段 order。
+   * result 事件由四种交互类型共用（two_choice / open_question /
+   * repeat_after_me / reward），报表要算「二选一的兜底率」必须能把分母
+   * 限定在 two_choice 上，所以把类型一起盖到事件里。非交互回复为 undefined。
+   */
+  interaction?: { type: string; order: number };
+  /**
+   * 二选一命中信息：命中了第几个选项、判定来源（确定性/LLM）、
+   * 该选项的作者内部 key、所在段 order、以及命中时锁定的版本快照 id。
+   * 用于报表做「哪一段/哪个选项/哪个版本」的归因；不含任何儿童数据。
+   */
+  matchedChoice?: {
+    index: number;
+    source: "deterministic" | "llm";
+    /** 被选中选项的作者内部 key（稳定 ID）；payload 缺 key 时为 null */
+    key: string | null;
+    /** interaction.order，报表用它 join 回内容 payload 取选项文案 */
+    segmentOrder: number;
+    /** progress.episodeVersionId；为空表示走 segments 物化表而非版本快照 */
+    episodeVersionId: string | null;
+  };
 }
 
 interface InteractionChoice {
@@ -760,13 +780,16 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (interaction.interactionType === "two_choice") {
-      return this.handleTwoChoice(
-        deviceInternalId,
-        daily,
-        progress,
-        segments,
+      return this.withInteractionMeta(
+        await this.handleTwoChoice(
+          deviceInternalId,
+          daily,
+          progress,
+          segments,
+          interaction,
+          asrText,
+        ),
         interaction,
-        asrText,
       );
     }
     if (interaction.interactionType === "repeat_after_me") {
@@ -776,7 +799,10 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       } | null;
       const praise = options?.praise || "说得真好！给你鼓掌！";
       const reply = await this.playFrom(progress, segments, [praise], daily);
-      return { ...reply, result: "answered" };
+      return this.withInteractionMeta(
+        { ...reply, result: "answered" },
+        interaction,
+      );
     }
     // open_question：小模型接话（含正常/跑题/超前发挥），失败降级兜底
     const bridge = await this.generateBridge(
@@ -786,7 +812,31 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       "open_question",
     );
     const reply = await this.playFrom(progress, segments, [bridge], daily);
-    return { ...reply, result: "answered" };
+    return this.withInteractionMeta(
+      { ...reply, result: "answered" },
+      interaction,
+    );
+  }
+
+  /**
+   * 把交互点的类型与段号盖到回复上，供 recordPresented 写进 result 事件。
+   * 四种交互类型共用同一批 result 事件名，不带类型就无法把「二选一兜底率」
+   * 的分母从开放提问里摘出来。interaction 为空（超时路径拿不到当前段）时原样返回。
+   */
+  private withInteractionMeta(
+    reply: AdventureReply,
+    interaction: PlayableSegment | null | undefined,
+  ): AdventureReply {
+    if (!interaction) {
+      return reply;
+    }
+    return {
+      ...reply,
+      interaction: {
+        type: interaction.interactionType ?? "unknown",
+        order: interaction.order,
+      },
+    };
   }
 
   /**
@@ -897,7 +947,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return {
         ...reply,
         result: "answered",
-        matchedChoice: { index: hitIndex, source: "deterministic" },
+        matchedChoice: {
+          index: hitIndex,
+          source: "deterministic",
+          key: choices[hitIndex]?.key ?? null,
+          segmentOrder: interaction.order,
+          episodeVersionId: progress.episodeVersionId ?? null,
+        },
       };
     }
 
@@ -924,7 +980,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         return {
           ...reply,
           result: "answered",
-          matchedChoice: { index: verdict.index!, source: "llm" },
+          matchedChoice: {
+            index: verdict.index!,
+            source: "llm",
+            key: choices[verdict.index!]?.key ?? null,
+            segmentOrder: interaction.order,
+            episodeVersionId: progress.episodeVersionId ?? null,
+          },
         };
       }
 
@@ -1046,7 +1108,10 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     const fallback = interaction?.fallbackText || "没关系，我们继续吧。";
     this.clearTimer(deviceInternalId);
     const reply = await this.playFrom(progress, segments, [fallback], daily);
-    return { ...reply, result: "timeout" };
+    return this.withInteractionMeta(
+      { ...reply, result: "timeout" },
+      interaction,
+    );
   }
 
   /**
@@ -1194,7 +1259,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。
-   * @param userMessageId 用户消息 ID，用于 choice_matched 事件关联孩子原话（仅含 index/source，不存原话本身）。 */
+   * @param userMessageId 用户消息 ID，用于 choice_matched 事件关联孩子原话（payload 仅含 index/source/key，不存原话本身）。 */
   async recordPresented(
     deviceInternalId: string,
     turnId: string,
@@ -1232,6 +1297,12 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           ...base,
           eventKey: `turn:${turnId}:result:${reply.result}`,
           eventType: reply.result,
+          // result 事件由四种交互类型共用，带上类型与段号报表才能把
+          // 「二选一兜底率」的分母从开放提问里摘出来。
+          segmentOrder: reply.interaction?.order ?? null,
+          ...(reply.interaction
+            ? { payload: { interactionType: reply.interaction.type } }
+            : {}),
         },
       });
     }
@@ -1244,9 +1315,12 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           eventKey: `turn:${turnId}:choice_matched`,
           eventType: "choice_matched",
           messageId: userMessageId ?? null,
+          episodeVersionId: reply.matchedChoice.episodeVersionId,
+          segmentOrder: reply.matchedChoice.segmentOrder,
           payload: {
             index: reply.matchedChoice.index,
             source: reply.matchedChoice.source,
+            key: reply.matchedChoice.key,
           },
         },
       });

@@ -1360,7 +1360,7 @@ describe("AdventureService", () => {
       expect(reply.interaction).toEqual({ type: "open_question", order: 4 });
     });
 
-    it("tags the refusal exit with the interaction it exited from", async () => {
+    it("does not tag the unified exit with interaction meta", async () => {
       prisma.adventureProgress.findFirst.mockResolvedValue({
         ...baseProgress,
         status: "awaiting_reply",
@@ -1371,7 +1371,11 @@ describe("AdventureService", () => {
       const reply = await service.handleChildReply("dev-uuid-1", "不想玩了");
 
       expect(reply.result).toBe("exit");
-      expect(reply.interaction).toEqual({ type: "two_choice", order: 2 });
+      // #83 起退出统一走 exitAdventure()，它刻意不看当前停在旁白还是互动段，
+      // 因此不盖 interaction 元数据；报表侧 totalInteractions 也明确排除 exit，
+      // 两边口径自洽。若将来给 exit 加上 interaction，退出轮次会混进二选一分母，
+      // 这条断言就是拦这个的。
+      expect(reply.interaction).toBeUndefined();
     });
   });
 
