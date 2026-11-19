@@ -357,7 +357,7 @@ export class AdventureAdminController {
   @ContentReadOnly()
   @ApiOperation({
     summary:
-      "实时校验内容草稿，不写库（编辑器每次改动后调用；只读环境同样可用）",
+      "实时校验内容草稿，不写库（编辑器点「校验」或「发布」时调用，打字不触发；只读环境同样可用）",
   })
   async lint(@Body() dto: LintDto) {
     const identity: CheckContentIdentity | undefined = dto?.identity
@@ -372,6 +372,7 @@ export class AdventureAdminController {
       trimToNull(dto?.episodeId),
       dto.content,
       identity,
+      dto.forPublish,
     );
   }
 

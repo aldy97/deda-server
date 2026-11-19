@@ -454,22 +454,41 @@ export class AdventureContentQueryService {
     return this.impactFor(await this.loadEpisode(episodeId));
   }
 
-  /** 实时校验：编辑器每次改动后调用，不写库。 */
+  /** 实时校验：编辑器点「校验」或「发布」时调用（打字不触发、无防抖），不写库。 */
   async checkContent(
     episodeId: string | null,
     content: EpisodeContentDraft,
     identity?: CheckContentIdentity,
+    forPublish?: boolean,
   ): Promise<LintReport> {
+    const publishStandard = forPublish ?? identity?.forPublish === true;
     let resolvedIdentity = identity;
     let ownBusinessKey: string | undefined;
     if (episodeId) {
       const episode = await this.loadEpisode(episodeId);
       ownBusinessKey = businessKey(episodeIdentity(episode));
       if (!resolvedIdentity) {
-        resolvedIdentity = episodeIdentity(episode);
+        resolvedIdentity = {
+          ...episodeIdentity(episode),
+          forPublish: publishStandard,
+        };
       }
     }
     if (!resolvedIdentity) {
+      if (publishStandard) {
+        const context = await this.lintContextFor(
+          "elly",
+          ADVENTURE_SEASON,
+          undefined,
+          true,
+        );
+        return lintEpisode(
+          { characterKey: "elly", season: ADVENTURE_SEASON, episodeNumber: 0 },
+          content,
+          context,
+          this.lintOverrides,
+        );
+      }
       return lintEpisode(
         { characterKey: "elly", season: ADVENTURE_SEASON, episodeNumber: 0 },
         content,
@@ -481,7 +500,7 @@ export class AdventureContentQueryService {
       resolvedIdentity.characterKey,
       resolvedIdentity.season,
       ownBusinessKey,
-      resolvedIdentity.forPublish === true,
+      publishStandard,
     );
     return lintEpisode(resolvedIdentity, content, context, this.lintOverrides);
   }

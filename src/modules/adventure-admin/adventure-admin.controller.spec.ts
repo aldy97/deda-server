@@ -509,10 +509,15 @@ describe("AdventureAdminController", () => {
         forPublish: true,
       } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
-        ...IDENTITY,
-        forPublish: true,
-      }, true);
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          ...IDENTITY,
+          forPublish: true,
+        },
+        true,
+      );
     });
 
     it("lint targets an existing episode and leaves identity undefined when not editing it", async () => {
@@ -520,7 +525,12 @@ describe("AdventureAdminController", () => {
 
       await controller.lint({ episodeId: " ep1 ", content: DRAFT } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith("ep1", DRAFT, undefined, undefined);
+      expect(query.checkContent).toHaveBeenCalledWith(
+        "ep1",
+        DRAFT,
+        undefined,
+        undefined,
+      );
     });
 
     it("lint defaults season so a hand-written bundle is not rejected for omitting it", async () => {
@@ -531,11 +541,16 @@ describe("AdventureAdminController", () => {
         identity: { characterKey: "elly", episodeNumber: 3 },
       } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
-        characterKey: "elly",
-        season: 1,
-        episodeNumber: 3,
-      }, undefined);
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 3,
+        },
+        undefined,
+      );
     });
 
     it("lint passes forPublish through to checkContent even without identity", async () => {
@@ -576,10 +591,15 @@ describe("AdventureAdminController", () => {
         forPublish: true,
       } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
-        ...IDENTITY,
-        forPublish: true,
-      }, true);
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          ...IDENTITY,
+          forPublish: true,
+        },
+        true,
+      );
     });
 
     it("simulate passes identity + content only", async () => {
