@@ -1569,8 +1569,44 @@ describe("VendorService", () => {
           filler: null,
           answer: "好呀，我们去森林！\n森林里有一只小松鼠。",
           interactionResult: null,
+          matchedChoice: null,
         },
       });
+    });
+
+    it("should include matchedChoice in assistant rawPayload and pass userMessageId to recordPresented", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h2",
+        deviceId: "dev-h2",
+      });
+      prisma.message.create.mockResolvedValue({ id: "msg-abc" });
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["好呀，我们去森林！"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: { index: 0, source: "llm" },
+      });
+
+      await service.handleTextIn({
+        deviceId: "dev-h2",
+        asrText: "森林",
+      });
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall![0].data.rawPayload).toMatchObject({
+        matchedChoice: { index: 0, source: "llm" },
+      });
+
+      expect(adventureService.recordPresented).toHaveBeenCalledWith(
+        "uuid-h2",
+        expect.any(String),
+        expect.objectContaining({
+          matchedChoice: { index: 0, source: "llm" },
+        }),
+        "msg-abc",
+      );
     });
 
     it("should start today's adventure before entering the free-chat pipeline", async () => {

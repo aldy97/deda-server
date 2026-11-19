@@ -337,6 +337,7 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我要去森林");
 
     expect(reply.texts[0]).toBe("好呀，我们去森林！");
+    expect(reply.matchedChoice).toEqual({ index: 0, source: "deterministic" });
     expect(reply.texts).toContain(segments[3].text); // 回应后汇流续播
     expect(reply.action).toBe("await_reply"); // s3 播完到 s4 开放提问
     expect(llm.complete).not.toHaveBeenCalled(); // 二选一命中不调 LLM
@@ -413,6 +414,7 @@ describe("AdventureService", () => {
       );
 
       expect(reply.texts[0]).toBe("好呀，我们去森林！"); // pre-generated reply
+      expect(reply.matchedChoice).toEqual({ index: 0, source: "llm" });
       expect(reply.texts).toContain(segments[3].text); // 汇流续播
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
@@ -444,6 +446,7 @@ describe("AdventureService", () => {
       );
 
       expect(reply.texts[0]).toBe("走，我们去河边！");
+      expect(reply.matchedChoice).toEqual({ index: 1, source: "llm" });
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
       expect(llm.complete).toHaveBeenCalledWith(
@@ -1132,6 +1135,141 @@ describe("AdventureService", () => {
       prisma.adventureEvent.upsert.mock.calls,
     );
     expect(eventPayload).not.toContain("故事原文");
+  });
+
+  describe("choice_matched telemetry", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    it("must never persist PII (child's spoken text) in the event payload", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["好呀，我们去森林！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: { index: 0, source: "deterministic" },
+        },
+        "msg-user-2",
+      );
+
+      const choiceCall = prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === "choice_matched",
+      );
+      expect(choiceCall).toBeDefined();
+      const payload = choiceCall![0].create.payload;
+      expect(Object.keys(payload).sort()).toEqual(["index", "source"]);
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain("好呀");
+      expect(serialized).not.toContain("森林");
+      expect(serialized).not.toContain("我们去森林");
+    });
+
+    it("should upsert a choice_matched event when matchedChoice is deterministic", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["好呀，我们去森林！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: { index: 1, source: "deterministic" },
+        },
+        "msg-user-2",
+      );
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledTimes(3);
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { eventKey: "turn:turn-1:choice_matched" },
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            turnId: "turn-1",
+            messageId: "msg-user-2",
+            payload: { index: 1, source: "deterministic" },
+          }),
+        }),
+      );
+    });
+
+    it("should set source to llm when matchedChoice comes from LLM verdict", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["走，我们去河边！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: { index: 0, source: "llm" },
+        },
+        "msg-user-3",
+      );
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { eventKey: "turn:turn-1:choice_matched" },
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            payload: { index: 0, source: "llm" },
+          }),
+        }),
+      );
+    });
+
+    it("should NOT upsert a choice_matched event when reply has no matchedChoice", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["兜底话术"],
+        action: "completed",
+        result: "timeout",
+      });
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledTimes(2);
+      const eventTypes = prisma.adventureEvent.upsert.mock.calls.map(
+        (call) => call[0].create.eventType,
+      );
+      expect(eventTypes).not.toContain("choice_matched");
+    });
+
+    it("should set messageId to null when userMessageId is not provided", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["回答"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: { index: 0, source: "deterministic" },
+      });
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            messageId: null,
+          }),
+        }),
+      );
+    });
+
+    it("should propagate the error when the choice_matched upsert throws", async () => {
+      prisma.adventureEvent.upsert
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("db down"));
+
+      await expect(
+        service.recordPresented(
+          "dev-uuid-1",
+          "turn-1",
+          {
+            texts: ["回答"],
+            action: "await_reply",
+            result: "answered",
+            matchedChoice: { index: 0, source: "deterministic" },
+          },
+          "msg-user-2",
+        ),
+      ).rejects.toThrow("db down");
+    });
   });
 
   it("should audit a blocked completed-day entry and its actual route", async () => {
