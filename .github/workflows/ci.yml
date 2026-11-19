@@ -88,6 +88,12 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
     uses: ./.github/workflows/deploy-staging.yml
     secrets: inherit
+    # 这里**不能**写 timeout-minutes：GitHub 不接受 uses 型调用 job 用该键，
+    # 写了会让整个 ci.yml 被判非法——run 0 秒失败、一个 job 都不起，比不加更糟
+    # （2026-11-19 实测，run 44471518994）。
+    # 上界由被调用的 deploy-staging.yml 内层 deploy job 自己承担（timeout-minutes: 20）；
+    # 内层超时 → 可复用 workflow 结束 → 本调用 job 结束 → concurrency group 释放，保护链成立。
+    # 该口径由 src/common/workflows/ci-deploy-gate.spec.ts 钉住。
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
@@ -99,6 +105,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy-prod.yml
     secrets: inherit
+    # 同上：uses 型调用 job 不能写 timeout-minutes（会让整个 ci.yml 非法）。
+    # 上界由 deploy-prod.yml 内层 deploy job 承担（timeout-minutes: 25，比 staging 多 5 分钟，
+    # 因为 prod 另有「部署前备份」与「健康检查失败自动回滚」两步）。
     concurrency:
       group: deploy-prod
       cancel-in-progress: false
