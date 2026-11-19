@@ -135,9 +135,9 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 **发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0，`SPEECH_RATE_MAP_JSON` 缺失只会让 spd 回落 1.0，两者都不阻塞发布。
 
-**取值已定（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`，即 `{"elly":"1000957","polly":"1000957"}`；日后拿到各 IP 的专属音色，只改这个映射里对应的一行即可切换（查表发生在每轮 getvalue、固件不缓存，代码零改动）。音色目录 `VOICE_CATALOG_JSON` 本次不覆盖。**当前 staging 与 prod 的 env 文件都还没填这个键。**
+**取值已定（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`，即 `{"elly":"1000957","polly":"1000957"}`；日后拿到各 IP 的专属音色，只改这个映射里对应的一行即可切换（查表发生在每轮 getvalue、固件不缓存，代码零改动）。音色目录 `VOICE_CATALOG_JSON` 不做权威覆盖（staging 现含两条**占位**条目，`status:"TRAINED"` 是我方自述而非百度真值，见 §6「env 填写状态」）。**staging 已于 2026-11-19 12:14 填入并重启生效；prod 仍未填。**
 
-**还有一道容易漏的闸口**：compose 的 `environment` 是白名单，`--env-file` 只做变量替换——键只写在 env 文件里不会进容器，且不报错。2026-11-19 实测 staging 容器内 6 个音色/百度键（`CHARACTER_TIMBRE_JSON`、`TTS_DEFAULT_VOL`、`SPEECH_RATE_MAP_JSON`、`VOICE_CATALOG_JSON`、`BAIDU_AGENT_ENABLED`、`BAIDU_AGENT_TIMEOUT_MS`）全部 UNSET；现已加入 `docker/docker-compose.yml` 并由 `compose-env-gate.spec.ts` 的 `MUST_FORWARD` 钉住。填 env 之后必须重启 compose 才生效。
+**还有一道容易漏的闸口**：compose 的 `environment` 是白名单，`--env-file` 只做变量替换——键只写在 env 文件里不会进容器，且不报错。2026-11-19 实测 staging 容器内 6 个音色/百度键（`CHARACTER_TIMBRE_JSON`、`TTS_DEFAULT_VOL`、`SPEECH_RATE_MAP_JSON`、`VOICE_CATALOG_JSON`、`BAIDU_AGENT_ENABLED`、`BAIDU_AGENT_TIMEOUT_MS`）全部 UNSET；现已加入 `docker/docker-compose.yml` 并由 `compose-env-gate.spec.ts` 的 `MUST_FORWARD` 钉住。填 env 之后必须重启 compose 才生效。**2026-11-19 12:14 已按此路径复测通过**：追加 4 个键 → 显式带原 `IMAGE_TAG` 重启（镜像未换）→ 容器内 `CHARACTER_TIMBRE_JSON`/`SPEECH_RATE_MAP_JSON`/`VOICE_CATALOG_JSON`/`BAIDU_AGENT_ENABLED` 均 SET 且 JSON 可解析，日志无 `is not valid JSON`、`level:50` 计数 0，`POST /client/bot/bot/getvalue` 由 500 转 **200 且 `vcn=1000957`**。
 
 ## 3. 生效时机
 
@@ -190,7 +190,18 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 | `VOICE_CATALOG_JSON`     | `[]`    | 音色目录 JSON 数组。权威来源百度 `GET /api/v1/timbres`，我方无 AK/SK 无法自动同步，需机芯公司导出后填入 |
 | `SPEECH_RATE_MAP_JSON`   | `{}`    | 语速档位 → spd 倍数映射。产品决策。未配置时：§2.1 的语速变更只落库不下发；§2.5 的 `spd` 回落基础语速 1.0（不阻塞发布） |
 | `TTS_DEFAULT_VOL`        | `1.0`   | §2.5 getvalue 响应体 `vol` 的唯一来源，全局配置、不做每设备可调。合法范围 `[0.5, 2.0]`（v1.4 §4.2，与 spd 同区间）。非法或越界 → getvalue 一律 500 → 设备每轮对话都创建失败，因此改这个值等于改全量设备可用性 |
-| `CHARACTER_TIMBRE_JSON`  | `{}`    | IP/角色（`Device.characterKey`）→ timbreId 权威映射，例 `{"elly":"1000063","polly":"1000064"}`（示例值非真实音色 id）。v1.4 起是设备每轮音色的**唯一数据源**（§2.5 getvalue），同时供剧情内按角色切音色查表（§2.4）。与人设注入同源（`prompt-registry` 也按 characterKey 取人设）。**取值已定、尚未填入任何环境**（熊总 2026-11-19）：两个 IP 暂统一用 `1000957`，日后按 IP 各填各的即可切换；未填前 getvalue 一律 500，是固件升级到 v1.4 的发布闸口（Q1） |
+| `CHARACTER_TIMBRE_JSON`  | `{}`    | IP/角色（`Device.characterKey`）→ timbreId 权威映射，例 `{"elly":"1000063","polly":"1000064"}`（示例值非真实音色 id）。v1.4 起是设备每轮音色的**唯一数据源**（§2.5 getvalue），同时供剧情内按角色切音色查表（§2.4）。与人设注入同源（`prompt-registry` 也按 characterKey 取人设）。**取值已定（熊总 2026-11-19）：staging 已填、prod 未填**（见本节「env 填写状态」）：两个 IP 暂统一用 `1000957`，日后按 IP 各填各的即可切换；**未填的环境** getvalue 一律 500，是固件升级到 v1.4 的发布闸口（Q1） |
+
+**env 填写状态（截至 2026-11-19 12:14）**：
+
+| 环境    | `CHARACTER_TIMBRE_JSON`                | `SPEECH_RATE_MAP_JSON`                 | `VOICE_CATALOG_JSON`                                                                     | `BAIDU_AGENT_ENABLED` | `TTS_DEFAULT_VOL` / `BAIDU_AGENT_TIMEOUT_MS` |
+| ------- | -------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------- |
+| staging | `{"elly":"1000957","polly":"1000957"}` | `{"slow":0.8,"normal":1,"fast":1.25}`  | 2 条**占位**：`1000957`（在线对话音色）、`1001022`（离线音频音色），均自述 `TRAINED`、`chinese` | `true`                | 沿用默认 `1.0` / `5000`                      |
+| prod    | **未填**（默认 `{}`）                  | **未填**（默认 `{}`）                  | **未填**（默认 `[]`）                                                                    | **未填**（默认 `false`） | 默认                                         |
+
+表内 timbreId、语速倍数、目录条目名都不是凭据，可以入库；env 文件本身权限保持 600，值不进仓库。目录条目的 `name` 是中性占位名，`status:"TRAINED"` 是我方自述而非百度真值，两者都等 Q7（只读 AK/SK）/ Q8（试听 url 刷新）有答复后按百度导出结果替换。**L0（两个 id 在线是否真可用 + 听感）服务端测不了**，仍需机芯公司或百度控制台确认，或用 L2 的 `applied` 归因反推（`live` = 可用，`upstream_error` = 该 id 在线不可用）。
+
+**§2.5 的发布闸口在 staging 已解除、在 prod 仍然适用**：prod 的 `CHARACTER_TIMBRE_JSON` 填好之前，固件不能在 prod 升级到 v1.4，否则每轮 getvalue 都 500。
 
 **默认关闭**：`BAIDU_AGENT_ENABLED=false` + `VOICE_CATALOG_JSON=[]` 时，§2.1/§2.3 全链路 fail-closed（`applied:"deferred"`），不出网、不改设备行为。
 
@@ -202,7 +213,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 | ID  | 问题                                                   | 阻塞什么                               | 不阻塞什么                               | 谁能答               |
 | --- | ------------------------------------------------------ | -------------------------------------- | ---------------------------------------- | -------------------- |
-| Q1  | **部分已答（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`；`CHARACTER_TIMBRE_JSON` 保留按 characterKey 分键的结构，日后拿到各 IP 专属音色只改对应一行。音色目录 `VOICE_CATALOG_JSON` 本次不覆盖。**仍未答**：`1000957` 属于哪个 IP、两个 IP 各自的专属 timbreId 何时给 | **发布闸口**：env 未填则 §2.5 getvalue 一律 500，固件升级到 v1.4 后设备每轮对话都创建失败；另阻塞目录填充与剧情内角色查表 | 代码框架、fail-closed 路径、语速切换、v1.4 之前的现网设备 | 取值由熊总定；`1000957` 的归属与各 IP 专属音色仍待机芯公司 / 百度控制台 |
+| Q1  | **部分已答（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`；`CHARACTER_TIMBRE_JSON` 保留按 characterKey 分键的结构，日后拿到各 IP 专属音色只改对应一行。音色目录 `VOICE_CATALOG_JSON` 不做权威覆盖（staging 现为两条占位条目，见 §6「env 填写状态」）。**仍未答**：`1000957` 属于哪个 IP、两个 IP 各自的专属 timbreId 何时给 | **发布闸口（staging 已解除、prod 仍在）**：staging 已填并于 2026-11-19 复测 getvalue 200 / `vcn=1000957`；prod env 未填则 §2.5 getvalue 一律 500，固件在 prod 升级到 v1.4 后设备每轮对话都创建失败；另阻塞目录的权威填充与剧情内角色查表 | 代码框架、fail-closed 路径、语速切换、v1.4 之前的现网设备 | 取值由熊总定；`1000957` 的归属与各 IP 专属音色仍待机芯公司 / 百度控制台 |
 | Q2  | overseas / euUs 节点的百度域名是什么                   | 海外设备音色切换                       | cn 节点设备                              | 机芯公司 / 百度文档  |
 | ~~Q3~~ | **已答（2026-11-17）**：目前没有刷新签名的机制，一次签名有效期半小时 | ——                                     | ——                                       | 已关闭               |
 | Q4  | 真机切换是否有爆音；tts_sayhi 是否默认开启            | 用户体验验收                            | 服务端功能                               | 机芯公司联调         |
@@ -229,7 +240,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 | 标记 | 位置 | 内容 |
 | --- | --- | --- |
-| `TODO(Q1)` | `baidu-agent.types.ts`、`voice-reconcile.service.ts`、`voice-catalog.service.ts`（与 Q7 合并）、`client-api.service.ts`（`botGetValue` 的 vcn 分支）、`.env.example` | `CHARACTER_TIMBRE_JSON` 的取值已定（两 IP 暂统一 `1000957`，见 §2.5 的「取值已定」），**但 staging/prod 的 env 都还没填**；音色目录内容与 `en`、`ja` 语种映射仍待确认。**`client-api.service.ts` 那处是发布闸口**：填好配置即恢复，代码零改动 |
+| `TODO(Q1)` | `baidu-agent.types.ts`、`voice-reconcile.service.ts`、`voice-catalog.service.ts`（与 Q7 合并）、`client-api.service.ts`（`botGetValue` 的 vcn 分支）、`.env.example` | `CHARACTER_TIMBRE_JSON` 的取值已定（两 IP 暂统一 `1000957`，见 §2.5 的「取值已定」），**staging 已填（2026-11-19）、prod 仍未填**（见 §6「env 填写状态」）；音色目录的权威内容与 `en`、`ja` 语种映射仍待确认。**`client-api.service.ts` 那处是发布闸口**：staging 填好并重启后已复测恢复（getvalue 200 / `vcn=1000957`），prod 填好即恢复，代码零改动 |
 | `TODO(Q2)` | `baidu-agent.types.ts` | overseas/euUs 域名待确认 |
 | `TODO(Q8)` | `voice-catalog.service.ts` | 试听 url 刷新策略待设计 |
 | `TODO(Q9)` | `voice-reconcile.service.ts`、`README.md` | 仅 spd 切换时百度行为待验证 |
