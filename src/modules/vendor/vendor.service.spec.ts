@@ -1584,7 +1584,13 @@ describe("VendorService", () => {
         texts: ["好呀，我们去森林！"],
         action: "await_reply",
         result: "answered",
-        matchedChoice: { index: 0, source: "llm" },
+        matchedChoice: {
+          index: 0,
+          source: "llm",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
       });
 
       await service.handleTextIn({
@@ -1603,7 +1609,7 @@ describe("VendorService", () => {
         "uuid-h2",
         expect.any(String),
         expect.objectContaining({
-          matchedChoice: { index: 0, source: "llm" },
+          matchedChoice: expect.objectContaining({ index: 0, source: "llm" }),
         }),
         "msg-abc",
       );

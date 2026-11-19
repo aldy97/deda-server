@@ -338,7 +338,13 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我要去森林");
 
     expect(reply.texts[0]).toBe("好呀，我们去森林！");
-    expect(reply.matchedChoice).toEqual({ index: 0, source: "deterministic" });
+    expect(reply.matchedChoice).toEqual({
+      index: 0,
+      source: "deterministic",
+      key: "forest",
+      segmentOrder: 2,
+      episodeVersionId: null,
+    });
     expect(reply.texts).toContain(segments[3].text); // 回应后汇流续播
     expect(reply.action).toBe("await_reply"); // s3 播完到 s4 开放提问
     expect(llm.complete).not.toHaveBeenCalled(); // 二选一命中不调 LLM
@@ -347,6 +353,57 @@ describe("AdventureService", () => {
         data: expect.objectContaining({ stars: 1 }),
       }),
     );
+  });
+
+  // ── 归因字段回归测试 ──
+
+  it("should set key to null when the matched choice has no key field in runtime data", async () => {
+    // Simulate runtime data where a choice object is missing the key field
+    const segmentsNoKey = structuredClone(segments);
+    (
+      segmentsNoKey[2].options as unknown as {
+        choices: Array<{ text: string; reply: string }>;
+      }
+    ).choices[0] = {
+      text: "森林",
+      reply: "好呀，我们去森林！",
+    };
+    jest
+      .spyOn(
+        service as unknown as {
+          loadSegmentsForPlay: (progress: unknown) => Promise<unknown[]>;
+        },
+        "loadSegmentsForPlay",
+      )
+      .mockResolvedValue(segmentsNoKey);
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+    expect(reply.matchedChoice).toBeDefined();
+    expect(reply.matchedChoice!.key).toBeNull();
+    expect(reply.matchedChoice!.index).toBe(0);
+    expect(reply.matchedChoice!.segmentOrder).toBe(2);
+  });
+
+  it("should set episodeVersionId to null when progress has no episodeVersionId", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+    expect(reply.matchedChoice).toBeDefined();
+    expect(reply.matchedChoice!.episodeVersionId).toBeNull();
+    expect(reply.matchedChoice!.key).toBe("forest");
   });
 
   it("should gently redirect the first off-topic answer via the small model", async () => {
@@ -415,7 +472,13 @@ describe("AdventureService", () => {
       );
 
       expect(reply.texts[0]).toBe("好呀，我们去森林！"); // pre-generated reply
-      expect(reply.matchedChoice).toEqual({ index: 0, source: "llm" });
+      expect(reply.matchedChoice).toEqual({
+        index: 0,
+        source: "llm",
+        key: "forest",
+        segmentOrder: 2,
+        episodeVersionId: null,
+      });
       expect(reply.texts).toContain(segments[3].text); // 汇流续播
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
@@ -447,7 +510,13 @@ describe("AdventureService", () => {
       );
 
       expect(reply.texts[0]).toBe("走，我们去河边！");
-      expect(reply.matchedChoice).toEqual({ index: 1, source: "llm" });
+      expect(reply.matchedChoice).toEqual({
+        index: 1,
+        source: "llm",
+        key: "river",
+        segmentOrder: 2,
+        episodeVersionId: null,
+      });
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
       expect(llm.complete).toHaveBeenCalledWith(
@@ -1199,6 +1268,113 @@ describe("AdventureService", () => {
     );
   });
 
+  // ── result 事件的交互点归因 ──
+  // answered / off_topic / fallback / timeout 这四个 result 由 two_choice、
+  // open_question、repeat_after_me、reward 四种交互类型共用。事件上不带类型与段号，
+  // 报表就算不出「二选一的兜底率」——分母会把开放提问的处置一起算进去。
+  describe("interaction attribution on result events", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    const resultCreate = (eventType: string) =>
+      prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === eventType,
+      )![0].create;
+
+    it("stamps segmentOrder and interactionType onto the result event", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["没关系，那我们先去森林吧！"],
+        action: "narrate",
+        result: "fallback",
+        interaction: { type: "two_choice", order: 2 },
+      });
+
+      expect(resultCreate("fallback")).toEqual(
+        expect.objectContaining({
+          eventType: "fallback",
+          segmentOrder: 2,
+          payload: { interactionType: "two_choice" },
+        }),
+      );
+    });
+
+    it("attributes an open_question result to its own type and order", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["哇，你说得真有意思！"],
+        action: "await_reply",
+        result: "answered",
+        interaction: { type: "open_question", order: 4 },
+      });
+
+      expect(resultCreate("answered")).toEqual(
+        expect.objectContaining({
+          segmentOrder: 4,
+          payload: { interactionType: "open_question" },
+        }),
+      );
+    });
+
+    it("leaves segmentOrder null and omits payload when the reply carries no interaction", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["兜底话术"],
+        action: "completed",
+        result: "timeout",
+      });
+
+      const create = resultCreate("timeout");
+      expect(create.segmentOrder).toBeNull();
+      expect(create).not.toHaveProperty("payload");
+    });
+  });
+
+  // ── 引擎给回复盖交互点标记 ──
+  describe("interaction meta on replies", () => {
+    it("tags a deterministic two_choice hit with the interaction type and order", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply.result).toBe("answered");
+      expect(reply.interaction).toEqual({ type: "two_choice", order: 2 });
+    });
+
+    it("tags an open_question answer with the interaction type and order", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 5,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我想吃冰淇淋",
+      );
+
+      expect(reply.interaction).toEqual({ type: "open_question", order: 4 });
+    });
+
+    it("tags the refusal exit with the interaction it exited from", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "不想玩了");
+
+      expect(reply.result).toBe("exit");
+      expect(reply.interaction).toEqual({ type: "two_choice", order: 2 });
+    });
+  });
+
   it("should append presented and interaction events without duplicating narrated text", async () => {
     prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
 
@@ -1241,7 +1417,13 @@ describe("AdventureService", () => {
           texts: ["好呀，我们去森林！"],
           action: "await_reply",
           result: "answered",
-          matchedChoice: { index: 0, source: "deterministic" },
+          matchedChoice: {
+            index: 0,
+            source: "deterministic",
+            key: "forest",
+            segmentOrder: 2,
+            episodeVersionId: null,
+          },
         },
         "msg-user-2",
       );
@@ -1251,7 +1433,7 @@ describe("AdventureService", () => {
       );
       expect(choiceCall).toBeDefined();
       const payload = choiceCall![0].create.payload;
-      expect(Object.keys(payload).sort()).toEqual(["index", "source"]);
+      expect(Object.keys(payload).sort()).toEqual(["index", "key", "source"]);
       const serialized = JSON.stringify(payload);
       expect(serialized).not.toContain("好呀");
       expect(serialized).not.toContain("森林");
@@ -1266,7 +1448,13 @@ describe("AdventureService", () => {
           texts: ["好呀，我们去森林！"],
           action: "await_reply",
           result: "answered",
-          matchedChoice: { index: 1, source: "deterministic" },
+          matchedChoice: {
+            index: 1,
+            source: "deterministic",
+            key: "river",
+            segmentOrder: 2,
+            episodeVersionId: null,
+          },
         },
         "msg-user-2",
       );
@@ -1279,7 +1467,9 @@ describe("AdventureService", () => {
             eventType: "choice_matched",
             turnId: "turn-1",
             messageId: "msg-user-2",
-            payload: { index: 1, source: "deterministic" },
+            segmentOrder: 2,
+            episodeVersionId: null,
+            payload: { index: 1, source: "deterministic", key: "river" },
           }),
         }),
       );
@@ -1293,7 +1483,13 @@ describe("AdventureService", () => {
           texts: ["走，我们去河边！"],
           action: "await_reply",
           result: "answered",
-          matchedChoice: { index: 0, source: "llm" },
+          matchedChoice: {
+            index: 0,
+            source: "llm",
+            key: "forest",
+            segmentOrder: 2,
+            episodeVersionId: "ver-pinned-1",
+          },
         },
         "msg-user-3",
       );
@@ -1303,7 +1499,9 @@ describe("AdventureService", () => {
           where: { eventKey: "turn:turn-1:choice_matched" },
           create: expect.objectContaining({
             eventType: "choice_matched",
-            payload: { index: 0, source: "llm" },
+            segmentOrder: 2,
+            episodeVersionId: "ver-pinned-1",
+            payload: { index: 0, source: "llm", key: "forest" },
           }),
         }),
       );
@@ -1328,7 +1526,13 @@ describe("AdventureService", () => {
         texts: ["回答"],
         action: "await_reply",
         result: "answered",
-        matchedChoice: { index: 0, source: "deterministic" },
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
       });
 
       expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
@@ -1355,7 +1559,13 @@ describe("AdventureService", () => {
             texts: ["回答"],
             action: "await_reply",
             result: "answered",
-            matchedChoice: { index: 0, source: "deterministic" },
+            matchedChoice: {
+              index: 0,
+              source: "deterministic",
+              key: "forest",
+              segmentOrder: 2,
+              episodeVersionId: null,
+            },
           },
           "msg-user-2",
         ),
@@ -1419,7 +1629,10 @@ describe("AdventureService", () => {
 
     expect(timeoutListener).toHaveBeenCalledWith(
       "dev-uuid-1",
-      expect.objectContaining({ result: "timeout" }),
+      expect.objectContaining({
+        result: "timeout",
+        interaction: { type: "two_choice", order: 2 },
+      }),
     );
     service.onModuleDestroy();
     jest.useRealTimers();
@@ -1502,6 +1715,28 @@ describe("AdventureService", () => {
       expect(reply.texts).toEqual([segments[3].text, segments[4].text]);
       expect(reply.action).toBe("await_reply");
       expect(reply.texts).not.toContain(v2Segments[0].text);
+    });
+
+    it("attributes the matched choice to the pinned version id", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(v2Segments);
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply.matchedChoice).toEqual({
+        index: 0,
+        source: "deterministic",
+        key: "forest",
+        segmentOrder: 2,
+        episodeVersionId: "v1",
+      });
     });
 
     it("does not prematurely complete a pinned episode whose live table shrank", async () => {

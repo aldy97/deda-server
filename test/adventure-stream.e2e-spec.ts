@@ -479,12 +479,16 @@ describe("Adventure streaming pipeline (e2e)", () => {
     expect(choiceEvents[0].payload).toEqual({
       index: 0,
       source: "deterministic",
+      key: "forest",
     });
     expect(Object.keys(choiceEvents[0].payload).sort()).toEqual([
       "index",
+      "key",
       "source",
     ]);
     expect(JSON.stringify(choiceEvents[0].payload)).not.toContain("森林");
+    expect(choiceEvents[0].segmentOrder).toBe(1);
+    expect(choiceEvents[0].episodeVersionId).toBeNull();
     const forestUserRow = messages.find(
       (row) => row.role === "user" && row.content === "森林",
     );
