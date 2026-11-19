@@ -65,6 +65,16 @@ services:
       # 机芯厂设备侧接口（client-api）：设备上线共享密钥与认领窗口
       DEVICE_LOGIN_MAC_KEY: ${DEVICE_LOGIN_MAC_KEY:-}
       PROVISION_CLAIM_WINDOW_SEC: ${PROVISION_CLAIM_WINDOW_SEC:-120}
+      # 百度智能体与设备端 TTS：v1.4 getvalue 的取值来源（见 docs/voice-switching.md §2.4/§2.5）。
+      # 这两个 JSON 映射刻意用空默认值：空串走的就是代码里的「未配置」分支，与不转发时
+      # 逐位相同（CHARACTER_TIMBRE_JSON 空 → getvalue 一律 500，fail-closed 不给兜底音色；
+      # SPEECH_RATE_MAP_JSON 空 → spd 回落基础语速 1.0）。
+      BAIDU_AGENT_ENABLED: ${BAIDU_AGENT_ENABLED:-false}
+      BAIDU_AGENT_TIMEOUT_MS: ${BAIDU_AGENT_TIMEOUT_MS:-5000}
+      VOICE_CATALOG_JSON: ${VOICE_CATALOG_JSON:-[]}
+      SPEECH_RATE_MAP_JSON: ${SPEECH_RATE_MAP_JSON:-}
+      TTS_DEFAULT_VOL: ${TTS_DEFAULT_VOL:-1.0}
+      CHARACTER_TIMBRE_JSON: ${CHARACTER_TIMBRE_JSON:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.deepseek.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
