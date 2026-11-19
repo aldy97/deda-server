@@ -373,6 +373,73 @@ describe("AdventureService", () => {
     expect(reply.texts).toContain(segments[3].text); // 兜底后推进主线
   });
 
+  it("should not match a negated two-choice option (negation guard)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply(
+      "dev-uuid-1",
+      "不要走河边，走陆地",
+    );
+
+    // 否定守卫触发 → 不命中 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
+  });
+
+  it("should not match when the child mentions both two-choice options (ambiguous)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply(
+      "dev-uuid-1",
+      "我想去森林也想去河边",
+    );
+
+    // 双命中 → 歧义 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
+  });
+
+  it("should not match on key alone (key excluded from recognition)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    // "forest" is the key, not the text "森林" — should NOT match
+    const reply = await service.handleChildReply("dev-uuid-1", "forest");
+
+    // 零命中 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
+  });
+
   it("should call the small model for an open question answer", async () => {
     prisma.adventureProgress.findFirst.mockResolvedValue({
       ...baseProgress,
