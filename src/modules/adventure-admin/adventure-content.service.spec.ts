@@ -595,12 +595,12 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      query.checkContent.mockResolvedValue(errorReport("CHOICES_REQUIRED"));
+      query.checkContent.mockResolvedValue(errorReport("CHOICES_COUNT_INVALID"));
       await expect(
         service.saveDraft("ep1", content, actor, {
-          reason: "二选一的选项还没填完",
+          reason: "二选一必须是恰好2个选项，多了少了都不行",
         }),
-      ).resolves.toBeDefined();
+      ).rejects.toBeInstanceOf(BadRequestException);
 
       // 禁用词是内容级：即使报告里它仍是 error 严重度，草稿闸口也按 code 放行。
       // 这条断言守的是「阻断按 code 判，不按 severity 判」这个口径本身。
@@ -746,6 +746,21 @@ describe("AdventureContentService", () => {
         expect.anything(),
         expect.objectContaining({ forPublish: true }),
       );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("blocks publish when choices count is not exactly 2 even though the draft saved fine earlier", async () => {
+      query.checkContent.mockResolvedValue(
+        errorReport("CHOICES_COUNT_INVALID"),
+      );
+
+      await expect(
+        service.publish("ep1", actor, {
+          reason: "选项数不是2个，发布必须拦住",
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(tx.adventureSegment.deleteMany).not.toHaveBeenCalled();
     });
