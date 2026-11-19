@@ -140,6 +140,18 @@ GET /analytics/content/parent-report?startDate=&endDate=
 GET /analytics/quality/conversation?startDate=&endDate=&granularity=day
 → { granularity, series: [{ date, totalTurns, failedTurns, failureRate, safetyBlockedTurns, safetyRate }] }
    // totalTurns=role=user 消息数；failedTurns=assistant status=failed；安全拦截=rawPayload 含 safetyCategory
+
+GET /analytics/content/adventure-choices?startDate=&endDate=
+→ { totalInteractions, outcomeCounts: { answered, off_topic, fallback, timeout },
+    fallbackRate, matchedTotal, sourceCounts: { deterministic, llm }, llmShare,
+    byEpisode: [{ episodeId, title, matchedTotal, fallbackRate,
+                  choices: [{ segmentOrder, index, key, text, hits }] }] }
+   // 二选一交互的命中统计；eventType=choice_matched/answered/fallback/timeout/off_topic 参与聚合
+   // totalInteractions = answered + fallback + timeout（仅 two_choice 交互），不含 off_topic
+   // llmShare = llm/matchedTotal；分母 0 → null
+   // fallbackRate = fallback/totalInteractions，分母 0 → null
+   // byEpisode 按 matchedTotal 降序、title 拼音升序；choices 在每集内
+   // text 从事件自己的 episodeVersionId 查版本 payload
 ```
 
 ## 反馈与日报（用户详情页）
@@ -688,6 +700,22 @@ GET /analytics/adventure-admin/episodes/:episodeId/impact
     devicesStaleCrossDay,      // 跨天陈旧的在播设备：retire 会收走，下次开机换一集
     devicesPinnedToOlderVersions,  // 仍锁在旧快照上的在播设备：说明历史发布确实造成了并行版本
     totalDevicesEverStarted, publishedVersionCount }
+
+GET /analytics/adventure-admin/episodes/:episodeId/choice-stats?startDate=&endDate=
+→ { episodeId, title, contentNote, totalInteractions, matchedTotal,
+    segments: [{
+      segmentOrder, promptText, matchedTotal, fallbackTotal, fallbackRate, neverChosen,
+      choices: [{ index, key, text, hits, deterministicHits, llmHits, share }]
+    }] }
+   // 单集二选一统计：命中分布与 fallback 率，按当前发布版本 payload.segments 对齐
+   // segments 仅含 kind=interaction 且 interactionType=two_choice 的段，narration 段排除
+   // 当前版本 payload 查不到或无版本时返回 segments: []
+   // null segmentOrder 的事件追加为最后一段（segmentOrder: null, promptText: null）
+   // neverChosen: segment 的 matchedTotal=0 → true
+   // fallbackRate = fallbackTotal / (matchedTotal + fallbackTotal)，分母 0 → null
+   // share = hits / segment.matchedTotal，分母 0 → null
+   // totalInteractions = answered + fallback + timeout（仅 two_choice 交互），不含 off_topic/exit
+   // PII 红线：响应不含 asrText / messageId / deviceId
 
 GET /analytics/adventure-admin/audit?episodeId=&actorUsername=&action=&from=&to=&page=&pageSize=
 → { items: [{ id, action, entityType, episodeId, episodeVersionId, businessKey,
