@@ -512,7 +512,7 @@ describe("AdventureAdminController", () => {
       expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
         ...IDENTITY,
         forPublish: true,
-      });
+      }, true);
     });
 
     it("lint targets an existing episode and leaves identity undefined when not editing it", async () => {
@@ -520,7 +520,7 @@ describe("AdventureAdminController", () => {
 
       await controller.lint({ episodeId: " ep1 ", content: DRAFT } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith("ep1", DRAFT, undefined);
+      expect(query.checkContent).toHaveBeenCalledWith("ep1", DRAFT, undefined, undefined);
     });
 
     it("lint defaults season so a hand-written bundle is not rejected for omitting it", async () => {
@@ -535,7 +535,51 @@ describe("AdventureAdminController", () => {
         characterKey: "elly",
         season: 1,
         episodeNumber: 3,
-      });
+      }, undefined);
+    });
+
+    it("lint passes forPublish through to checkContent even without identity", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({
+        content: DRAFT,
+        forPublish: true,
+      } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        undefined,
+        true,
+      );
+    });
+
+    it("lint passes forPublish as undefined when the caller omits it", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({ content: DRAFT } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        undefined,
+        undefined,
+      );
+    });
+
+    it("lint gives checkContent both layers of forPublish when identity is present", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({
+        content: DRAFT,
+        identity: IDENTITY,
+        forPublish: true,
+      } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
+        ...IDENTITY,
+        forPublish: true,
+      }, true);
     });
 
     it("simulate passes identity + content only", async () => {
