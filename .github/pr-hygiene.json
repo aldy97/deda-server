@@ -1,0 +1,7 @@
+{
+  "$comment": "base → 用哪个 PR 模板。default 必填；byBase 可整个省略（deda-wechat-app 只有 main 一条线，就只写 default）。必需段清单由所选模板派生：改模板即改闸口，不用动 .github/scripts/pr-hygiene.mjs。三仓的脚本必须逐字节相同，可用 shasum 比对。",
+  "default": "feature-to-staging.md",
+  "byBase": {
+    "main": "release-to-main.md"
+  }
+}
