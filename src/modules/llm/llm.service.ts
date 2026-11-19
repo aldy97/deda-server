@@ -639,6 +639,38 @@ export class LlmService {
   }
 
   /**
+   * 构建冒险故事二选一 LLM 判定 prompt：一次调用同时承担判定与引回。
+   * 输出契约严格枚举——首行仅为 0 / 1 / NONE，首行为 NONE 时第二行起给出口语化
+   * 引回话术，由 adventure-match 的 parseChoiceVerdict 解析。
+   * 判出选项时上层只播作者预写的 choices[i].reply，模型自由文本一律丢弃。
+   */
+  buildAdventureChoiceMatchPrompt(params: {
+    characterPersona: string;
+    segmentText: string;
+    choiceA: string;
+    choiceB: string;
+    childReply: string;
+  }): LlmMessage[] {
+    const systemPrompt = this.promptRegistry.render(
+      "adventure_choice_match_system",
+      {
+        characterPersona: params.characterPersona,
+        segmentText: params.segmentText,
+        choiceA: params.choiceA,
+        choiceB: params.choiceB,
+      },
+    );
+
+    return [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: `A. ${params.choiceA}\nB. ${params.choiceB}\n\n${params.childReply}`,
+      },
+    ];
+  }
+
+  /**
    * 从落库 assistant 行解析大模型 answer（边界标注方案 3）
    * rawPayload.answer 为唯一权威来源；无边界信息的旧行返回 null，
    * 由调用方决定跳过（旧行不进大模型历史上下文）。

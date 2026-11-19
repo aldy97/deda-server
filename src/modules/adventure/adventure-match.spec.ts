@@ -193,13 +193,13 @@ describe("parseChoiceVerdict", () => {
   it("returns null index when parsed digit exceeds choiceCount", () => {
     const result = parseChoiceVerdict("2", 2);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("2");
+    expect(result.redirectText).toBe("");
   });
 
   it("returns null index when parsed 3 for 2 choices", () => {
     const result = parseChoiceVerdict("3", 2);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("3");
+    expect(result.redirectText).toBe("");
   });
 
   // ── 无效输入 ──
@@ -219,19 +219,19 @@ describe("parseChoiceVerdict", () => {
   it("returns null for non-numeric garbage first line", () => {
     const result = parseChoiceVerdict("我不知道", 2);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("我不知道");
+    expect(result.redirectText).toBe("");
   });
 
   it("returns null for multi-line content with garbage first line", () => {
     const result = parseChoiceVerdict("随便\n说点什么", 2);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("随便\n说点什么");
+    expect(result.redirectText).toBe("");
   });
 
   it("returns null for '0' when choiceCount is 0", () => {
     const result = parseChoiceVerdict("0", 0);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("0");
+    expect(result.redirectText).toBe("");
   });
 
   // ── 非字符串输入 ──
@@ -259,7 +259,7 @@ describe("parseChoiceVerdict", () => {
   it("treats leading empty lines as garbage and returns null", () => {
     const result = parseChoiceVerdict("\n\n0", 2);
     expect(result.index).toBeNull();
-    expect(result.redirectText).toBe("\n\n0");
+    expect(result.redirectText).toBe("");
   });
 
   it("handles trailing newlines after a valid verdict gracefully", () => {

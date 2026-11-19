@@ -13,7 +13,7 @@ describe("AdventureService", () => {
   let service: AdventureService;
   let prisma: any;
   let llm: any;
-  let configService: any;
+  let configService: { get: jest.Mock };
 
   const episode = {
     id: "ep1",
@@ -389,7 +389,7 @@ describe("AdventureService", () => {
   describe("LLM choice matching", () => {
     beforeEach(() => {
       // Enable LLM choice matching for these tests
-      (configService.get as jest.Mock).mockImplementation((key: string) => {
+      configService.get.mockImplementation((key: string) => {
         if (key === "ADVENTURE_CHOICE_LLM_ENABLED") return "true";
         return undefined;
       });
@@ -416,6 +416,14 @@ describe("AdventureService", () => {
       expect(reply.texts).toContain(segments[3].text); // 汇流续播
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 3500,
+          maxTokens: 160,
+          scene: "adventure_interaction",
+          model: "small-llm",
+        }),
+      );
     });
 
     it("matches option B via LLM verdict when the child's phrase is vague", async () => {
@@ -438,6 +446,14 @@ describe("AdventureService", () => {
       expect(reply.texts[0]).toBe("走，我们去河边！");
       expect(reply.result).toBe("answered");
       expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 3500,
+          maxTokens: 160,
+          scene: "adventure_interaction",
+          model: "small-llm",
+        }),
+      );
     });
 
     it("awards a star when the LLM-matched option has rewardStar", async () => {
@@ -519,10 +535,7 @@ describe("AdventureService", () => {
         text: "哎呀这个问题有点难",
       });
 
-      const reply = await service.handleChildReply(
-        "dev-uuid-1",
-        "随便吧",
-      );
+      const reply = await service.handleChildReply("dev-uuid-1", "随便吧");
 
       // garbage → parseChoiceVerdict returns null → 走跑题
       expect(reply.result).toBe("off_topic");
@@ -538,10 +551,7 @@ describe("AdventureService", () => {
 
       llm.complete.mockRejectedValueOnce(new Error("timeout"));
 
-      const reply = await service.handleChildReply(
-        "dev-uuid-1",
-        "去森林吧",
-      );
+      const reply = await service.handleChildReply("dev-uuid-1", "想不出来");
 
       // LLM 失败 → 降级到首次跑题路径
       expect(reply.result).toBe("off_topic");

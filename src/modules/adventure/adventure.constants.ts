@@ -116,3 +116,19 @@ export interface EngineFailureRecord {
 
 /** 引擎失败上报的内存环形缓冲长度。 */
 export const ADVENTURE_ENGINE_FAILURE_LIMIT = 50;
+
+/**
+ * 二选一 LLM 兜底判定开关默认值。
+ *
+ * 默认关：播放内容来自物化副本或孩子被锁定的版本快照，所以改内容只对新发布版本生效，
+ * 但改匹配算法对正在玩的孩子立刻生效、没有版本快照保护 —— 这个开关是唯一能不发版就
+ * 止血的机制。灰度验证通过后再由运维打开。
+ */
+export const ADVENTURE_CHOICE_LLM_DEFAULTS = {
+  enabled: false,
+} as const;
+
+/** 二选一 LLM 兜底判定开关 → 环境变量名。值一律按字符串读，非字面 true 视为关。 */
+export const ADVENTURE_CHOICE_LLM_ENV = {
+  enabled: "ADVENTURE_CHOICE_LLM_ENABLED",
+} as const;
