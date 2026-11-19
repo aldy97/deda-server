@@ -502,6 +502,26 @@ describe("ConversationSessionService", () => {
       expect(llmService.complete).not.toHaveBeenCalled();
     });
 
+    // 词表与冒险引擎共用 ADVENTURE_EXIT_KEYWORDS：这里锁「引擎侧原有的拒绝词
+    // 会话层也认」（旧正则缺「不想玩」，孩子说这句会掉进模型分类）。
+    // 反方向由 adventure.service.spec.ts 的 shared keyword 用例锁住。
+    it.each(["我不想玩了", "不要玩了", "不想玩"])(
+      "explicit_exit：与冒险引擎共用退出词表（%s）",
+      async (word) => {
+        prisma.conversationSession.findUnique.mockResolvedValue(
+          activeSession("english_story"),
+        );
+
+        const decision = await service.resolveWithSource("device-1", word);
+
+        expect(decision).toEqual({
+          intent: "free_chat",
+          source: "explicit_exit",
+        });
+        expect(llmService.complete).not.toHaveBeenCalled();
+      },
+    );
+
     it("过期会话不参与粘滞：按模型重新判定", async () => {
       prisma.conversationSession.findUnique.mockResolvedValue(
         activeSession("english_story", new Date("2026-10-31T04:00:00.000Z")),

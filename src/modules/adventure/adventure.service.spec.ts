@@ -1,6 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { AdventureService } from "./adventure.service";
+import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 
@@ -734,13 +735,103 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我不要听了");
 
     expect(reply.action).toBe("exit");
-    expect(reply.texts).toEqual([segments[2].exitText]);
+    expect(reply.result).toBe("exit");
+    // 段落 fixture 仍带历史 exitText（旧版本快照就是这个形状），引擎必须无视它
+    expect(reply.texts).toEqual([ADVENTURE_EXIT_TEXT]);
+    expect(reply.texts).not.toEqual([segments[2].exitText]);
     // 进度保留（不 completed、不推进），仅明确请求时续玩
     expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "exited" }),
       }),
     );
+  });
+
+  it("should exit with the global line when the child barges in during narration", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "in_progress",
+      nextSegmentOrder: 1,
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "我不想玩了");
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
+    // 旁白阶段退出同样保留当日续玩权：exited 而不是 completed/abandoned
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "exited", waitingSince: null }),
+      }),
+    );
+  });
+
+  it("should repeat the global exit line without resuming when already exited", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "exited",
+      nextSegmentOrder: 3,
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "退出");
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
+    // 幂等：不写库、不 resume（否则孩子喊「不想玩」反而把故事又开起来）
+    expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+  });
+
+  it("should not take over terminal progress on a refusal", async () => {
+    prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "completed",
+      nextSegmentOrder: 6,
+      completedAt: new Date(),
+    });
+
+    expect(await service.handleChildReply("dev-uuid-1", "不想玩了")).toBeNull();
+    expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+  });
+
+  it("should not take over when there is no adventure today", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue(null);
+
+    expect(await service.handleChildReply("dev-uuid-1", "不想玩了")).toBeNull();
+  });
+
+  // 词表与会话层 isExplicitExit 共用一份常量：这里锁「会话层的词引擎也认」，
+  // conversation-session.service.spec.ts 锁反方向，两边任一漂移都会红。
+  it.each([
+    "退出",
+    "停止",
+    "结束吧",
+    "别讲了",
+    "STOP",
+    "quit",
+    "Exit",
+    "不要玩了",
+  ])("should exit on the shared keyword %s at an interaction", async (word) => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", word);
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
   });
 
   it("should resume the unanswered interaction after an explicit story request", async () => {
