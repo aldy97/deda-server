@@ -12,6 +12,7 @@ import {
   AdventureFailureReport,
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
+import { matchChoiceDeterministic } from "./adventure-match";
 import {
   AdventureDailyRecord,
   AdventureEpisode,
@@ -786,9 +787,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       choices?: InteractionChoice[];
     } | null;
     const choices = options?.choices || [];
-    const matched = choices.find(
-      (c) => asrText.includes(c.text) || asrText.includes(c.key),
-    );
+    const hitIndex = matchChoiceDeterministic(choices, asrText);
+    const matched = hitIndex !== null ? choices[hitIndex] : undefined;
 
     if (matched) {
       if (interaction.rewardStar) {
