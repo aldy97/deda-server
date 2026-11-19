@@ -479,10 +479,19 @@ function lintTwoChoice(
     return;
   }
 
-  if (choices.length !== 2) {
+  if (choices.length < 2) {
+    error(
+      "CHOICES_REQUIRED",
+      `第 ${order} 段是二选一交互点，必须恰好 2 个选项，目前只有 ${choices.length} 个。`,
+      at("options.choices"),
+    );
+    return;
+  }
+
+  if (choices.length > 2) {
     error(
       "CHOICES_COUNT_INVALID",
-      `第 ${order} 段是二选一交互点，必须恰好 2 个选项，收到 ${choices.length} 个。`,
+      `第 ${order} 段二选一交互点有 ${choices.length} 个选项，但引擎只在两个选项里判定——多出来的选项孩子永远选不到，是静默失效的死分支。`,
       at("options.choices"),
     );
     return;
