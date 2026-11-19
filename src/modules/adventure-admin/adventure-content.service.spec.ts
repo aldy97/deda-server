@@ -595,14 +595,25 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      // CHOICES_COUNT_INVALID 只对选项过多(>2)产出，那是「写坏了」——多出的选项
+      // 是静默失效的死分支，草稿也拦。
       query.checkContent.mockResolvedValue(
         errorReport("CHOICES_COUNT_INVALID"),
       );
       await expect(
         service.saveDraft("ep1", content, actor, {
-          reason: "二选一必须是恰好2个选项，多了少了都不行",
+          reason: "3个选项太多了，多出来的孩子永远选不到",
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
+
+      // CHOICES_REQUIRED（选项不足 0 或 1 个）属于「写到一半」，
+      // 刻意未进 DRAFT_BLOCKING_CODES，草稿应能存下来。
+      query.checkContent.mockResolvedValue(errorReport("CHOICES_REQUIRED"));
+      await expect(
+        service.saveDraft("ep1", content, actor, {
+          reason: "只有一个选项，还没写完，让我存一下",
+        }),
+      ).resolves.toBeDefined();
 
       // 禁用词是内容级：即使报告里它仍是 error 严重度，草稿闸口也按 code 放行。
       // 这条断言守的是「阻断按 code 判，不按 severity 判」这个口径本身。

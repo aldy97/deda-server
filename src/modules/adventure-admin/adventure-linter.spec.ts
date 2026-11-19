@@ -302,53 +302,54 @@ describe("adventure-linter", () => {
       );
     });
 
-    it("rejects when choices count is not exactly 2", () => {
-      // 0 选项
-      expect(
-        codes(lintEpisode(identity, withChoices({ choices: [] })).errors),
-      ).toContain("CHOICES_COUNT_INVALID");
-      // 1 选项
-      expect(
-        codes(
-          lintEpisode(
-            identity,
-            withChoices({
-              choices: [{ key: "forest", text: "森林", reply: "好" }],
-            }),
-          ).errors,
-        ),
-      ).toContain("CHOICES_COUNT_INVALID");
-      // 3 选项
-      expect(
-        codes(
-          lintEpisode(
-            identity,
-            withChoices({
-              choices: [
-                { key: "forest", text: "森林", reply: "好" },
-                { key: "river", text: "河边", reply: "走" },
-                { key: "mountain", text: "山上", reply: "爬" },
-              ],
-            }),
-          ).errors,
-        ),
-      ).toContain("CHOICES_COUNT_INVALID");
+    it("rejects 0 or 1 choices with CHOICES_REQUIRED and not CHOICES_COUNT_INVALID", () => {
+      // 0 选项 → 写到一半，不是写坏了
+      const r0 = lintEpisode(identity, withChoices({ choices: [] }));
+      expect(codes(r0.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r0.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r0.ok).toBe(false);
+
+      // 1 选项 → 也是写到一半
+      const r1 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [{ key: "forest", text: "森林", reply: "好" }],
+        }),
+      );
+      expect(codes(r1.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r1.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r1.ok).toBe(false);
+    });
+
+    it("rejects 3 or 4 choices with CHOICES_COUNT_INVALID", () => {
+      // 3 选项 → 写坏了：多出的选项是静默失效的死分支
+      const r3 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "river", text: "河边", reply: "走" },
+            { key: "mountain", text: "山上", reply: "爬" },
+          ],
+        }),
+      );
+      expect(codes(r3.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r3.ok).toBe(false);
+
       // 4 选项
-      expect(
-        codes(
-          lintEpisode(
-            identity,
-            withChoices({
-              choices: [
-                { key: "a", text: "一", reply: "1" },
-                { key: "b", text: "二", reply: "2" },
-                { key: "c", text: "三", reply: "3" },
-                { key: "d", text: "四", reply: "4" },
-              ],
-            }),
-          ).errors,
-        ),
-      ).toContain("CHOICES_COUNT_INVALID");
+      const r4 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "a", text: "一", reply: "1" },
+            { key: "b", text: "二", reply: "2" },
+            { key: "c", text: "三", reply: "3" },
+            { key: "d", text: "四", reply: "4" },
+          ],
+        }),
+      );
+      expect(codes(r4.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r4.ok).toBe(false);
     });
 
     it("accepts exactly 2 valid choices", () => {
