@@ -59,6 +59,27 @@ jobs:
       # 唯一的确定性口径；串行时各套件 afterAll 自清，互不可见。
       - run: npm run test:e2e -- --runInBand
 
+  # PR 正文结构闸口（L2）：只查段落骨架齐不齐、填没填，不查措辞，不做 checkbox 正则。
+  # 不设 needs，与 ci 并行；也不进分支保护 required checks——强制力来自协作铁律
+  # 「CI 全绿才允许 merge」，避免单人仓库把自己锁死（L4 的经典事故）。
+  # 正文经 env 传入而非内插进 run，避免注入与多行炸裂；脚本零依赖，本 job 不需要装依赖。
+  # 脚本自身 fail-open：body 取不到或解析异常一律放过，只拦「明确缺段/明确空段」。
+  pr-hygiene:
+    name: PR 正文规范
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_BASE: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: node .github/scripts/pr-hygiene.mjs
+
   # 部署必须在 ci 全绿后才执行；PR 事件、以及 push 到非目标分支时，这两个 job 直接跳过。
   # deploy-staging.yml / deploy-prod.yml 自身都不带 push 触发，所以「push 就部署」
   # 只有经由下面两个 job 才走得通。
