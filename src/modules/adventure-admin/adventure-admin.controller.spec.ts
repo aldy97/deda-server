@@ -131,6 +131,12 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     readOnlyExempt: false,
   },
   {
+    handler: "choiceStats",
+    method: RequestMethod.GET,
+    path: "episodes/:episodeId/choice-stats",
+    readOnlyExempt: false,
+  },
+  {
     handler: "lint",
     method: RequestMethod.POST,
     path: "lint",

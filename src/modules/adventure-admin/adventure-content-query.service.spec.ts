@@ -36,6 +36,7 @@ describe("AdventureContentQueryService", () => {
     adventureProgress: { count: jest.Mock; findMany: jest.Mock };
     adventureDailyRecord: { count: jest.Mock; findMany: jest.Mock };
     adventureSegment: { findMany: jest.Mock };
+    adventureEvent: { findMany: jest.Mock };
   };
 
   const ellyEpisode = {
@@ -89,6 +90,7 @@ describe("AdventureContentQueryService", () => {
         findMany: jest.fn().mockResolvedValue([]),
       },
       adventureSegment: { findMany: jest.fn().mockResolvedValue([]) },
+      adventureEvent: { findMany: jest.fn().mockResolvedValue([]) },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -789,6 +791,432 @@ describe("AdventureContentQueryService", () => {
       expect(caps.lintThresholds.maxTitleChars).toBe(
         DEFAULT_LINT_THRESHOLDS.maxTitleChars,
       );
+    });
+  });
+
+  describe("choiceStats", () => {
+    const episode = {
+      id: "ep1",
+      characterKey: "elly",
+      title: "第三集",
+      currentVersionId: "v1",
+    };
+
+    const versionPayload = {
+      title: "第三集",
+      recap: "回顾",
+      segments: [
+        { order: 0, kind: "narration", text: "开场" },
+        {
+          order: 1,
+          kind: "interaction",
+          text: "选一个",
+          interactionType: "two_choice",
+          options: {
+            choices: [
+              { key: "a", text: "红色", reply: "红" },
+              { key: "b", text: "蓝色", reply: "蓝" },
+            ],
+          },
+        },
+        {
+          order: 2,
+          kind: "interaction",
+          text: "再选一个",
+          interactionType: "two_choice",
+          options: {
+            choices: [{ key: "c", text: "大的", reply: "大" }],
+          },
+        },
+      ],
+    };
+
+    const versionRow = {
+      id: "v1",
+      episodeId: "ep1",
+      payload: versionPayload,
+    };
+
+    beforeEach(() => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(versionRow);
+    });
+
+    // ---- Contract shape ----
+
+    it("零数据 / 无事件 → segments 仅 two_choice 段且全零填充", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.episodeId).toBe("ep1");
+      expect(result.title).toBe("第三集");
+      expect(result.contentNote).toBe("adventure-choice-stats");
+      expect(result.totalInteractions).toBe(0);
+      expect(result.matchedTotal).toBe(0);
+      // 只有 two_choice 段（narration excluded）
+      expect(result.segments).toHaveLength(2);
+      expect(result.segments[0]).toMatchObject({
+        segmentOrder: 1,
+        promptText: "选一个",
+        matchedTotal: 0,
+        fallbackTotal: 0,
+        fallbackRate: null,
+        neverChosen: true,
+        choices: [
+          {
+            index: 0,
+            key: "a",
+            text: "红色",
+            hits: 0,
+            deterministicHits: 0,
+            llmHits: 0,
+            share: null,
+          },
+          {
+            index: 1,
+            key: "b",
+            text: "蓝色",
+            hits: 0,
+            deterministicHits: 0,
+            llmHits: 0,
+            share: null,
+          },
+        ],
+      });
+      expect(result.segments[1]).toMatchObject({
+        segmentOrder: 2,
+        promptText: "再选一个",
+        matchedTotal: 0,
+        fallbackTotal: 0,
+        fallbackRate: null,
+        neverChosen: true,
+      });
+    });
+
+    it("无发布版本（currentVersionId null）→ segments: [] 但 totals 反映真实事件", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue({
+        id: "ep1",
+        title: "第三集",
+        currentVersionId: null,
+      });
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "answered",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.segments).toEqual([]);
+      // 即使没有版本 payload，事件 stats 仍然存在
+      expect(result.matchedTotal).toBe(1);
+      expect(result.totalInteractions).toBe(1);
+    });
+
+    it("episodeId 不存在 → NotFoundException", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(null);
+
+      await expect(service.choiceStats("nope", {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it("段级 neverChosen：段 matchedTotal=0 → true，否则 false", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // 段 1 有命中 → neverChosen=false
+      expect(result.segments[0].neverChosen).toBe(false);
+      expect(result.segments[0].matchedTotal).toBe(1);
+      // 段 2 无命中 → neverChosen=true
+      expect(result.segments[1].neverChosen).toBe(true);
+      expect(result.segments[1].matchedTotal).toBe(0);
+    });
+
+    it("fallbackRate = fallbackTotal / (matchedTotal + fallbackTotal)，4 位小数", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "llm", key: "a" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // matchedTotal=2, fallbackTotal=2 → fallbackRate=2/4=0.5
+      expect(result.segments[0].matchedTotal).toBe(2);
+      expect(result.segments[0].fallbackTotal).toBe(2);
+      expect(result.segments[0].fallbackRate).toBe(0.5);
+    });
+
+    it("fallbackRate 分母 0 → null", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.segments[0].fallbackRate).toBeNull();
+    });
+
+    it("timeout 不计入 fallbackRate 分母", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "timeout",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // matchedTotal=1, fallbackTotal=1 → fallbackRate=1/2=0.5（timeout 不在分母）
+      // timeout 计入 totalInteractions 但不计入 fallbackRate 分母
+      expect(result.segments[0].fallbackRate).toBe(0.5);
+      expect(result.totalInteractions).toBe(2); // fallback=1 + timeout=1
+    });
+
+    it("narration 段不在 segments 中", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // versionPayload 有 3 个 segments（narration + 2 two_choice），
+      // 但 segments 只有 2 个 two_choice 段
+      expect(result.segments).toHaveLength(2);
+      expect(result.segments[0].segmentOrder).toBe(1);
+      expect(result.segments[1].segmentOrder).toBe(2);
+    });
+
+    it("choices 含 deterministicHits / llmHits / share（share 分母 = 段 matchedTotal）", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "llm", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 1, source: "llm", key: "b" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      const seg = result.segments[0];
+      // 段 matchedTotal = 4
+      expect(seg.matchedTotal).toBe(4);
+      // choice "a": hits=3 (2 det + 1 llm), share = 3/4 = 0.75
+      expect(seg.choices[0]).toMatchObject({
+        index: 0,
+        key: "a",
+        hits: 3,
+        deterministicHits: 2,
+        llmHits: 1,
+        share: 0.75,
+      });
+      // choice "b": hits=1 (0 det + 1 llm), share = 1/4 = 0.25
+      expect(seg.choices[1]).toMatchObject({
+        index: 1,
+        key: "b",
+        hits: 1,
+        deterministicHits: 0,
+        llmHits: 1,
+        share: 0.25,
+      });
+    });
+
+    it("share 为 4 位小数，段 matchedTotal=0 → null", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.segments[0].choices[0].share).toBeNull();
+    });
+
+    it("null segmentOrder → segments 最后一个元素，promptText: null", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: null,
+          payload: { index: 0, source: "deterministic", key: "x" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: null,
+          payload: { index: 0, source: "llm", key: "x" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: null,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // null 段在 segments 末尾
+      const nullSeg = result.segments[result.segments.length - 1];
+      expect(nullSeg.segmentOrder).toBeNull();
+      expect(nullSeg.promptText).toBeNull();
+      expect(nullSeg.matchedTotal).toBe(2);
+      expect(nullSeg.fallbackTotal).toBe(1);
+      expect(nullSeg.fallbackRate).toBe(0.3333);
+      expect(nullSeg.choices).toHaveLength(1);
+      expect(nullSeg.choices[0]).toMatchObject({ index: 0, key: "x", hits: 2 });
+    });
+
+    it("孤儿选项（事件有、payload 无的 index）追加到该段 choices 末尾", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 2, source: "llm", key: "extra" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      const seg = result.segments[0];
+      // payload 有 2 个 choices (a, b)，孤儿 extra 追加到末尾
+      expect(seg.choices).toHaveLength(3);
+      expect(seg.choices[0]).toMatchObject({ index: 0, key: "a", hits: 1 });
+      expect(seg.choices[1]).toMatchObject({ index: 1, key: "b", hits: 0 });
+      expect(seg.choices[2]).toMatchObject({
+        index: 2,
+        key: "extra",
+        hits: 1,
+        text: null,
+      });
+    });
+
+    it("跨段隔离：各段独立聚合", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 2,
+          payload: { index: 0, source: "llm", key: "c" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: 1,
+          payload: { interactionType: "two_choice" },
+        },
+        {
+          eventType: "fallback",
+          segmentOrder: 2,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      // 段 1
+      expect(result.segments[0].matchedTotal).toBe(2);
+      expect(result.segments[0].fallbackTotal).toBe(1);
+      // 段 2
+      expect(result.segments[1].matchedTotal).toBe(1);
+      expect(result.segments[1].fallbackTotal).toBe(1);
+      // top-level 汇总
+      expect(result.matchedTotal).toBe(3);
+      expect(result.totalInteractions).toBe(2); // fallback only (no answered/timeout)
+    });
+
+    it("日期区间过滤（reportDayRange gte/lt 语义）", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([]);
+
+      await service.choiceStats("ep1", {
+        startDate: "2026-11-01",
+        endDate: "2026-11-02",
+      });
+
+      // 验证传给 findMany 的 where.createdAt
+      const callArgs = prisma.adventureEvent.findMany.mock.calls[0][0];
+      expect(callArgs.where.createdAt).toBeDefined();
+      expect(callArgs.where.createdAt.gte).toBeInstanceOf(Date);
+      expect(callArgs.where.createdAt.lt).toBeInstanceOf(Date);
+    });
+
+    it("PII 红线：响应不含 asrText / messageId / deviceId", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 0, source: "deterministic", key: "a" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+      const json = JSON.stringify(result);
+
+      expect(json).not.toContain("asrText");
+      expect(json).not.toContain("messageId");
+      expect(json).not.toContain("deviceId");
     });
   });
 });
