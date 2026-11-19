@@ -48,6 +48,7 @@ import {
 } from "./guards/content-admin.guard";
 import {
   AuditListQueryDto,
+  ChoiceStatsQueryDto,
   CreateEpisodeDto,
   EpisodeIdentityDto,
   EpisodeListQueryDto,
@@ -351,6 +352,17 @@ export class AdventureAdminController {
   })
   async impact(@Param("episodeId") episodeId: string) {
     return this.query.retireImpact(episodeId);
+  }
+
+  @Get("episodes/:episodeId/choice-stats")
+  @ApiOperation({
+    summary: "单集二选一统计数据（命中分布/fallback率）",
+  })
+  async choiceStats(
+    @Param("episodeId") episodeId: string,
+    @Query() query: ChoiceStatsQueryDto,
+  ) {
+    return this.query.choiceStats(episodeId, query);
   }
 
   @Post("lint")

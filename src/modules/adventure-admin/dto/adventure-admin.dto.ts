@@ -11,6 +11,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -377,6 +378,20 @@ export class ImportPreviewDto {
   @IsDefined()
   @IsObject()
   bundle: Record<string, unknown>;
+}
+
+export class ChoiceStatsQueryDto {
+  @ApiPropertyOptional({ description: "起始日期 YYYY-MM-DD（含）" })
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  startDate?: string;
+
+  @ApiPropertyOptional({ description: "结束日期 YYYY-MM-DD（含）" })
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  endDate?: string;
 }
 
 export class ImportApplyDto {
