@@ -1142,7 +1142,9 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       );
     }
     if (interaction.interactionType === "repeat_after_me") {
-      // ASR 粗匹配即可，以鼓励为主，不苛求发音
+      // 跟读以鼓励为主、完全不判定：孩子说任何话——漏词、发音不准、甚至完全无关——
+      // 都算成功，一律播 praise 并推进主线。刻意不比对目标句：跟读的目标是让孩子
+      // 开口，不是考发音；判失败只会打击孩子，且跟读没有剧情约束要求它必须命中。
       const options = interaction.options as unknown as {
         praise?: string;
       } | null;
