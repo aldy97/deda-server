@@ -228,6 +228,37 @@ export class LlmAdapterService {
       return;
     }
 
+    // 样机试播触发词（仅测试环境）：「我想玩+完整标题」确定性开播指定集。
+    // 排在等待态接管之前——试播者想重开一集时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；标题不存在返回确定性 not-found 话术。
+    // 异常同样落回正常链路，绝不让这一轮静音。
+    if (device) {
+      try {
+        const testTriggerReply = await this.adventure.tryTestTrigger(
+          device.id,
+          asrText,
+        );
+        if (testTriggerReply) {
+          // 与等待态接管同一口径：本轮未做 L2 语义审查与意图分类，如实标记。
+          this.turnDecisions.record({
+            turnId,
+            deviceId: device.id,
+            safety: null,
+            safetySource: "not_evaluated",
+            intent: null,
+            intentSource: "adventure_takeover",
+            asrText,
+          });
+          yield* this.emitAdventureReply(device, testTriggerReply, asrText);
+          return;
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure test trigger failed, degrading to normal flow for device=${device.deviceId}: ${this.describeError(error)}`,
+        );
+      }
+    }
+
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。

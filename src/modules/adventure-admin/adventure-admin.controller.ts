@@ -39,6 +39,7 @@ import {
   ExportSelector,
   ImportOptions,
 } from "./adventure-transfer.service";
+import { AdventureDeviceTestService } from "./adventure-device-test.service";
 import { ADVENTURE_SEASON, EpisodeIdentity } from "./adventure-content.types";
 import { resolveContentAdminProfile } from "./content-admin-profile";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
@@ -50,6 +51,8 @@ import {
   AuditListQueryDto,
   ChoiceStatsQueryDto,
   CreateEpisodeDto,
+  DeviceTestArmDto,
+  DeviceTestMutationDto,
   EpisodeIdentityDto,
   EpisodeListQueryDto,
   ExportDto,
@@ -137,6 +140,7 @@ export class AdventureAdminController {
     private readonly audit: AdventureAuditService,
     private readonly configService: ConfigService,
     private readonly recovery: AdventureRecoveryService,
+    private readonly deviceTest: AdventureDeviceTestService,
   ) {}
 
   @Get("capabilities")
@@ -523,6 +527,72 @@ export class AdventureAdminController {
       null,
     );
     return { ok: true, audited };
+  }
+
+  /**
+   * 样机试播（仅测试环境）。人的闸 = ContentAdminGuard（scope + authoring），
+   * 环境的闸 = ADVENTURE_TEST_MODE_ENABLED（服务层 403，prod 永不可用）。
+   * 写操作与内容变更同规则：理由必须过 assertReason，动作全部留审计。
+   */
+  @Get("device-test/state")
+  @ApiOperation({
+    summary:
+      "样机试播：当前环境开关、TTL 与武装中的设备列表（prod 返回 enabled=false）",
+  })
+  async deviceTestState() {
+    return this.deviceTest.state();
+  }
+
+  @Get("device-test/sessions/:deviceId")
+  @ApiOperation({
+    summary: "样机试播：单台设备的武装会话与最近 20 条试播事件",
+  })
+  async deviceTestSessionDetail(@Param("deviceId") deviceId: string) {
+    return this.deviceTest.sessionDetail(deviceId);
+  }
+
+  @Post("device-test/sessions")
+  @ApiOperation({
+    summary:
+      "样机试播：武装设备到指定集（标题精确匹配，含当前草稿标题；写操作，留审计）",
+  })
+  async deviceTestArm(
+    @Body() dto: DeviceTestArmDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    const actor = this.actor(req);
+    return this.deviceTest.arm(
+      this.picked(dto, ["deviceId", "title", "reason"]) as {
+        deviceId: string;
+        title: string;
+        reason?: string;
+      },
+      actor,
+    );
+  }
+
+  @Post("device-test/sessions/:deviceId/restart")
+  @ApiOperation({
+    summary: "样机试播：同一集从第 0 段重开（runSeq+1；写操作，留审计）",
+  })
+  async deviceTestRestart(
+    @Param("deviceId") deviceId: string,
+    @Body() dto: DeviceTestMutationDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.deviceTest.restart(deviceId, this.actor(req), dto?.reason);
+  }
+
+  @Post("device-test/sessions/:deviceId/clear")
+  @ApiOperation({
+    summary: "样机试播：解除武装（写操作，留审计）",
+  })
+  async deviceTestClear(
+    @Param("deviceId") deviceId: string,
+    @Body() dto: DeviceTestMutationDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.deviceTest.clear(deviceId, this.actor(req), dto?.reason);
   }
 
   /**
