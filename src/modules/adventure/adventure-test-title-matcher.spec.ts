@@ -149,6 +149,39 @@ describe("matchTestTitle", () => {
     expect(result.ambiguous).toBe(false);
   });
 
+  it("matches a spoken substring of the title", () => {
+    const result = matchTestTitle("三个巨人", [elly(), polly()]);
+    expect(result.matched?.episodeId).toBe("ep1");
+    expect(result.matchedBy).toBe("contains");
+    expect(result.ambiguous).toBe(false);
+  });
+
+  it("matches a spoken substring even with a transliterated IP name", () => {
+    const result = matchTestTitle("艾丽与三个巨人", [elly(), polly()]);
+    expect(result.matched?.episodeId).toBe("ep1");
+  });
+
+  it("flags two titles containing the same substring as ambiguous", () => {
+    const a = elly({ episodeId: "ep1", title: "Elly与三个巨人" });
+    const b = polly({ episodeId: "ep2", title: "Polly与三个巨人" });
+    const result = matchTestTitle("三个巨人", [a, b]);
+    expect(result.ambiguous).toBe(true);
+    expect(result.candidates).toHaveLength(2);
+  });
+
+  it("prefers an exact title over a title that merely contains the spoken phrase", () => {
+    const exact = elly({ episodeId: "ep1", title: "三个巨人" });
+    const contains = polly({ episodeId: "ep2", title: "Polly与三个巨人" });
+    const result = matchTestTitle("三个巨人", [exact, contains]);
+    expect(result.matched?.episodeId).toBe("ep1");
+    expect(result.matchedBy).toBe("exact");
+  });
+
+  it("does not treat a one-char fragment as a substring match", () => {
+    const result = matchTestTitle("巨", [elly(), polly()]);
+    expect(result.matched).toBeNull();
+  });
+
   it("returns an empty candidate list with no input", () => {
     const result = matchTestTitle("", [elly(), polly()]);
     expect(result.matched).toBeNull();

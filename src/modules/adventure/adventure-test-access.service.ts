@@ -5,7 +5,7 @@ import {
   ADVENTURE_TEST_DEFAULTS,
   ADVENTURE_TEST_ENV,
   ADVENTURE_TEST_KEYS,
-  ADVENTURE_TEST_TRIGGER_PREFIX,
+  ADVENTURE_TEST_TRIGGER_PREFIXES,
 } from "./adventure.constants";
 
 /**
@@ -65,18 +65,21 @@ export class AdventureTestAccessService {
   }
 
   /**
-   * 语音触发判定：纯字符串匹配、不调模型。命中返回完整标题，未命中/未启用
-   * 返回 null。标题只做 trim，不做模糊匹配——说错就落 not-found 话术。
+   * 语音触发判定：纯字符串匹配、不调模型。命中返回标题/标题片段，未命中/未启用
+   * 返回 null。标题只做 trim，模糊/包含匹配由 adventure-test-title-matcher 负责。
    */
   matchTrigger(asrText: string | null | undefined): string | null {
     if (!this.isEnabled()) {
       return null;
     }
     const text = (asrText ?? "").trim();
-    if (!text.startsWith(ADVENTURE_TEST_TRIGGER_PREFIX)) {
+    const prefix = ADVENTURE_TEST_TRIGGER_PREFIXES.find((p) =>
+      text.startsWith(p),
+    );
+    if (!prefix) {
       return null;
     }
-    const title = text.slice(ADVENTURE_TEST_TRIGGER_PREFIX.length).trim();
+    const title = text.slice(prefix.length).trim();
     return title.length > 0 ? title : null;
   }
 

@@ -98,4 +98,16 @@ describe("Adventure device-test title resolution (e2e, real Prisma)", () => {
     expect(reply).not.toBeNull();
     expect(reply?.action).toBe("completed");
   });
+
+  it("resolves the episode when the spoken text is a substring of the title", async () => {
+    const reply = await adventure.startByTitle(deviceInternalId, "三个巨人");
+
+    expect(reply).not.toBeNull();
+    expect(reply?.action).toBe("completed");
+    expect(reply?.texts).toEqual([
+      "前情回顾：Elly 住在听风原野。",
+      "今天 Elly 要去找银色铃铛。",
+      "森林里住着三个巨人。",
+    ]);
+  });
 });

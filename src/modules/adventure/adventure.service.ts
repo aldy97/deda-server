@@ -173,7 +173,7 @@ type TestTitleResolveResult =
       kind: "found";
       episode: AdventureEpisode;
       episodeVersionId: string | null;
-      matchedBy: "exact" | "alias" | "fuzzy" | "episode_number";
+      matchedBy: "exact" | "alias" | "contains" | "fuzzy" | "episode_number";
     }
   | { kind: "ambiguous"; candidates: AdventureTestTitleCandidate[] }
   | { kind: "none"; normalizedTitle: string };
