@@ -192,3 +192,37 @@ export const ADVENTURE_CHOICE_LLM_DEFAULTS = {
 export const ADVENTURE_CHOICE_LLM_ENV = {
   enabled: "ADVENTURE_CHOICE_LLM_ENABLED",
 } as const;
+
+/**
+ * 样机试播（仅测试环境）默认值与环境变量名。
+ *
+ * 总开关刻意 fail-safe：只有部署显式写 ADVENTURE_TEST_MODE_ENABLED=true
+ * 才启用（staging compose 硬写，base/prod 刻意不转发，由
+ * compose-env-gate.spec.ts 钉死）。TTL 是代码常量而非环境变量：
+ * 少一个「代码读了但 compose 白名单没转发」的失效点。
+ */
+export const ADVENTURE_TEST_DEFAULTS = {
+  enabled: false,
+  sessionTtlMinutes: 120,
+} as const;
+
+export const ADVENTURE_TEST_ENV = {
+  enabled: "ADVENTURE_TEST_MODE_ENABLED",
+} as const;
+
+/** 语音触发前缀：ASR 文本以此开头，其后为完整集标题（草稿标题同样可命中）。 */
+export const ADVENTURE_TEST_TRIGGER_PREFIX = "我想玩";
+
+/** 触发词命中但标题未找到时的确定性话术：不走 LLM、不写库。 */
+export function adventureTestNotFoundText(title: string): string {
+  return `我没有找到叫「${title}」的冒险故事，请确认标题后，再完整说一遍「我想玩」加故事标题。`;
+}
+
+/** 测试轮事件 payload 的标记键：看板与后续统计可用它把试播轮次摘出来。 */
+export const ADVENTURE_TEST_EVENT_MARKER = "test";
+
+/** 试播会话在 Redis 中的键前缀与索引 zset 键（与 ADVENTURE_BREAKER_KEYS 同约定）。 */
+export const ADVENTURE_TEST_KEYS = {
+  sessionPrefix: "adventure:test:session:",
+  index: "adventure:test:index",
+} as const;

@@ -265,3 +265,37 @@ npx prisma validate --schema=src/prisma/schema.prisma
 - `test/vendor-stream.e2e-spec.ts`、`test/vendor.e2e-spec.ts`：仅对齐新 Prisma mock。
 
 所有改动保持未提交；不 commit/push 除非明确要求。
+
+---
+
+## 11. 样机试播（仅测试环境）
+
+**目标**：内容作者与开发在 staging 上拿样机自由验收任意一集——不限次数、不限顺序、可播未发布草稿。
+
+**触发格式**：对样机说「**我想玩 + 完整集标题**」（如「我想玩Elly与三个巨人」）。标题精确匹配，先匹配已发布标题（`AdventureEpisode.title`），再匹配**当前草稿版本 payload 的标题**（`AdventureEpisodeVersion.status='draft'`，命中即锁定该草稿版本快照播放）。标题不存在时回复确定性话术，不落库、不进正常意图路由。
+
+**两道闸**（照内容管理台同一套双闸哲学）：
+
+1. **环境闸**：`ADVENTURE_TEST_MODE_ENABLED` 必须是字面 `"true"`。base/prod 的 compose 刻意不转发（`compose-env-gate.spec.ts` 钉死），staging override 硬写 `'true'`。未开启时引擎行为与改动前**完全一致**。
+2. **设备闸（隐式）**：只有触发过（或经管理台武装过）的设备才进入「试播态」——Redis 会话 `adventure:test:session:{deviceId}`（TTL 默认 120 分钟，代码常量，见 `adventure.constants.ts`），索引 zset `adventure:test:index`。试播态内 `isCompletedToday` 恒 false、选集不受顺序/完成/retire 限制；TTL 过期后自动恢复每日一集门禁。
+
+**试播态的行为差异**（全部以 armed 会话为前置条件，普通设备零影响）：
+
+- `startToday` 播 armed 集：`in_progress/awaiting_reply` 续玩，其余状态重置到第 0 段重开；
+- 触发词路径总是**从第 0 段重开**（含 recap；草稿版本 recap 来自草稿 payload）；
+- 事件键带 `:run:{runSeq}` 后缀、payload 打 `{test:true, runSeq, source, title}`——同日重玩不会撞 `eventKey` 唯一约束，试播轮次可在看板/统计里单独辨认；
+- 当日 daily 行与终态进度在试播路径允许覆盖（`openOrReuseTodayDaily` 的 `allowCompletedOverwrite` 与 `resetProgressForTest`）；
+- `recoverToNextEpisode` 对 armed 设备**不平移**（测试者必须听到自己选的那一集），记 `test_recovery_skipped` 事件后落回自由对话；
+- 试播不豁免 L1/L2 安全闸与内容熔断。
+
+**管理台接口**（`analytics/adventure-admin/device-test/*`，dashboard 落地计划的预留后端）：
+
+- `GET device-test/state`：环境开关、TTL 与武装中设备列表（prod 返回 `enabled=false`）；
+- `GET device-test/sessions/:deviceId`：单台会话 + 最近 20 条试播事件；
+- `POST device-test/sessions`：武装（`{deviceId, title, reason}`，标题含草稿标题，重置粘滞会话，留审计）；
+- `POST device-test/sessions/:deviceId/restart`：同集从第 0 段重开（runSeq+1，留审计）；
+- `POST device-test/sessions/:deviceId/clear`：解除武装（留审计）。
+
+写操作沿用 ContentAdminGuard（scope `adventure-content` + `CONTENT_ADMIN_PROFILE=authoring`）+ `ADVENTURE_TEST_MODE_ENABLED` 环境闸三重保险，理由过 `assertReason`，动作留 `AdventureContentAuditLog`。
+
+**体验提示**：主链路（百度 RTC）无服务器推送通道，试播时交互点没有 10s 沉默兜底——停下就必须开口或说「不想玩了」；备用链路（vendor WS）有超时推送，行为不同属设计使然。

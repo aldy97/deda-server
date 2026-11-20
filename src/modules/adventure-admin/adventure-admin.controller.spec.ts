@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
-import { RequestMethod, UnauthorizedException } from "@nestjs/common";
+import { Logger, RequestMethod, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureContentService } from "./adventure-content.service";
@@ -8,6 +8,7 @@ import { AdventureContentQueryService } from "./adventure-content-query.service"
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
+import { AdventureDeviceTestService } from "./adventure-device-test.service";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
@@ -190,6 +191,36 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     path: "recovery/reset",
     readOnlyExempt: false,
   },
+  {
+    handler: "deviceTestState",
+    method: RequestMethod.GET,
+    path: "device-test/state",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "deviceTestSessionDetail",
+    method: RequestMethod.GET,
+    path: "device-test/sessions/:deviceId",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "deviceTestArm",
+    method: RequestMethod.POST,
+    path: "device-test/sessions",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "deviceTestRestart",
+    method: RequestMethod.POST,
+    path: "device-test/sessions/:deviceId/restart",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "deviceTestClear",
+    method: RequestMethod.POST,
+    path: "device-test/sessions/:deviceId/clear",
+    readOnlyExempt: false,
+  },
 ];
 
 function normalizePath(value: unknown): string {
@@ -245,6 +276,7 @@ describe("AdventureAdminController", () => {
   let audit: Record<string, jest.Mock>;
   let recovery: Record<string, jest.Mock>;
   let profile: string;
+  let deviceTest: Record<string, jest.Mock>;
 
   beforeEach(async () => {
     profile = "authoring";
@@ -258,6 +290,7 @@ describe("AdventureAdminController", () => {
       retireImpact: jest.fn(),
       checkContent: jest.fn(),
       simulate: jest.fn(),
+      choiceStats: jest.fn(),
     };
     content = {
       createEpisode: jest.fn(),
@@ -280,6 +313,13 @@ describe("AdventureAdminController", () => {
       sweepBrokenProgress: jest.fn(),
       resetBreaker: jest.fn(),
     };
+    deviceTest = {
+      state: jest.fn(),
+      sessionDetail: jest.fn(),
+      arm: jest.fn(),
+      restart: jest.fn(),
+      clear: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -289,6 +329,7 @@ describe("AdventureAdminController", () => {
         { provide: AdventureTransferService, useValue: transfer },
         { provide: AdventureAuditService, useValue: audit },
         { provide: AdventureRecoveryService, useValue: recovery },
+        { provide: AdventureDeviceTestService, useValue: deviceTest },
         {
           provide: ConfigService,
           useValue: {
@@ -472,6 +513,15 @@ describe("AdventureAdminController", () => {
       } as never);
 
       expect(query.diffVersions).toHaveBeenCalledWith("ep1", "v1", "v2");
+    });
+
+    it("forwards choice-stats with the raw date window untouched", async () => {
+      query.choiceStats.mockResolvedValue({ hits: [] });
+      const window = { startDate: "2026-01-01", endDate: "2026-01-31" };
+
+      await controller.choiceStats("ep1", window as never);
+
+      expect(query.choiceStats).toHaveBeenCalledWith("ep1", window);
     });
 
     it("converts audit from/to to Date and trims the rest", async () => {
@@ -851,6 +901,17 @@ describe("AdventureAdminController", () => {
       );
     });
 
+    it("export with a non-array episodeIds treats it as no filter rather than crashing", async () => {
+      transfer.exportBundle.mockResolvedValue({ bundleHash: "h" });
+
+      await controller.exportBundle(
+        { episodeIds: "ep1,ep2" } as never,
+        adminRequest(),
+      );
+
+      expect(transfer.exportBundle).toHaveBeenCalledWith({}, expect.anything());
+    });
+
     it("import applies the confirm token and expected hash from the preview", async () => {
       const bundle = { bundleSchemaVersion: 1, episodes: [] };
       transfer.applyImport.mockResolvedValue({ bundleHash: "h" });
@@ -971,6 +1032,49 @@ describe("AdventureAdminController", () => {
       expect(result.report).toBeDefined();
     });
 
+    it("survives a recovery service that returns no report: audit detail 全落空值", async () => {
+      recovery.sweepBrokenProgress.mockResolvedValue(undefined);
+
+      await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      const entry = audit.record.mock.calls[0][1] as { detail: unknown };
+      expect(entry.detail).toEqual({
+        startedAt: null,
+        finishedAt: null,
+        durationMs: null,
+        skipped: false,
+        skipReason: null,
+        scanned: null,
+        repairCount: 0,
+        alertCount: 0,
+        errorCount: 0,
+        repairs: [],
+        alerts: [],
+      });
+    });
+
+    it("logs the audit failure even when the thrown value is not an Error", async () => {
+      const logSpy = jest
+        .spyOn(Logger.prototype, "error")
+        .mockReturnValue(undefined);
+      recovery.sweepBrokenProgress.mockResolvedValue(emptyReport);
+      audit.record.mockRejectedValue("审计表不可用");
+
+      const result = await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      expect(result.audited).toBe(false);
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining("审计表不可用"),
+      );
+      logSpy.mockRestore();
+    });
+
     it("caps the audit detail so one sweep cannot write an unbounded Json blob", async () => {
       const repairs = Array.from({ length: 120 }, (_, index) => ({
         code: "AWAITING_NON_INTERACTION",
@@ -1019,9 +1123,117 @@ describe("AdventureAdminController", () => {
     });
   });
 
+  describe("device test routes", () => {
+    it("forwards the state read without an actor", async () => {
+      deviceTest.state.mockResolvedValue({ enabled: true, sessions: [] });
+
+      await expect(controller.deviceTestState()).resolves.toEqual({
+        enabled: true,
+        sessions: [],
+      });
+      expect(deviceTest.state).toHaveBeenCalledTimes(1);
+    });
+
+    it("forwards the session detail read for the given device", async () => {
+      deviceTest.sessionDetail.mockResolvedValue({ session: null });
+
+      await expect(
+        controller.deviceTestSessionDetail("dev-1001"),
+      ).resolves.toEqual({ session: null });
+      expect(deviceTest.sessionDetail).toHaveBeenCalledWith("dev-1001");
+    });
+
+    it("arms with actor and only the picked fields", async () => {
+      deviceTest.arm.mockResolvedValue({ ok: true });
+
+      await controller.deviceTestArm(
+        {
+          deviceId: "dev-1001",
+          title: "听风原野第一天",
+          reason: "测试环境验收这一集",
+          evil: "should be dropped",
+        } as never,
+        adminRequest(),
+      );
+
+      expect(deviceTest.arm).toHaveBeenCalledWith(
+        {
+          deviceId: "dev-1001",
+          title: "听风原野第一天",
+          reason: "测试环境验收这一集",
+        },
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+      );
+    });
+
+    it("drops blank arm fields before forwarding", async () => {
+      deviceTest.arm.mockResolvedValue({ ok: true });
+
+      await controller.deviceTestArm(
+        { deviceId: " ", title: "   ", reason: "" } as never,
+        adminRequest(),
+      );
+
+      expect(deviceTest.arm).toHaveBeenCalledWith({}, expect.anything());
+    });
+
+    it("restarts and clears with actor and the raw reason", async () => {
+      deviceTest.restart.mockResolvedValue({ ok: true });
+      deviceTest.clear.mockResolvedValue({ ok: true });
+
+      await controller.deviceTestRestart(
+        "dev-1001",
+        { reason: "手动重开验证重玩" } as never,
+        adminRequest(),
+      );
+      await controller.deviceTestClear(
+        "dev-1001",
+        { reason: "验收完成解除武装" } as never,
+        adminRequest(),
+      );
+
+      expect(deviceTest.restart).toHaveBeenCalledWith(
+        "dev-1001",
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+        "手动重开验证重玩",
+      );
+      expect(deviceTest.clear).toHaveBeenCalledWith(
+        "dev-1001",
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+        "验收完成解除武装",
+      );
+    });
+
+    it.each([
+      ["missing user", { user: undefined }],
+      ["blank username", adminRequest({ username: "   " })],
+    ])("refuses to arm anonymously: %s", async (_label, request) => {
+      await expect(
+        controller.deviceTestArm(
+          {
+            deviceId: "dev-1001",
+            title: "听风原野第一天",
+            reason: "测试环境验收这一集",
+          } as never,
+          request as never,
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(deviceTest.arm).not.toHaveBeenCalled();
+    });
+  });
+
   it("resolveContentAdminProfile stays fail-safe for the controller too", () => {
     const configService = { get: () => undefined } as unknown as ConfigService;
 
     expect(resolveContentAdminProfile(configService)).toBe("readonly");
+  });
+
+  it("auditFilter 拿到 falsy DTO（管线之后的防御路径）→ 空筛选，不崩", () => {
+    const filter = (
+      controller as unknown as {
+        auditFilter(dto: unknown): Record<string, unknown>;
+      }
+    ).auditFilter(undefined);
+    expect(filter).toEqual({});
   });
 });
