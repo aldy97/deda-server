@@ -228,18 +228,16 @@ export class LlmAdapterService {
       return;
     }
 
-    // 样机试播触发词（仅测试环境）：「我想玩+完整标题」确定性开播指定集。
-    // 排在等待态接管之前——试播者想重开一集时，触发词不能被等待态吞掉。
-    // 引擎未启用/不是触发词返回 null；标题不存在返回确定性 not-found 话术。
-    // 异常同样落回正常链路，绝不让这一轮静音。
+    // 测试冒险故事触发词（仅测试环境）：固定短语「测试冒险故事」确定性开播下发集。
+    // 排在等待态接管之前——测试者想重玩时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；未下发返回确定性话术；异常落回正常链路。
     if (device) {
       try {
-        const testTriggerReply = await this.adventure.tryTestTrigger(
+        const testStoryReply = await this.adventure.tryTestStoryTrigger(
           device.id,
           asrText,
         );
-        if (testTriggerReply) {
-          // 与等待态接管同一口径：本轮未做 L2 语义审查与意图分类，如实标记。
+        if (testStoryReply) {
           this.turnDecisions.record({
             turnId,
             deviceId: device.id,
@@ -249,12 +247,12 @@ export class LlmAdapterService {
             intentSource: "adventure_takeover",
             asrText,
           });
-          yield* this.emitAdventureReply(device, testTriggerReply, asrText);
+          yield* this.emitAdventureReply(device, testStoryReply, asrText);
           return;
         }
       } catch (error) {
         this.logger.error(
-          `Adventure test trigger failed, degrading to normal flow for device=${device.deviceId}: ${this.describeError(error)}`,
+          `Adventure test story trigger failed, degrading to normal flow for device=${device.deviceId}: ${this.describeError(error)}`,
         );
       }
     }

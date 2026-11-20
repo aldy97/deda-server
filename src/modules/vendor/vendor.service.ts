@@ -226,26 +226,25 @@ export class VendorService {
       );
     }
 
-    // 样机试播触发词（仅测试环境）：「我想玩+完整标题」确定性开播指定集。
-    // 排在等待态接管之前——试播者想重开一集时，触发词不能被等待态吞掉。
-    // 引擎未启用/不是触发词返回 null；标题不存在返回确定性 not-found 话术。
-    // 异常同样落回正常链路，绝不让这一轮静音。
+    // 测试冒险故事触发词（仅测试环境）：固定短语「测试冒险故事」确定性开播下发集。
+    // 排在等待态接管之前——测试者想重玩时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；未下发返回确定性话术；异常落回正常链路。
     try {
-      const testTriggerReply = await this.adventureService.tryTestTrigger(
+      const testStoryReply = await this.adventureService.tryTestStoryTrigger(
         device.id,
         dto.asrText,
       );
-      if (testTriggerReply) {
+      if (testStoryReply) {
         return this.sendAdventureReply(
           device,
-          testTriggerReply,
+          testStoryReply,
           dto.asrText,
           turnId,
         );
       }
     } catch (error) {
       this.logger.error(
-        `Adventure test trigger failed, degrading to normal flow for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
+        `Adventure test story trigger failed, degrading to normal flow for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
       );
     }
 

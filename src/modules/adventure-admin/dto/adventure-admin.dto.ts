@@ -422,26 +422,12 @@ export class ImportApplyDto {
   expectedBundleHash?: string;
 }
 
-export class DeviceTestArmDto {
+export class TestAssignDto {
   @ApiProperty({ description: "设备业务 ID（小写 MAC）或设备编码" })
   @IsString()
   @IsNotEmpty()
   deviceId: string;
 
-  @ApiProperty({
-    description: "完整集标题（已发布标题或当前草稿标题，精确匹配）",
-  })
-  @IsString()
-  @IsNotEmpty()
-  title: string;
-
-  @ApiPropertyOptional({ description: "变更理由，至少 8 个字" })
-  @IsOptional()
-  @IsString()
-  reason?: string;
-}
-
-export class DeviceTestMutationDto {
   @ApiPropertyOptional({ description: "变更理由，至少 8 个字" })
   @IsOptional()
   @IsString()

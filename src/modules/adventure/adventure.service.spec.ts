@@ -1,11 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { AdventureService } from "./adventure.service";
-import { AdventureTestAccessService } from "./adventure-test-access.service";
-import {
-  ADVENTURE_EXIT_TEXT,
-  adventureTestNotFoundText,
-} from "./adventure.constants";
+import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 
@@ -19,7 +15,6 @@ describe("AdventureService", () => {
   let prisma: any;
   let llm: any;
   let configService: { get: jest.Mock };
-  let testAccess: any;
 
   const episode = {
     id: "ep1",
@@ -133,7 +128,6 @@ describe("AdventureService", () => {
             adventureEpisodeVersion: {
               findUnique: jest.fn(),
               findFirst: jest.fn(),
-              findMany: jest.fn(),
             },
             adventureDailyRecord: {
               findFirst: jest.fn(),
@@ -176,17 +170,6 @@ describe("AdventureService", () => {
           provide: ConfigService,
           useValue: { get: jest.fn() },
         },
-        {
-          provide: AdventureTestAccessService,
-          useValue: {
-            isEnabled: jest.fn().mockReturnValue(false),
-            matchTrigger: jest.fn().mockReturnValue(null),
-            peek: jest.fn().mockResolvedValue(null),
-            arm: jest.fn(),
-            clear: jest.fn(),
-            listArmed: jest.fn().mockResolvedValue([]),
-          },
-        },
       ],
     }).compile();
 
@@ -194,11 +177,11 @@ describe("AdventureService", () => {
     prisma = module.get(PrismaService);
     llm = module.get(LlmService);
     configService = module.get(ConfigService);
-    testAccess = module.get(AdventureTestAccessService);
 
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
     prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
+    prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
     prisma.adventureSegment.findMany.mockResolvedValue(segments);
     prisma.adventureDailyRecord.create.mockResolvedValue(baseDaily);
     prisma.adventureDailyRecord.update.mockImplementation((args) =>
@@ -2438,496 +2421,75 @@ describe("AdventureService", () => {
     });
   });
 
-  describe("device test mode（样机试播，仅测试环境）", () => {
-    const testSession = {
-      deviceInternalId: "dev-uuid-1",
-      episodeId: "ep1",
-      episodeVersionId: null,
-      title: "听风原野第一天",
-      source: "voice_trigger",
-      armedBy: null,
-      runSeq: 1,
-      armedAt: "2026-11-20T00:00:00.000Z",
-      expiresAt: "2026-11-20T02:00:00.000Z",
-    };
-
-    function enableTestMode() {
-      testAccess.isEnabled.mockReturnValue(true);
-      testAccess.matchTrigger.mockImplementation(
-        (text: string | null | undefined) => {
-          const trimmed = (text ?? "").trim();
-          return trimmed.startsWith("我想玩") ? trimmed.slice(3).trim() : null;
-        },
+  describe("测试冒险故事（仅 staging）", () => {
+    function enableTestStory() {
+      configService.get.mockImplementation((key: string) =>
+        key === "ADVENTURE_TEST_MODE_ENABLED" ? "true" : undefined,
       );
     }
 
-    beforeEach(() => {
-      testAccess.isEnabled.mockReturnValue(false);
-      testAccess.matchTrigger.mockReturnValue(null);
-      testAccess.peek.mockResolvedValue(null);
-      testAccess.arm.mockResolvedValue({ ...testSession });
-      prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
-      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+    it("isTestStoryEnabled 只在环境变量为字面 true 时为真", () => {
+      configService.get.mockReturnValue("true");
+      expect(service.isTestStoryEnabled()).toBe(true);
+      configService.get.mockReturnValue("false");
+      expect(service.isTestStoryEnabled()).toBe(false);
     });
 
-    it("skips the daily completion gate while a test session is armed", async () => {
-      testAccess.peek.mockResolvedValue({ ...testSession });
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "completed",
+    it("环境未开启时触发词返回 null（落回正常链路）", async () => {
+      configService.get.mockReturnValue(undefined);
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("不是触发词返回 null", async () => {
+      enableTestStory();
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "我想听故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("触发词命中但设备未下发 → 确定性 not-assigned 话术", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: null,
+        testAdventureEpisodeVersionId: null,
       });
 
-      expect(await service.isCompletedToday("dev-uuid-1")).toBe(false);
+      const reply = await service.tryTestStoryTrigger(
+        "dev-uuid-1",
+        "测试冒险故事",
+      );
+
+      expect(reply).toEqual({
+        texts: [expect.stringContaining("还没有下发")],
+        action: "narrate",
+      });
     });
 
-    it("plays the triggered episode from segment 0 via startByTitle", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
+    it("触发词命中（含 ASR 末尾标点）且有下发 → 从第 0 段播放并写 assigned/started 事件", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: "v1",
+      });
 
-      const reply = await service.startByTitle("dev-uuid-1", "听风原野第一天");
-
-      expect(testAccess.arm).toHaveBeenCalledWith(
+      const reply = await service.tryTestStoryTrigger(
         "dev-uuid-1",
-        expect.objectContaining({
-          episodeId: "ep1",
-          episodeVersionId: null,
-          source: "voice_trigger",
-        }),
+        "测试冒险故事。",
       );
+
       expect(reply?.action).toBe("await_reply");
-      expect(reply?.texts).toEqual([
-        episode.recap,
-        segments[0].text,
-        segments[1].text,
-        segments[2].text,
-      ]);
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventKey: "daily:daily-1:assigned:run:1",
-            payload: expect.objectContaining({
-              test: true,
-              runSeq: 1,
-              source: "voice_trigger",
-            }),
-          }),
-        }),
+      expect(reply?.texts).toContain("今天 Elly 要出门啦。");
+      const createdKeys = prisma.adventureEvent.create.mock.calls.map(
+        (call) => call[0].data.eventKey,
       );
-    });
-
-    it("restarts a completed episode from segment 0 in test mode", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue({
-        ...baseDaily,
-        status: "completed",
-        completedDate: "2026-11-20",
-      });
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "completed",
-        nextSegmentOrder: 6,
-        completedAt: new Date(),
-      });
-
-      const reply = await service.startByTitle("dev-uuid-1", "听风原野第一天");
-
-      expect(reply?.texts).toContain(segments[0].text);
-      expect(prisma.adventureDailyRecord.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: "in_progress",
-            completedDate: null,
-          }),
-        }),
-      );
-      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            nextSegmentOrder: 0,
-            status: "in_progress",
-            completedAt: null,
-          }),
-        }),
-      );
-    });
-
-    it("plays the draft version when the spoken title matches the draft payload", async () => {
-      enableTestMode();
-      const draftPayload = {
-        title: "未发布的新标题",
-        recap: "草稿回顾：这一集还在打磨。",
-        segments: [segments[0], segments[1], segments[2]],
-      };
-      const draftEpisode = { ...episode, title: "听风原野第一天" };
-      prisma.adventureEpisode.findMany.mockResolvedValue([]);
-      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
-        { id: "v-draft-9", payload: draftPayload, episode: draftEpisode },
-      ]);
-      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue({
-        id: "v-draft-9",
-        version: 9,
-        payload: draftPayload,
-      });
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
-
-      const reply = await service.startByTitle("dev-uuid-1", "未发布的新标题");
-
-      expect(testAccess.arm).toHaveBeenCalledWith(
-        "dev-uuid-1",
-        expect.objectContaining({ episodeVersionId: "v-draft-9" }),
-      );
-      expect(reply?.texts).toEqual([
-        "草稿回顾：这一集还在打磨。",
-        segments[0].text,
-        segments[1].text,
-        segments[2].text,
-      ]);
-    });
-
-    it("replies with the deterministic not-found line and stays out of the DB", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([]);
-
-      const reply = await service.startByTitle("dev-uuid-1", "不存在的故事");
-
-      expect(reply?.texts).toEqual([adventureTestNotFoundText("不存在的故事")]);
-      expect(reply?.action).toBe("narrate");
-      expect(testAccess.arm).not.toHaveBeenCalled();
-      expect(prisma.adventureEvent.create).not.toHaveBeenCalled();
-      expect(prisma.adventureProgress.create).not.toHaveBeenCalled();
-    });
-
-    it("routes the trigger text through tryTestTrigger", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
-
-      const reply = await service.tryTestTrigger(
-        "dev-uuid-1",
-        "我想玩听风原野第一天",
-      );
-
-      expect(reply?.texts).toContain(segments[0].text);
-    });
-
-    it("returns null when the environment gate is off, even for a matching title", async () => {
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-
-      expect(
-        await service.startByTitle("dev-uuid-1", "听风原野第一天"),
-      ).toBeNull();
-      expect(prisma.adventureEpisode.findMany).not.toHaveBeenCalled();
-    });
-
-    it("starts the armed episode from scratch when there is no in-flight progress", async () => {
-      testAccess.peek.mockResolvedValue({ ...testSession });
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-
-      const reply = await service.startToday("dev-uuid-1");
-
-      expect(reply?.texts).toContain(episode.recap);
-      expect(reply?.texts).toContain(segments[0].text);
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventKey: "daily:daily-1:assigned:run:1",
-          }),
-        }),
-      );
-      // armed 选集不走顺序逻辑
-      expect(prisma.adventureEpisode.findMany).not.toHaveBeenCalled();
-    });
-
-    it("resumes an in-flight armed episode without replaying the recap", async () => {
-      testAccess.peek.mockResolvedValue({ ...testSession });
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "awaiting_reply",
-        nextSegmentOrder: 3,
-      });
-      prisma.adventureDailyRecord.findFirst.mockResolvedValue({
-        ...baseDaily,
-      });
-
-      const reply = await service.startToday("dev-uuid-1");
-
-      expect(reply?.texts).not.toContain(episode.recap);
-      expect(reply?.texts[0]).toBe(segments[3].text);
-      expect(prisma.adventureProgress.update).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ nextSegmentOrder: 0 }),
-        }),
-      );
-    });
-
-    it("does not switch episodes during recovery while armed", async () => {
-      testAccess.peek.mockResolvedValue({ ...testSession });
-      prisma.adventureDailyRecord.findFirst.mockResolvedValue({
-        ...baseDaily,
-      });
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "in_progress",
-      });
-
-      const reply = await service.recoverToNextEpisode(
-        "dev-uuid-1",
-        "content broken",
-      );
-
-      expect(reply).toBeNull();
-      expect(prisma.adventureProgress.update).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ status: "failed_over" }),
-        }),
-      );
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventType: "test_recovery_skipped",
-            payload: expect.objectContaining({ runSeq: 1 }),
-          }),
-        }),
-      );
-    });
-
-    it("uses distinct event keys across two test runs", async () => {
-      enableTestMode();
-      testAccess.arm
-        .mockResolvedValueOnce({ ...testSession, runSeq: 1 })
-        .mockResolvedValueOnce({ ...testSession, runSeq: 2 });
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
-
-      await service.startByTitle("dev-uuid-1", "听风原野第一天");
-      await service.startByTitle("dev-uuid-1", "听风原野第一天");
-
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventKey: "daily:daily-1:assigned:run:1",
-          }),
-        }),
-      );
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventKey: "daily:daily-1:assigned:run:2",
-          }),
-        }),
-      );
-    });
-
-    it("stamps the completion event with the run suffix in test mode", async () => {
-      enableTestMode();
-      prisma.adventureSegment.findMany.mockResolvedValue([segments[0]]);
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-      prisma.adventureProgress.findFirst.mockResolvedValue(null);
-
-      const reply = await service.startByTitle("dev-uuid-1", "听风原野第一天");
-
-      expect(reply?.action).toBe("completed");
-      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { eventKey: "daily:daily-1:completed:run:1" },
-          create: expect.objectContaining({
-            payload: expect.objectContaining({ test: true, runSeq: 1 }),
-          }),
-        }),
-      );
-    });
-
-    it("keeps the legacy behavior when test mode is disabled", async () => {
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "completed",
-      });
-
-      expect(await service.startToday("dev-uuid-1")).toBeNull();
-      expect(
-        await service.startByTitle("dev-uuid-1", "听风原野第一天"),
-      ).toBeNull();
-    });
-
-    it("arms a test session by title via armTestSessionByTitle", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
-
-      const session = await service.armTestSessionByTitle(
-        "dev-uuid-1",
-        "听风原野第一天",
-        { source: "admin_api", armedBy: "alice" },
-      );
-
-      expect(testAccess.arm).toHaveBeenCalledWith(
-        "dev-uuid-1",
-        expect.objectContaining({
-          episodeId: "ep1",
-          episodeVersionId: null,
-          source: "admin_api",
-          armedBy: "alice",
-        }),
-      );
-      expect(session).toEqual({ ...testSession });
-    });
-
-    it("returns null from armTestSessionByTitle when the title is unknown", async () => {
-      enableTestMode();
-      prisma.adventureEpisode.findMany.mockResolvedValue([]);
-
-      expect(
-        await service.armTestSessionByTitle("dev-uuid-1", "不存在的故事", {
-          source: "admin_api",
-        }),
-      ).toBeNull();
-      expect(testAccess.arm).not.toHaveBeenCalled();
-    });
-
-    it("restarts an armed run from segment 0 via restartTestRun", async () => {
-      testAccess.peek.mockResolvedValue({ ...testSession });
-      testAccess.arm.mockResolvedValue({ ...testSession, runSeq: 2 });
-      prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
-      prisma.adventureDailyRecord.findUnique.mockResolvedValue({
-        ...baseDaily,
-        status: "completed",
-        completedDate: "2026-11-20",
-      });
-      prisma.adventureProgress.findFirst.mockResolvedValue({
-        ...baseProgress,
-        status: "completed",
-        nextSegmentOrder: 6,
-      });
-
-      const session = await service.restartTestRun("dev-uuid-1");
-
-      expect(session?.runSeq).toBe(2);
-      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ nextSegmentOrder: 0 }),
-        }),
-      );
-      expect(prisma.adventureEvent.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            eventKey: "daily:daily-1:started:run:2",
-          }),
-        }),
-      );
-    });
-
-    it("returns null from restartTestRun when nothing is armed", async () => {
-      expect(await service.restartTestRun("dev-uuid-1")).toBeNull();
-      expect(testAccess.arm).not.toHaveBeenCalled();
-    });
-
-    describe("voice title matching（ASR 容错）", () => {
-      const voicedEpisode = {
-        ...episode,
-        id: "ep-voice",
-        title: "Elly与三个巨人",
-        episodeNumber: 3,
-      };
-
-      beforeEach(() => {
-        enableTestMode();
-        prisma.adventureEpisode.findMany.mockResolvedValue([voicedEpisode]);
-        prisma.adventureEpisodeVersion.findMany.mockResolvedValue([]);
-        prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
-        prisma.adventureProgress.findFirst.mockResolvedValue(null);
-        testAccess.arm.mockResolvedValue({
-          ...testSession,
-          episodeId: "ep-voice",
-          title: "Elly与三个巨人",
-        });
-      });
-
-      it("starts the episode despite a trailing period in the ASR title", async () => {
-        const reply = await service.startByTitle(
-          "dev-uuid-1",
-          "Elly与三个巨人。",
-        );
-        expect(reply?.texts).toContain(segments[0].text);
-        expect(testAccess.arm).toHaveBeenCalledWith(
-          "dev-uuid-1",
-          expect.objectContaining({ episodeId: "ep-voice" }),
-        );
-      });
-
-      it("starts the episode when the IP name is transliterated by ASR", async () => {
-        const reply = await service.startByTitle(
-          "dev-uuid-1",
-          "艾丽与三个巨人",
-        );
-        expect(reply?.texts).toContain(segments[0].text);
-        expect(testAccess.arm).toHaveBeenCalledWith(
-          "dev-uuid-1",
-          expect.objectContaining({ episodeId: "ep-voice" }),
-        );
-      });
-
-      it("starts the episode by number shortcut", async () => {
-        const reply = await service.startByTitle("dev-uuid-1", "第3集");
-        expect(reply?.texts).toContain(segments[0].text);
-        expect(testAccess.arm).toHaveBeenCalledWith(
-          "dev-uuid-1",
-          expect.objectContaining({ episodeId: "ep-voice" }),
-        );
-      });
-
-      it("starts via a fuzzy single-char slip", async () => {
-        const reply = await service.startByTitle(
-          "dev-uuid-1",
-          "艾丽与三歌巨人",
-        );
-        expect(reply?.texts).toContain(segments[0].text);
-        expect(testAccess.arm).toHaveBeenCalledWith(
-          "dev-uuid-1",
-          expect.objectContaining({ episodeId: "ep-voice" }),
-        );
-      });
-
-      it("starts when the spoken text is a substring of the title", async () => {
-        const reply = await service.startByTitle("dev-uuid-1", "三个巨人");
-        expect(reply?.texts).toContain(segments[0].text);
-        expect(testAccess.arm).toHaveBeenCalledWith(
-          "dev-uuid-1",
-          expect.objectContaining({ episodeId: "ep-voice" }),
-        );
-      });
-
-      it("asks to disambiguate when two candidates are equally plausible", async () => {
-        prisma.adventureEpisode.findMany.mockResolvedValue([
-          { ...voicedEpisode, id: "ep-a", title: "三个巨人", episodeNumber: 3 },
-          { ...voicedEpisode, id: "ep-b", title: "三只巨人", episodeNumber: 4 },
-        ]);
-
-        const reply = await service.startByTitle("dev-uuid-1", "三棵巨人");
-
-        expect(reply?.action).toBe("narrate");
-        expect(reply?.texts[0]).toContain("第3集");
-        expect(reply?.texts[0]).toContain("第4集");
-        expect(testAccess.arm).not.toHaveBeenCalled();
-      });
-
-      it("replies not-found with the normalized title and the number hint", async () => {
-        prisma.adventureEpisode.findMany.mockResolvedValue([]);
-
-        const reply = await service.startByTitle(
-          "dev-uuid-1",
-          "不存在的故事。",
-        );
-
-        expect(reply?.texts[0]).toBe(adventureTestNotFoundText("不存在的故事"));
-        expect(reply?.texts[0]).toContain("第几集");
-      });
+      expect(createdKeys.some((key) => key.includes(":assigned:"))).toBe(true);
+      expect(createdKeys.some((key) => key.includes(":started:"))).toBe(true);
     });
   });
 });

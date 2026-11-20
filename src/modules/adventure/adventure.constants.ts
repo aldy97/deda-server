@@ -194,45 +194,23 @@ export const ADVENTURE_CHOICE_LLM_ENV = {
 } as const;
 
 /**
- * 样机试播（仅测试环境）默认值与环境变量名。
+ * 测试冒险故事（仅 staging）环境开关。
  *
- * 总开关刻意 fail-safe：只有部署显式写 ADVENTURE_TEST_MODE_ENABLED=true
- * 才启用（staging compose 硬写，base/prod 刻意不转发，由
- * compose-env-gate.spec.ts 钉死）。TTL 是代码常量而非环境变量：
- * 少一个「代码读了但 compose 白名单没转发」的失效点。
+ * 新方案不再用 Redis 武装会话：device 上持久化一条下发关系
+ * （testAdventureEpisodeId + 版本快照），孩子说固定触发词「测试冒险故事」
+ * 即从第 0 段播放被下发的集，不限次数、不限顺序、可播草稿快照。
+ *
+ * 总开关沿用 fail-safe 哲学：只有部署显式写 ADVENTURE_TEST_MODE_ENABLED=true
+ * 才启用（staging compose 硬写，base/prod 刻意不转发，由 compose-env-gate.spec.ts
+ * 钉死）。未开启时触发词不生效、行为与普通设备完全一致。
  */
-export const ADVENTURE_TEST_DEFAULTS = {
-  enabled: false,
-  sessionTtlMinutes: 120,
-} as const;
-
 export const ADVENTURE_TEST_ENV = {
   enabled: "ADVENTURE_TEST_MODE_ENABLED",
 } as const;
 
-/** 语音触发前缀：ASR 文本以此开头，其后为完整集标题或标题片段（草稿标题同样可命中）。 */
-export const ADVENTURE_TEST_TRIGGER_PREFIXES = ["我想玩", "我要玩"] as const;
+/** 测试冒险故事的语音触发词：ASR 文本包含它即进入测试播放（容忍末尾标点）。 */
+export const ADVENTURE_TEST_STORY_TRIGGER = "测试冒险故事";
 
-/** 触发词命中但标题未找到时的确定性话术：不走 LLM、不写库。 */
-export function adventureTestNotFoundText(title: string): string {
-  return `我没有找到叫「${title}」的冒险故事，请确认标题后，再完整说一遍「我想玩」加故事标题；也可以说「第几集」直接指定。`;
-}
-
-/** 多个候选同样可信时的确定性消歧话术：引导用集号或完整标题，绝不静默猜。 */
-export function adventureTestAmbiguousText(
-  candidates: ReadonlyArray<{ title: string; episodeNumber?: number | null }>,
-): string {
-  const list = candidates
-    .map((c) => `第${c.episodeNumber ?? "?"}集《${c.title}》`)
-    .join("、");
-  return `我找到了几集：${list}。请说「第几集」或再说一遍完整标题。`;
-}
-
-/** 测试轮事件 payload 的标记键：看板与后续统计可用它把试播轮次摘出来。 */
-export const ADVENTURE_TEST_EVENT_MARKER = "test";
-
-/** 试播会话在 Redis 中的键前缀与索引 zset 键（与 ADVENTURE_BREAKER_KEYS 同约定）。 */
-export const ADVENTURE_TEST_KEYS = {
-  sessionPrefix: "adventure:test:session:",
-  index: "adventure:test:index",
-} as const;
+/** 触发词命中但设备未下发任何集时的确定性话术：不走 LLM、不写库。 */
+export const ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT =
+  "这台设备还没有下发测试冒险故事，请先在看板里给这台设备指定一集。";

@@ -44,7 +44,10 @@ import {
   SimulationThresholds,
   simulateEpisode,
 } from "./adventure-simulator";
-import { ADVENTURE_EXIT_TEXT } from "@/modules/adventure/adventure.constants";
+import {
+  ADVENTURE_EXIT_TEXT,
+  ADVENTURE_TEST_ENV,
+} from "@/modules/adventure/adventure.constants";
 
 /**
  * 冒险内容读侧。
@@ -83,6 +86,8 @@ export interface ContentAdminProfileCapabilities {
   /** authoring / readonly，来自 CONTENT_ADMIN_PROFILE；缺省按 readonly 处理（fail-safe） */
   profile: ContentAdminProfile;
   authoring: boolean;
+  /** 测试冒险故事下发是否可用（ADVENTURE_TEST_MODE_ENABLED=true，仅 staging） */
+  testStoryEnabled: boolean;
 }
 
 export interface EpisodeListFilter {
@@ -329,6 +334,8 @@ export class AdventureContentQueryService {
       fixedExitText: ADVENTURE_EXIT_TEXT,
       profile: this.profile,
       authoring: this.profile === "authoring",
+      testStoryEnabled:
+        this.configService.get<string>(ADVENTURE_TEST_ENV.enabled) === "true",
     };
   }
 

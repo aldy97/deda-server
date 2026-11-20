@@ -25,13 +25,13 @@ describe("VendorService", () => {
   let configService: jest.Mocked<ConfigService>;
   let adventureService: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordPresented: jest.Mock;
     recordEntryBlocked: jest.Mock;
     markPromptPlaybackComplete: jest.Mock;
     registerTimeoutListener: jest.Mock;
-    tryTestTrigger: jest.Mock;
   };
   let childMemoriesService: {
     extractAndStore: jest.Mock;
@@ -152,9 +152,9 @@ describe("VendorService", () => {
           provide: AdventureService,
           useValue: {
             handleChildReply: jest.fn().mockResolvedValue(null),
+            tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
             startToday: jest.fn().mockResolvedValue(null),
             isCompletedToday: jest.fn().mockResolvedValue(false),
-            tryTestTrigger: jest.fn().mockResolvedValue(null),
             recordPresented: jest.fn().mockResolvedValue(undefined),
             recordEntryBlocked: jest.fn().mockResolvedValue(undefined),
             markPromptPlaybackComplete: jest.fn().mockResolvedValue(undefined),
@@ -2093,81 +2093,6 @@ describe("VendorService", () => {
           ttsOptions: {},
         });
       });
-    });
-  });
-
-  describe("样机试播触发词（仅测试环境）", () => {
-    beforeEach(() => {
-      prisma.device.findUnique.mockResolvedValue({
-        id: "uuid-test-1",
-        deviceId: "dev-test-1",
-      } as any);
-      prisma.message.create.mockResolvedValue({ id: "message-test" } as any);
-    });
-
-    it("触发词命中时由引擎接管，不做意图分类、不进主模型", async () => {
-      adventureService.tryTestTrigger.mockResolvedValue({
-        texts: ["试播第一段", "试播第二段"],
-        action: "await_reply",
-      });
-
-      const result = await service.handleTextIn({
-        deviceId: "dev-test-1",
-        asrText: "我想玩Elly与三个巨人",
-      });
-
-      expect(adventureService.tryTestTrigger).toHaveBeenCalledWith(
-        "uuid-test-1",
-        "我想玩Elly与三个巨人",
-      );
-      expect(adventureService.handleChildReply).not.toHaveBeenCalled();
-      expect(llmService.completeStream).not.toHaveBeenCalled();
-      expect(llmService.complete).not.toHaveBeenCalled();
-      expect(result.responseText).toBe("试播第一段\n试播第二段");
-    });
-
-    it("不是触发词时仍先交给等待态接管（原顺序不变）", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.message.findMany.mockResolvedValue([]);
-      adventureService.handleChildReply.mockResolvedValue(null);
-      llmService.buildEnglishTutorPrompt.mockReturnValue([
-        { role: "user", content: "你好" },
-      ] as any);
-      mockAnswerStream("你好呀！");
-
-      await service.handleTextIn({
-        deviceId: "dev-test-1",
-        asrText: "你好",
-      });
-
-      expect(adventureService.tryTestTrigger).toHaveBeenCalledWith(
-        "uuid-test-1",
-        "你好",
-      );
-      expect(adventureService.handleChildReply).toHaveBeenCalledWith(
-        "uuid-test-1",
-        "你好",
-      );
-    });
-
-    it("触发判定抛错时降级到原流程，绝不静音", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      prisma.childProfile.findUnique.mockResolvedValue(null);
-      prisma.message.findMany.mockResolvedValue([]);
-      adventureService.tryTestTrigger.mockRejectedValue(new Error("boom"));
-      adventureService.handleChildReply.mockResolvedValue(null);
-      llmService.buildEnglishTutorPrompt.mockReturnValue([
-        { role: "user", content: "你好" },
-      ] as any);
-      mockAnswerStream("你好呀！");
-
-      const result = await service.handleTextIn({
-        deviceId: "dev-test-1",
-        asrText: "你好",
-      });
-
-      expect(result.responseText).toContain("你好呀");
     });
   });
 });

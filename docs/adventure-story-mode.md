@@ -268,34 +268,27 @@ npx prisma validate --schema=src/prisma/schema.prisma
 
 ---
 
-## 11. 样机试播（仅测试环境）
+## 11. 测试冒险故事下发（仅 staging）
 
-**目标**：内容作者与开发在 staging 上拿样机自由验收任意一集——不限次数、不限顺序、可播未发布草稿。
+**目标**：内容作者在 staging 上拿样机自由验收任意一集——不限次数、不限顺序、可播未发布草稿。
 
-**触发格式**：对样机说「**我想玩 + 完整集标题**」（如「我想玩Elly与三个巨人」），或「**我想玩第N集**」（集号短口令，确定性退路）。标题匹配走独立于正常链路的容错匹配器（`adventure-test-title-matcher.ts`，纯函数、零依赖，只在试播触发路径引入）：先归一化（剥首尾标点/空白、英文小写、IP 译名转写——`艾丽/爱莉/伊莉→elly`、`波丽/宝莉→polly`），再精确/别名匹配，未中则按编辑距离模糊匹配（漏字/多字/个别同音字）。候选身份「草稿优先」：同一集有草稿就用草稿标题+版本，否则用已发布。**歧义绝不静默猜**——多个候选同样可信时回复候选列表，引导用「第N集」或完整标题消歧。标题不存在时回复确定性话术（含集号提示），不落库、不进正常意图路由。管理台武装（`armTestSessionByTitle`）仍走精确匹配，不启用模糊。
+**触发方式**：对样机说固定短语「**测试冒险故事**」，即播放看板下发到该设备的集。不再是「我想玩+标题」的语音标题匹配——下发关系在 dashboard 的 episode 抽屉里直接绑定到具体 `episodeId`，触发词零歧义。
+
+**状态真相**：device 上两条持久化字段（`testAdventureEpisodeId` + `testAdventureEpisodeVersionId`），不再用 Redis 武装会话（无 TTL、无 runSeq、无 zset 索引）。孩子每说一次触发词，就从第 0 段重播一遍。
 
 **两道闸**（照内容管理台同一套双闸哲学）：
 
-1. **环境闸**：`ADVENTURE_TEST_MODE_ENABLED` 必须是字面 `"true"`。base/prod 的 compose 刻意不转发（`compose-env-gate.spec.ts` 钉死），staging override 硬写 `'true'`。未开启时引擎行为与改动前**完全一致**。
-2. **设备闸（隐式）**：只有触发过（或经管理台武装过）的设备才进入「试播态」——Redis 会话 `adventure:test:session:{deviceId}`（TTL 默认 120 分钟，代码常量，见 `adventure.constants.ts`），索引 zset `adventure:test:index`。试播态内 `isCompletedToday` 恒 false、选集不受顺序/完成/retire 限制；TTL 过期后自动恢复每日一集门禁。
+1. **环境闸**：`ADVENTURE_TEST_MODE_ENABLED` 必须是字面 `"true"`。base/prod 的 compose 刻意不转发（`compose-env-gate.spec.ts` 钉死），staging override 硬写 `'true'`。未开启时触发词不生效、引擎行为与普通设备完全一致。
+2. **设备闸（隐式）**：只有被下发过的设备才进入测试态（字段非空）。下发前说触发词返回确定性「还没有下发」话术，不落库、不进正常意图路由。
 
-**试播态的行为差异**（全部以 armed 会话为前置条件，普通设备零影响）：
+**管理台接口**（见 `docs/analytics-api.md`）：
 
-- `startToday` 播 armed 集：`in_progress/awaiting_reply` 续玩，其余状态重置到第 0 段重开；
-- 触发词路径总是**从第 0 段重开**（含 recap；草稿版本 recap 来自草稿 payload）；
-- 事件键带 `:run:{runSeq}` 后缀、payload 打 `{test:true, runSeq, source, title}`——同日重玩不会撞 `eventKey` 唯一约束，试播轮次可在看板/统计里单独辨认；
-- 当日 daily 行与终态进度在试播路径允许覆盖（`openOrReuseTodayDaily` 的 `allowCompletedOverwrite` 与 `resetProgressForTest`）；
-- `recoverToNextEpisode` 对 armed 设备**不平移**（测试者必须听到自己选的那一集），记 `test_recovery_skipped` 事件后落回自由对话；
-- 试播不豁免 L1/L2 安全闸与内容熔断。
+- `POST episodes/:episodeId/test-assign`：下发当前集（`{deviceId, reason}`，优先锁草稿快照，否则锁当前发布版本，重置粘滞会话，留审计）；
+- `POST episodes/:episodeId/test-clear`：清除该设备当前下发（仅当它正是这一集，否则 409，留审计）；
+- `GET device-test/assignment/:deviceId`：读设备当前下发（prod 返回 `enabled=false`）。
 
-**管理台接口**（`analytics/adventure-admin/device-test/*`，dashboard 落地计划的预留后端）：
+写操作沿用 ContentAdminGuard（scope `adventure-content` + `CONTENT_ADMIN_PROFILE=authoring`）+ 环境闸三重保险，理由过 `assertReason`，动作留 `AdventureContentAuditLog`。
 
-- `GET device-test/state`：环境开关、TTL 与武装中设备列表（prod 返回 `enabled=false`）；
-- `GET device-test/sessions/:deviceId`：单台会话 + 最近 20 条试播事件；
-- `POST device-test/sessions`：武装（`{deviceId, title, reason}`，标题含草稿标题，重置粘滞会话，留审计）；
-- `POST device-test/sessions/:deviceId/restart`：同集从第 0 段重开（runSeq+1，留审计）；
-- `POST device-test/sessions/:deviceId/clear`：解除武装（留审计）。
-
-写操作沿用 ContentAdminGuard（scope `adventure-content` + `CONTENT_ADMIN_PROFILE=authoring`）+ `ADVENTURE_TEST_MODE_ENABLED` 环境闸三重保险，理由过 `assertReason`，动作留 `AdventureContentAuditLog`。
+**测试播放的行为差异**（以下发字段为前置条件，普通设备零影响）：每次触发词都从第 0 段重开（含 recap）；当日 daily 行允许覆盖完集状态（`openOrReuseTodayDaily` 的 `allowCompletedOverwrite`）；事件键带时间戳后缀避免重玩撞 `eventKey` 唯一约束；测试播放不走每日一集门禁、不走顺序选集，也不豁免 L1/L2 安全闸与内容熔断。
 
 **体验提示**：主链路（百度 RTC）无服务器推送通道，试播时交互点没有 10s 沉默兜底——停下就必须开口或说「不想玩了」；备用链路（vendor WS）有超时推送，行为不同属设计使然。

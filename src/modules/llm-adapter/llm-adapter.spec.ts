@@ -61,13 +61,13 @@ describe("LlmAdapterModule", () => {
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let adventure: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordEntryBlocked: jest.Mock;
     recordPresented: jest.Mock;
     markPromptPlaybackComplete: jest.Mock;
     registerTimeoutListener: jest.Mock;
-    tryTestTrigger: jest.Mock;
   };
 
   const makeStream = (chunks: string[]) =>
@@ -159,8 +159,8 @@ describe("LlmAdapterModule", () => {
     };
     adventure = {
       handleChildReply: jest.fn().mockResolvedValue(null),
+      tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
       startToday: jest.fn().mockResolvedValue(null),
-      tryTestTrigger: jest.fn().mockResolvedValue(null),
       isCompletedToday: jest.fn().mockResolvedValue(false),
       recordEntryBlocked: jest.fn().mockResolvedValue(undefined),
       recordPresented: jest.fn().mockResolvedValue(undefined),
@@ -567,67 +567,6 @@ describe("LlmAdapterModule", () => {
       // 降级锁定：新链路无推送通道，绝不启用 10s 沉默超时机制
       expect(adventure.markPromptPlaybackComplete).not.toHaveBeenCalled();
       expect(adventure.registerTimeoutListener).not.toHaveBeenCalled();
-    });
-
-    it("routes the device test trigger before the awaiting-reply takeover", async () => {
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      adventure.tryTestTrigger.mockResolvedValue({
-        texts: ["试播段落"],
-        action: "narrate",
-      });
-      const request: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "我想玩Elly与三个巨人" }],
-      };
-      const chunks = await collect(service.streamReply(request));
-      expect(chunks).toEqual(["试播段落"]);
-      expect(adventure.tryTestTrigger).toHaveBeenCalledWith(
-        "dev-internal-1",
-        "我想玩Elly与三个巨人",
-      );
-      // 触发词接管：等待态接管、意图分类、主模型全部跳过
-      expect(adventure.handleChildReply).not.toHaveBeenCalled();
-      expect(session.resolveWithSource).not.toHaveBeenCalled();
-      expect(llm.completeStream).not.toHaveBeenCalled();
-    });
-
-    it("falls through to the normal flow when the trigger returns null", async () => {
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_chat",
-        source: "model",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["ok"])());
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["ok"]);
-      expect(adventure.handleChildReply).toHaveBeenCalledWith(
-        "dev-internal-1",
-        "我想玩每日冒险",
-      );
-    });
-
-    it("degrades to the normal flow when the trigger check throws", async () => {
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      adventure.tryTestTrigger.mockRejectedValue(new Error("boom"));
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_chat",
-        source: "model",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["ok"])());
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["ok"]);
-    });
-
-    it("never consults the trigger on an L1-blocked turn", async () => {
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      childSafety.checkL1.mockReturnValue({
-        blocked: true,
-        category: "violence",
-        layer: null,
-        source: "l1_regex",
-      });
-      await collect(service.streamReply(boundRequest));
-      expect(adventure.tryTestTrigger).not.toHaveBeenCalled();
     });
 
     it("includes matchedChoice in assistant rawPayload when handleChildReply returns a match", async () => {

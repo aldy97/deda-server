@@ -27,9 +27,8 @@ services:
       # staging 是内容创作环境，放开写。prod 的 compose 不设这个变量 → 只读（fail-safe），
       # 内容必须在 staging 改好、验证过，再用管理台的导入功能搬过去。
       CONTENT_ADMIN_PROFILE: authoring
-      # 样机试播（仅测试环境）：staging 连接样机的冒险自由试玩开关。
+      # 测试冒险故事下发（仅测试环境）：staging 连接样机的冒险测试播放入口。
       # base/prod 刻意不转发（compose-env-gate.spec.ts 钉死）→ prod 永不可用。
-      # 未显式设为 true 时引擎行为与关掉完全一致（fail-safe）。
       ADVENTURE_TEST_MODE_ENABLED: 'true'
       # staging 容器 limit 1G，堆留 768M，其余给 Buffer/代码段/ARMS 探针
       NODE_OPTIONS: --max-old-space-size=768

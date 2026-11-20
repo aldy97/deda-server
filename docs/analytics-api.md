@@ -658,10 +658,11 @@ content = {
 ```
 GET /analytics/adventure-admin/capabilities
 → { season, characterKeys, interactionTypes, replyWaitingInteractionTypes, segmentKinds,
-    lintThresholds, simulationThresholds, fixedExitText, profile, authoring }
+    lintThresholds, simulationThresholds, fixedExitText, profile, authoring, testStoryEnabled }
    // 编辑器启动时先拿这个：枚举、阈值、能不能写，全部由服务端说了算，前端不硬编码
    // fixedExitText = 全局唯一的退出话术（孩子说「不想玩了」时念的那句）。
    // 看板只读展示，不得在前端内联这句话——单一真相源在服务端 adventure.constants
+   // testStoryEnabled = 测试冒险故事下发是否可用（ADVENTURE_TEST_MODE_ENABLED=true，仅 staging）
 
 GET /analytics/adventure-admin/episodes?characterKey=&published=&includeRetired=&search=&page=&pageSize=
 → { items: [EpisodeSummary], total }
@@ -831,6 +832,21 @@ body { reason, confirmText }
 → { episodeId, businessKey, discardedDraftCount, message }
    // 只能作废**从未发布过**的集；发布过的集请走 retire。
    // 实现为墓碑 + 草稿转 discarded，业务键**永久占用**，不能拿同一个集号重来。
+
+POST /analytics/adventure-admin/episodes/:episodeId/test-assign
+body { deviceId, reason }
+→ { ok, audited, assignment: { episodeId, title, episodeVersionId, versionStatus } }
+   // 仅 staging（ADVENTURE_TEST_MODE_ENABLED=true）。把当前集下发到设备，优先锁草稿快照，
+   // 否则锁当前发布版本。孩子说「测试冒险故事」即播放被下发的集，不限次数/顺序/阶段。
+
+POST /analytics/adventure-admin/episodes/:episodeId/test-clear
+body { deviceId, reason }
+→ { ok, audited }
+   // 清除设备当前下发；仅当它正是这一集（否则 409）。审计写失败只返回 audited=false。
+
+GET /analytics/adventure-admin/device-test/assignment/:deviceId
+→ { enabled, assignment: { device, episode, episodeVersion } | null }
+   // 读设备当前下发；prod（未启用）返回 { enabled: false, assignment: null }，不暴露明细。
 ```
 
 **本节没有任何 DELETE 路由**，服务层也没有 delete 方法（有结构性单测钉住这一点）。
