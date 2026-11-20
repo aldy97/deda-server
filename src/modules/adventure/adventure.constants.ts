@@ -215,7 +215,17 @@ export const ADVENTURE_TEST_TRIGGER_PREFIX = "我想玩";
 
 /** 触发词命中但标题未找到时的确定性话术：不走 LLM、不写库。 */
 export function adventureTestNotFoundText(title: string): string {
-  return `我没有找到叫「${title}」的冒险故事，请确认标题后，再完整说一遍「我想玩」加故事标题。`;
+  return `我没有找到叫「${title}」的冒险故事，请确认标题后，再完整说一遍「我想玩」加故事标题；也可以说「第几集」直接指定。`;
+}
+
+/** 多个候选同样可信时的确定性消歧话术：引导用集号或完整标题，绝不静默猜。 */
+export function adventureTestAmbiguousText(
+  candidates: ReadonlyArray<{ title: string; episodeNumber?: number | null }>,
+): string {
+  const list = candidates
+    .map((c) => `第${c.episodeNumber ?? "?"}集《${c.title}》`)
+    .join("、");
+  return `我找到了几集：${list}。请说「第几集」或再说一遍完整标题。`;
 }
 
 /** 测试轮事件 payload 的标记键：看板与后续统计可用它把试播轮次摘出来。 */
