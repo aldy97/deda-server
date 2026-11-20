@@ -88,9 +88,9 @@ describe("DeviceLinkService", () => {
       await flushPromises();
 
       expect(prisma.device.upsert).toHaveBeenCalledWith({
-        where: { deviceId: "AABBCCDDEEFF" },
-        create: { deviceId: "AABBCCDDEEFF", macAddress: "AABBCCDDEEFF" },
-        update: { macAddress: "AABBCCDDEEFF" },
+        where: { deviceId: "aabbccddeeff" },
+        create: { deviceId: "aabbccddeeff", macAddress: "aabbccddeeff" },
+        update: { macAddress: "aabbccddeeff" },
       });
 
       expect(redisService.setValue).toHaveBeenCalledWith(
@@ -428,7 +428,7 @@ describe("DeviceLinkService", () => {
       service.setVolume("AABBCCDDEEFF", 30);
 
       expect(mqttService.publish).toHaveBeenCalledWith(
-        "device/down/AABBCCDDEEFF",
+        "device/down/aabbccddeeff",
         JSON.stringify({
           cmd: "volume",
           flag: "success",
@@ -454,7 +454,7 @@ describe("DeviceLinkService", () => {
       service.requestStatus("AABBCCDDEEFF");
 
       expect(mqttService.publish).toHaveBeenCalledWith(
-        "device/down/AABBCCDDEEFF",
+        "device/down/aabbccddeeff",
         JSON.stringify({ cmd: "query", flag: "success", data: null }),
       );
     });
@@ -470,7 +470,7 @@ describe("DeviceLinkService", () => {
       expect(payloads).toEqual(["restart", "upgrade", "recover"]);
       expect(
         mqttService.publish.mock.calls.every(
-          (call: any[]) => call[0] === "device/down/AABBCCDDEEFF",
+          (call: any[]) => call[0] === "device/down/aabbccddeeff",
         ),
       ).toBe(true);
     });
