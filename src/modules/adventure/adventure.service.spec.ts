@@ -2470,7 +2470,7 @@ describe("AdventureService", () => {
       });
     });
 
-    it("触发词命中且有下发 → 从第 0 段播放并写 assigned/started 事件", async () => {
+    it("触发词命中（含 ASR 末尾标点）且有下发 → 从第 0 段播放并写 assigned/started 事件", async () => {
       enableTestStory();
       prisma.device.findUnique.mockResolvedValue({
         characterKey: "elly",
@@ -2480,7 +2480,7 @@ describe("AdventureService", () => {
 
       const reply = await service.tryTestStoryTrigger(
         "dev-uuid-1",
-        "测试冒险故事",
+        "测试冒险故事。",
       );
 
       expect(reply?.action).toBe("await_reply");

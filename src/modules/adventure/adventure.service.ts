@@ -650,9 +650,9 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 测试冒险故事的语音入口（两条对话链路共用）：固定触发词「测试冒险故事」，
-   * 命中即从第 0 段播放该设备下发的集；未下发返回确定性话术；不是触发词或
-   * 环境未开启返回 null，由链路层落回正常意图路由。任何异常都返回 null 落回
-   * 正常链路，绝不让这一轮静音。
+   * 包含匹配（容忍 ASR 在词后带句号等标点）。命中即从第 0 段播放该设备下发的集；
+   * 未下发返回确定性话术；不是触发词或环境未开启返回 null，由链路层落回正常
+   * 意图路由。任何异常都返回 null 落回正常链路，绝不让这一轮静音。
    */
   async tryTestStoryTrigger(
     deviceInternalId: string,
@@ -661,7 +661,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     if (!this.isTestStoryEnabled()) {
       return null;
     }
-    if ((asrText ?? "").trim() !== ADVENTURE_TEST_STORY_TRIGGER) {
+    if (!(asrText ?? "").includes(ADVENTURE_TEST_STORY_TRIGGER)) {
       return null;
     }
     try {

@@ -208,7 +208,7 @@ export const ADVENTURE_TEST_ENV = {
   enabled: "ADVENTURE_TEST_MODE_ENABLED",
 } as const;
 
-/** 测试冒险故事的语音触发词：ASR 文本 trim 后精确等于它即进入测试播放。 */
+/** 测试冒险故事的语音触发词：ASR 文本包含它即进入测试播放（容忍末尾标点）。 */
 export const ADVENTURE_TEST_STORY_TRIGGER = "测试冒险故事";
 
 /** 触发词命中但设备未下发任何集时的确定性话术：不走 LLM、不写库。 */
