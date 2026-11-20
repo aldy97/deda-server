@@ -958,7 +958,9 @@ describe("AdventureContentService", () => {
       prisma.adventureSegment.findMany.mockResolvedValue([]);
 
       await expect(
-        service.publish("ep1", actor, { reason: "payload 缺 segments 也不该崩" }),
+        service.publish("ep1", actor, {
+          reason: "payload 缺 segments 也不该崩",
+        }),
       ).resolves.toMatchObject({ versionId: "v3" });
     });
   });
@@ -1440,10 +1442,7 @@ describe("AdventureContentService", () => {
     const calls: Array<
       [string, (s: AdventureContentService) => Promise<unknown>]
     > = [
-      [
-        "createEpisode",
-        (s) => s.createEpisode(identity, content, actor),
-      ],
+      ["createEpisode", (s) => s.createEpisode(identity, content, actor)],
       ["saveDraft", (s) => s.saveDraft("ep1", content, actor)],
       ["publish", (s) => s.publish("ep1", actor)],
       ["revert", (s) => s.revert("ep1", "v1", actor)],
@@ -1469,11 +1468,9 @@ describe("AdventureContentService", () => {
   describe("assertImportable（跨环境导入的闸口，transfer 在 apply 前调用）", () => {
     it("treats a report without an issues array as clean", () => {
       expect(() =>
-        assertImportable(
-          identity,
-          content,
-          { ok: true } as unknown as LintReport,
-        ),
+        assertImportable(identity, content, {
+          ok: true,
+        } as unknown as LintReport),
       ).not.toThrow();
     });
 

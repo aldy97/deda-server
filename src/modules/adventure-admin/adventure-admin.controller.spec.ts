@@ -1,10 +1,6 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
-import {
-  Logger,
-  RequestMethod,
-  UnauthorizedException,
-} from "@nestjs/common";
+import { Logger, RequestMethod, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureContentService } from "./adventure-content.service";
@@ -913,10 +909,7 @@ describe("AdventureAdminController", () => {
         adminRequest(),
       );
 
-      expect(transfer.exportBundle).toHaveBeenCalledWith(
-        {},
-        expect.anything(),
-      );
+      expect(transfer.exportBundle).toHaveBeenCalledWith({}, expect.anything());
     });
 
     it("import applies the confirm token and expected hash from the preview", async () => {

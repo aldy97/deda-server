@@ -500,10 +500,7 @@ describe("adventure-linter", () => {
       const report = lintEpisode(
         identity,
         withChoices({
-          choices: [
-            { key: "forest", text: "森林", reply: "好" },
-            null,
-          ],
+          choices: [{ key: "forest", text: "森林", reply: "好" }, null],
         }),
       );
       expect(codes(report.errors)).not.toContain("CHOICE_TEXT_SUBSTRING");
@@ -663,18 +660,18 @@ describe("adventure-linter", () => {
 
   describe("畸形输入防御", () => {
     it("segments 不是数组 → 报 NO_SEGMENTS 而不是崩", () => {
-      const report = lintEpisode(
-        identity,
-        { title: "x", segments: "不是数组" } as unknown as EpisodeContentDraft,
-      );
+      const report = lintEpisode(identity, {
+        title: "x",
+        segments: "不是数组",
+      } as unknown as EpisodeContentDraft);
       expect(codes(report.errors)).toContain("NO_SEGMENTS");
     });
 
     it("title 不是字符串 → 按空标题报 TITLE_REQUIRED", () => {
-      const report = lintEpisode(
-        identity,
-        { title: 42, segments: [] } as unknown as EpisodeContentDraft,
-      );
+      const report = lintEpisode(identity, {
+        title: 42,
+        segments: [],
+      } as unknown as EpisodeContentDraft);
       expect(codes(report.errors)).toContain("TITLE_REQUIRED");
     });
 

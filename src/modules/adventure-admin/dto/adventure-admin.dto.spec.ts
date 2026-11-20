@@ -617,7 +617,9 @@ describe("DeviceTestArmDto / DeviceTestMutationDto — 样机试播入参外壳"
       props(await errorsOf(DeviceTestArmDto, { deviceId: "", title: "x" })),
     ).toContain("deviceId");
     expect(
-      props(await errorsOf(DeviceTestArmDto, { deviceId: "dev-1001", title: "" })),
+      props(
+        await errorsOf(DeviceTestArmDto, { deviceId: "dev-1001", title: "" }),
+      ),
     ).toContain("title");
   });
 

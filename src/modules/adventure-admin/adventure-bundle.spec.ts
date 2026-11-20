@@ -86,7 +86,9 @@ describe("adventure-bundle", () => {
     it("serializes a Date as its ISO string so hashes are stable across processes", () => {
       const date = new Date("2026-01-02T03:04:05.000Z");
       expect(canonicalJson(date)).toBe('"2026-01-02T03:04:05.000Z"');
-      expect(canonicalJson({ at: date })).toBe('{"at":"2026-01-02T03:04:05.000Z"}');
+      expect(canonicalJson({ at: date })).toBe(
+        '{"at":"2026-01-02T03:04:05.000Z"}',
+      );
     });
   });
 
@@ -330,7 +332,10 @@ describe("adventure-bundle", () => {
     });
 
     it("segments 不是数组或含非对象元素 → 按空处理，不崩", () => {
-      const noArray = toBundleEpisode(identity, content({ segments: undefined }));
+      const noArray = toBundleEpisode(
+        identity,
+        content({ segments: undefined }),
+      );
       expect(noArray.segments).toEqual([]);
 
       const withNull = toBundleEpisode(

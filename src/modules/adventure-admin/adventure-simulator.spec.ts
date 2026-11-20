@@ -339,13 +339,10 @@ describe("adventure-simulator", () => {
   });
 
   it("segments 不是数组时按空集处理，报 NO_SEGMENTS 而不是崩", () => {
-    const result = simulateEpisode(
-      identity,
-      {
-        title: "坏数据",
-        segments: "不是数组",
-      } as unknown as EpisodeContentDraft,
-    );
+    const result = simulateEpisode(identity, {
+      title: "坏数据",
+      segments: "不是数组",
+    } as unknown as EpisodeContentDraft);
     expect(result.beats).toEqual([]);
     expect(codes(result)).toContain("NO_SEGMENTS");
   });
@@ -353,7 +350,13 @@ describe("adventure-simulator", () => {
   it("segment.text 不是字符串时按空文本播，不崩", () => {
     const result = simulateEpisode(
       identity,
-      content([{ order: 0, kind: "narration", text: 42 } as unknown as EpisodeSegmentDraft]),
+      content([
+        {
+          order: 0,
+          kind: "narration",
+          text: 42,
+        } as unknown as EpisodeSegmentDraft,
+      ]),
     );
     expect(result.beats[0].says).toEqual([RECAP, ""]);
   });

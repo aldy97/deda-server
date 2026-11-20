@@ -317,7 +317,10 @@ describe("AdventureTransferService", () => {
     });
 
     it("exports by character when no episode ids are given (including an empty array)", async () => {
-      for (const selector of [{ characterKey: "elly" }, { characterKey: "elly", episodeIds: [] }]) {
+      for (const selector of [
+        { characterKey: "elly" },
+        { characterKey: "elly", episodeIds: [] },
+      ]) {
         await service.exportBundle(selector as never, actor);
         const where =
           prisma.adventureEpisode.findMany.mock.calls.at(-1)[0].where;
