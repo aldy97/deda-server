@@ -210,8 +210,8 @@ export const ADVENTURE_TEST_ENV = {
   enabled: "ADVENTURE_TEST_MODE_ENABLED",
 } as const;
 
-/** 语音触发前缀：ASR 文本以此开头，其后为完整集标题（草稿标题同样可命中）。 */
-export const ADVENTURE_TEST_TRIGGER_PREFIX = "我想玩";
+/** 语音触发前缀：ASR 文本以此开头，其后为完整集标题或标题片段（草稿标题同样可命中）。 */
+export const ADVENTURE_TEST_TRIGGER_PREFIXES = ["我想玩", "我要玩"] as const;
 
 /** 触发词命中但标题未找到时的确定性话术：不走 LLM、不写库。 */
 export function adventureTestNotFoundText(title: string): string {

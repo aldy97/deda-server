@@ -2894,6 +2894,15 @@ describe("AdventureService", () => {
         );
       });
 
+      it("starts when the spoken text is a substring of the title", async () => {
+        const reply = await service.startByTitle("dev-uuid-1", "三个巨人");
+        expect(reply?.texts).toContain(segments[0].text);
+        expect(testAccess.arm).toHaveBeenCalledWith(
+          "dev-uuid-1",
+          expect.objectContaining({ episodeId: "ep-voice" }),
+        );
+      });
+
       it("asks to disambiguate when two candidates are equally plausible", async () => {
         prisma.adventureEpisode.findMany.mockResolvedValue([
           { ...voicedEpisode, id: "ep-a", title: "三个巨人", episodeNumber: 3 },

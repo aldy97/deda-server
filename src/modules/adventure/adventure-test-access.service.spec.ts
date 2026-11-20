@@ -7,7 +7,7 @@ import {
 import {
   ADVENTURE_TEST_DEFAULTS,
   ADVENTURE_TEST_ENV,
-  ADVENTURE_TEST_TRIGGER_PREFIX,
+  ADVENTURE_TEST_TRIGGER_PREFIXES,
 } from "./adventure.constants";
 
 /**
@@ -148,25 +148,29 @@ describe("AdventureTestAccessService", () => {
       );
     });
 
-    it("returns the title after the prefix", () => {
-      expect(
-        service.matchTrigger(`${ADVENTURE_TEST_TRIGGER_PREFIX}Elly与三个巨人`),
-      ).toBe("Elly与三个巨人");
-    });
+    it.each(ADVENTURE_TEST_TRIGGER_PREFIXES)(
+      "returns the title after the %s prefix",
+      (prefix) => {
+        expect(service.matchTrigger(`${prefix}Elly与三个巨人`)).toBe(
+          "Elly与三个巨人",
+        );
+      },
+    );
 
-    it("trims surrounding whitespace from both the text and the title", () => {
-      expect(
-        service.matchTrigger(
-          `  ${ADVENTURE_TEST_TRIGGER_PREFIX} Elly与三个巨人  `,
-        ),
-      ).toBe("Elly与三个巨人");
-    });
+    it.each(ADVENTURE_TEST_TRIGGER_PREFIXES)(
+      "trims surrounding whitespace for the %s prefix",
+      (prefix) => {
+        expect(service.matchTrigger(`  ${prefix} Elly与三个巨人  `)).toBe(
+          "Elly与三个巨人",
+        );
+      },
+    );
 
     it("returns null when the prefix is missing or the title is empty", () => {
       expect(service.matchTrigger("我想听故事")).toBeNull();
-      expect(
-        service.matchTrigger(` ${ADVENTURE_TEST_TRIGGER_PREFIX} `),
-      ).toBeNull();
+      expect(service.matchTrigger("我要听故事")).toBeNull();
+      expect(service.matchTrigger("我想玩 ")).toBeNull();
+      expect(service.matchTrigger("我要玩 ")).toBeNull();
       expect(service.matchTrigger("")).toBeNull();
       expect(service.matchTrigger(null)).toBeNull();
       expect(service.matchTrigger(undefined)).toBeNull();
@@ -177,9 +181,8 @@ describe("AdventureTestAccessService", () => {
         fakeRedis.service,
         createConfig(),
       );
-      expect(
-        service.matchTrigger(`${ADVENTURE_TEST_TRIGGER_PREFIX}Elly与三个巨人`),
-      ).toBeNull();
+      expect(service.matchTrigger("我想玩Elly与三个巨人")).toBeNull();
+      expect(service.matchTrigger("我要玩Elly与三个巨人")).toBeNull();
     });
   });
 

@@ -25,7 +25,8 @@ export interface AdventureTestTitleCandidate {
   episodeVersionId?: string | null;
 }
 
-export type AdventureTestTitleMatchedBy = "exact" | "alias" | "fuzzy" | null;
+export type AdventureTestTitleMatchedBy =
+  "exact" | "alias" | "contains" | "fuzzy" | null;
 
 export interface AdventureTestTitleMatch {
   matched: AdventureTestTitleCandidate | null;
@@ -61,6 +62,12 @@ export const FUZZY_MIN_SCORE = 0.6;
 export const FUZZY_CONFIDENT_SCORE = 0.7;
 /** 第一名与第二名得分差距低于此值即视为歧义。 */
 export const AMBIGUITY_MARGIN = 0.25;
+
+/**
+ * 进入「标题包含口语片段」匹配层所需的最短片段长度（归一化后的字符数）。
+ * 单字片段（如「巨」「人」）会命中太多集，宁可落到下面的模糊层或 not-found。
+ */
+export const MIN_CONTAINS_LENGTH = 2;
 
 function stripEdgePunctuation(value: string): string {
   let start = 0;
@@ -153,19 +160,27 @@ export function matchTestTitle(
   }
 
   const exact: ScoredCandidate[] = [];
+  const contains: ScoredCandidate[] = [];
   const fuzzy: ScoredCandidate[] = [];
 
   for (const candidate of candidates) {
     const canonical = normalizeTestTitle(candidate.title);
     const aliases = (candidate.aliases ?? []).map(normalizeTestTitle);
-    const matchedBy: ScoredCandidate["matchedBy"] =
-      canonical === title
-        ? "exact"
-        : aliases.includes(title)
-          ? "alias"
-          : "fuzzy";
-    if (matchedBy === "exact" || matchedBy === "alias") {
-      exact.push({ candidate, score: 1, matchedBy });
+    if (canonical === title) {
+      exact.push({ candidate, score: 1, matchedBy: "exact" });
+      continue;
+    }
+    if (aliases.includes(title)) {
+      exact.push({ candidate, score: 1, matchedBy: "alias" });
+      continue;
+    }
+    // 标题包含口语片段（如说「三个巨人」命中「Elly与三个巨人」）。单字片段
+    // 会命中太多集，跳过；多集都包含时由下方的歧义分支兜住。
+    if (
+      title.length >= MIN_CONTAINS_LENGTH &&
+      (canonical.includes(title) || aliases.some((a) => a.includes(title)))
+    ) {
+      contains.push({ candidate, score: 1, matchedBy: "contains" });
       continue;
     }
     const dist = editDistance(title, canonical);
@@ -192,6 +207,24 @@ export function matchTestTitle(
       score: 1,
       ambiguous: true,
       candidates: exact.map((e) => e.candidate),
+    };
+  }
+  if (contains.length === 1) {
+    return {
+      matched: contains[0].candidate,
+      matchedBy: "contains",
+      score: 1,
+      ambiguous: false,
+      candidates: [contains[0].candidate],
+    };
+  }
+  if (contains.length > 1) {
+    return {
+      matched: null,
+      matchedBy: null,
+      score: 1,
+      ambiguous: true,
+      candidates: contains.map((c) => c.candidate),
     };
   }
 

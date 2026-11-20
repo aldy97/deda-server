@@ -173,7 +173,7 @@ type TestTitleResolveResult =
       kind: "found";
       episode: AdventureEpisode;
       episodeVersionId: string | null;
-      matchedBy: "exact" | "alias" | "fuzzy" | "episode_number";
+      matchedBy: "exact" | "alias" | "contains" | "fuzzy" | "episode_number";
     }
   | { kind: "ambiguous"; candidates: AdventureTestTitleCandidate[] }
   | { kind: "none"; normalizedTitle: string };
@@ -799,7 +799,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     const [published, drafts] = await Promise.all([
       this.prisma.adventureEpisode.findMany({
         where: { characterKey },
-        orderBy: { season: "asc", episodeNumber: "asc" },
+        orderBy: [{ season: "asc" }, { episodeNumber: "asc" }],
       }),
       this.prisma.adventureEpisodeVersion.findMany({
         where: { status: "draft", episode: { characterKey } },
@@ -893,7 +893,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   } | null> {
     const episodes = await this.prisma.adventureEpisode.findMany({
       where: { characterKey, title },
-      orderBy: { season: "asc", episodeNumber: "asc" },
+      orderBy: [{ season: "asc" }, { episodeNumber: "asc" }],
     });
     if (episodes.length > 0) {
       const episode = episodes[0];
