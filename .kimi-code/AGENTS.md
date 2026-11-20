@@ -47,6 +47,19 @@
    `.github/pr-hygiene.json` 与 `PULL_REQUEST_TEMPLATE/` 两处。
 9. PR 有未勾的「合并到 staging 后需要人工点」项时，创建时带 `--label 人工验证`。
 
+## adventure-admin 覆盖率闸口（2026-11-20 起）
+
+10. `package.json` 的 `jest.coverageThreshold` 只圈 `./src/modules/adventure-admin/`——产品主打、全仓最复杂模块。
+    下限：lines / statements / functions ≥ 95、branches ≥ 95（写入时实测 99.7 / 99.7 / 99.6 / 98.5，
+    留了 3 个点以上的余量）。阈值**只准上调、不许下调**：新代码掉线就补测试，禁止用降阈值过闸。
+11. 该阈值只在收集覆盖率时被评估：本地验收与 CI 一律 `npm run test:cov`（`npm run test` 装了闸不评估，
+    等于不通电）。`ci.yml` 已把 `npm run test` 换成 `npm run test:cov`，不得改回去。
+12. 该模块的 HTTP 级集成测试目前为 0（25 个端点挂在 `/analytics/adventure-admin` 下，`test/` 下 grep
+    不到一个调用；现有 controller 41 例全是全 mock 单测）。这是已知债务，补救方案另行立项，不在本闸口
+    范围内，也不许用「把 e2e 合并进度量」的方式绕过。已知不可达的防御分支（如 import 流程里
+    `contentByKey` 与 bundle 同源导致的 `if (!entry) continue`、`describeBlockingError` 的数组
+    message 兜底）是度量的少数例外，若改动让它们可达，一律按新代码补测。
+
 ## 子任务验收命令（多代理协作协议第 3 条锚点）
 
 主代理审查子代理产出时，必须亲自运行：

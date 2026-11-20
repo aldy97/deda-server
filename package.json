@@ -113,6 +113,14 @@
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
+    "coverageThreshold": {
+      "./src/modules/adventure-admin/": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      }
+    },
     "testEnvironment": "node"
   },
   "engines": {
