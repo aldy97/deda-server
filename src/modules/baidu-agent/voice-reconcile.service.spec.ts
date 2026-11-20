@@ -925,4 +925,89 @@ describe("VoiceReconcileService", () => {
       expect(service.getTimbreForCharacter("ok")).toBe("1000063");
     });
   });
+
+  // ==========================================================================
+  // applySpd（哄睡临时降速：直接给倍数，不校验音色目录、不走语速档位）
+  // ==========================================================================
+  describe("applySpd", () => {
+    const setupActiveInstance = () => {
+      redis.getValue
+        .mockResolvedValueOnce(INSTANCE_ID) // botCurrentKey
+        .mockResolvedValueOnce(buildBotInstanceRecord()); // botInstanceKey
+    };
+
+    beforeEach(() => {
+      (buildTtsConfig as jest.Mock).mockReturnValue(
+        'DEFAULT{"vcn":"1000957","spd":0.7}',
+      );
+    });
+
+    it("should return disabled deferred when client disabled", async () => {
+      mockClient.enabled = false;
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+      expect(result).toEqual({ applied: "deferred", reason: "disabled" });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("should return no_active_instance deferred when no current instance", async () => {
+      redis.getValue.mockResolvedValueOnce(null);
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+      expect(result).toEqual({
+        applied: "deferred",
+        reason: "no_active_instance",
+      });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("should return incomplete_tts_target deferred when vcn empty", async () => {
+      setupActiveInstance();
+      const result = await service.applySpd(MAC, "", 0.7);
+      expect(result).toEqual({
+        applied: "deferred",
+        reason: "incomplete_tts_target",
+      });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("should return invalid_request deferred when spd out of range", async () => {
+      setupActiveInstance();
+      const result = await service.applySpd(MAC, "1000957", 3);
+      expect(result).toEqual({
+        applied: "deferred",
+        reason: "invalid_request",
+      });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("should return live and pass spd to switchSceneRole", async () => {
+      setupActiveInstance();
+      mockClient.switchSceneRole.mockResolvedValue({ ok: true } as const);
+
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(result).toEqual({ applied: "live" });
+      expect(mockClient.switchSceneRole).toHaveBeenCalledTimes(1);
+      expect(mockClient.switchSceneRole).toHaveBeenCalledWith({
+        appId: "app-001",
+        instanceId: INSTANCE_ID,
+        tts: 'DEFAULT{"vcn":"1000957","spd":0.7}',
+        lang: "zh",
+        authString: "bce-auth-v1/.../role-sig",
+        cloudNode: "cn",
+      });
+    });
+
+    it("should return deferred upstream_error when switchSceneRole fails", async () => {
+      setupActiveInstance();
+      mockClient.switchSceneRole.mockResolvedValue({
+        ok: false,
+        reason: "upstream_error",
+        detail: "timeout",
+      });
+
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(result).toEqual({ applied: "deferred", reason: "upstream_error" });
+    });
+  });
 });

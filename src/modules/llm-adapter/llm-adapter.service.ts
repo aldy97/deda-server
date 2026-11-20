@@ -22,6 +22,7 @@ import {
 } from "@/modules/vendor/conversation-session.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import {
   AdventureReply,
   AdventureService,
@@ -132,6 +133,7 @@ export class LlmAdapterService {
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
     private readonly turnDecisions: TurnDecisionRecorder,
+    private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
@@ -466,6 +468,7 @@ export class LlmAdapterService {
     let sleepContentDegraded: SleepContentDegradation | null = null;
     if (device && intent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, asrText);
+      await this.sleepMode.enter(device.id);
       sleepContentDegraded = await this.resolveSleepContentDegradation(
         device.id,
       );

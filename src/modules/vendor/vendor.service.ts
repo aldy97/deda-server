@@ -13,6 +13,7 @@ import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { LlmMessage } from "@/modules/llm/llm.service";
 import {
   AdventureReply,
@@ -49,6 +50,7 @@ export class VendorService {
     private readonly childSafetyService: ChildSafetyService,
     private readonly sleepConfigsService: SleepConfigsService,
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
+    private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
   ) {
     this.adventureService.registerTimeoutListener(
@@ -346,6 +348,7 @@ export class VendorService {
 
     if (storyIntent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, dto.asrText);
+      await this.sleepMode.enter(device.id);
     }
 
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。

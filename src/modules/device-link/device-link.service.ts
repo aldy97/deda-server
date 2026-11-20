@@ -191,11 +191,13 @@ export class DeviceLinkService implements OnModuleInit {
     }
 
     const mac = this.normalizeMac(message.device);
+    // Prisma 侧 deviceId / macAddress 一律小写（docs/integration.md）；mac 的大写口径只用于 Redis key
+    const deviceId = mac.toLowerCase();
     this.prisma.device
       .upsert({
-        where: { deviceId: mac },
-        create: { deviceId: mac, macAddress: mac },
-        update: { macAddress: mac },
+        where: { deviceId },
+        create: { deviceId, macAddress: deviceId },
+        update: { macAddress: deviceId },
       })
       .then(() => this.touch(mac))
       .catch((err: Error) => {
@@ -306,13 +308,14 @@ export class DeviceLinkService implements OnModuleInit {
     cmd: DeviceLinkCommand,
     data: object | null,
   ): void {
-    const normalized = this.normalizeMac(mac);
+    // 下行 topic 必须用小写（协议「无分隔十二位小写十六进制」）；normalizeMac 的大写口径只用于 Redis key
+    const topicMac = this.normalizeMac(mac).toLowerCase();
     const message: DeviceLinkMessage = { cmd, flag: "success", data };
     this.mqttService.publish(
-      deviceDownTopic(normalized),
+      deviceDownTopic(topicMac),
       JSON.stringify(message),
     );
-    this.logger.log(`Published ${cmd} to ${deviceDownTopic(normalized)}`);
+    this.logger.log(`Published ${cmd} to ${deviceDownTopic(topicMac)}`);
   }
 
   private isOnline(lastSeenAt: number | null): boolean {

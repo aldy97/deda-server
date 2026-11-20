@@ -13,6 +13,7 @@ import { ChildMemoriesService } from "@/modules/child-memories/child-memories.se
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
@@ -59,6 +60,7 @@ describe("LlmAdapterModule", () => {
   let turnDecisions: { record: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
   let adventure: {
     handleChildReply: jest.Mock;
     tryTestStoryTrigger: jest.Mock;
@@ -157,6 +159,7 @@ describe("LlmAdapterModule", () => {
       applyVoiceUpdate: jest.fn().mockResolvedValue({}),
       getByDeviceId: jest.fn().mockResolvedValue({ contentType: "story" }),
     };
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     adventure = {
       handleChildReply: jest.fn().mockResolvedValue(null),
       tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
@@ -179,6 +182,7 @@ describe("LlmAdapterModule", () => {
         { provide: ConversationSessionService, useValue: session },
         { provide: SleepVoiceConfigService, useValue: sleepVoice },
         { provide: SleepConfigsService, useValue: sleepConfigs },
+        { provide: SleepModeService, useValue: sleepMode },
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
@@ -324,6 +328,7 @@ describe("LlmAdapterModule", () => {
           promptTemplate: expect.stringContaining("哄睡"),
         }),
       );
+      expect(sleepMode.enter).toHaveBeenCalledWith("dev-internal-1");
     });
 
     /**
@@ -1919,6 +1924,7 @@ describe("LlmAdapterModule", () => {
           { provide: ConversationSessionService, useValue: session },
           { provide: SleepVoiceConfigService, useValue: sleepVoice },
           { provide: SleepConfigsService, useValue: sleepConfigs },
+          { provide: SleepModeService, useValue: sleepMode },
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
