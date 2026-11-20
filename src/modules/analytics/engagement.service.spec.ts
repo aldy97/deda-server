@@ -295,4 +295,139 @@ describe("EngagementService", () => {
   it("shiftReportDate 可用性自检", () => {
     expect(shiftReportDate("2026-11-05", -1)).toBe("2026-11-04");
   });
+
+  describe("边界补测", () => {
+    const empty = () => ({
+      messages: [],
+      bindings: [],
+      sleepConfigs: [],
+      adventureProgresses: [],
+      habitPlans: [],
+    });
+
+    it("summary：零活跃设备 → 均值/分位为 0", async () => {
+      const service = await buildService(buildPrisma(empty()));
+      const result = await service.getSummary({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.activeDevices).toBe(0);
+      expect(result.avgDurationSecondsPerDevice).toBe(0);
+      expect(result.avgTurnsPerDevice).toBe(0);
+      expect(result.avgActiveDaysPerDevice).toBe(0);
+      expect(result.durationP50Seconds).toBe(0);
+    });
+
+    it("duration-distribution：单设备按秒数分桶", async () => {
+      const service = await buildService(
+        buildPrisma({
+          ...empty(),
+          messages: [
+            {
+              deviceId: "d1",
+              role: "user",
+              spokeAt: new Date("2026-11-04T12:00:00Z"),
+            },
+          ],
+        }),
+      );
+      const result = await service.getDurationDistribution({
+        date: "2026-11-04",
+      });
+      expect(result.buckets.length).toBe(5);
+      expect(result.buckets[0].devices).toBe(1);
+    });
+
+    it("mode-usage：mode 为 null → 回落 unknown", async () => {
+      const service = await buildService(
+        buildPrisma({
+          ...empty(),
+          messages: [
+            {
+              deviceId: "d1",
+              role: "user",
+              spokeAt: new Date("2026-11-04T12:00:00Z"),
+              mode: null,
+            },
+          ],
+        }),
+      );
+      const result = await service.getModeUsage({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.series[0].modes[0].mode).toBe("unknown");
+    });
+
+    it("mode-usage：同 turns 时按 mode 名排序", async () => {
+      const service = await buildService(
+        buildPrisma({
+          ...empty(),
+          messages: [
+            {
+              deviceId: "d1",
+              role: "user",
+              spokeAt: new Date("2026-11-04T12:00:00Z"),
+              mode: "b_mode",
+            },
+            {
+              deviceId: "d1",
+              role: "user",
+              spokeAt: new Date("2026-11-04T13:00:00Z"),
+              mode: "a_mode",
+            },
+          ],
+        }),
+      );
+      const result = await service.getModeUsage({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.series[0].modes.map((m) => m.mode)).toEqual([
+        "a_mode",
+        "b_mode",
+      ]);
+    });
+
+    it("feature-adoption：无绑定设备 → 渗透率/完成率全 null", async () => {
+      const service = await buildService(buildPrisma(empty()));
+      const result = await service.getFeatureAdoption({ date: "2026-11-04" });
+      expect(result.features.every((f) => f.penetrationRate === null)).toBe(
+        true,
+      );
+      expect(
+        result.features.find((f) => f.key === "adventure")!.completionRate,
+      ).toBeNull();
+      expect(
+        result.features.find((f) => f.key === "habit_plan")!.avgCompletionRate,
+      ).toBeNull();
+    });
+
+    it("feature-adoption：targetDays 0 的 habit 完成率不除零", async () => {
+      const service = await buildService(
+        buildPrisma({
+          ...empty(),
+          bindings: [{ deviceId: "d1" }],
+          habitPlans: [
+            {
+              deviceId: "d1",
+              targetDays: 0,
+              dailyRecords: [],
+              status: "active",
+            },
+          ],
+        }),
+      );
+      const result = await service.getFeatureAdoption({ date: "2026-11-04" });
+      expect(
+        result.features.find((f) => f.key === "habit_plan")!.avgCompletionRate,
+      ).not.toBeNull();
+    });
+
+    it("resolveDate：未提供 date 时回落昨日", async () => {
+      const service = await buildService(buildPrisma(empty()));
+      const result = await service.getDurationDistribution({});
+      expect(result.date).toBeTruthy();
+    });
+  });
 });

@@ -1179,6 +1179,239 @@ describe("ContentService", () => {
       expect(json).not.toContain("deviceId");
     });
   });
+
+  describe("边界补测", () => {
+    it("adventure：带完整日期区间 → 走 rangeFilter 过滤路径", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          progresses: [
+            {
+              deviceId: "d1",
+              episodeId: "e1",
+              status: "completed",
+              stars: 2,
+              episode: { title: "森林" },
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+          ],
+        }),
+      );
+      const result = await content.getAdventure({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.completedEpisodes).toBe(1);
+    });
+
+    it("adventure：零进度 → completionRate/avgStarsPerEpisode 为 null", async () => {
+      const { content } = await buildServices(buildPrisma({ progresses: [] }));
+      const result = await content.getAdventure({});
+      expect(result.completionRate).toBeNull();
+      expect(result.avgStarsPerEpisode).toBeNull();
+      expect(result.startedDevices).toBe(0);
+    });
+
+    it("adventure-choices：payload 非对象 / 非 two_choice → 不计入 interaction", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          adventureEvents: [
+            {
+              eventType: "answered",
+              episodeId: "e1",
+              segmentOrder: 1,
+              payload: null,
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+            {
+              eventType: "answered",
+              episodeId: "e1",
+              segmentOrder: 1,
+              payload: { interactionType: "open_question" },
+              createdAt: spokeAtOn("2026-11-01", 13),
+            },
+          ],
+          adventureEpisodes: [{ id: "e1", title: "森林" }],
+          adventureEpisodeVersions: [],
+        }),
+      );
+      const result = await content.getAdventureChoices({});
+      expect(result.totalInteractions).toBe(0);
+    });
+
+    it("adventure-choices：source 非 llm/deterministic → sourceCounts 均 0", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          adventureEvents: [
+            {
+              eventType: "choice_matched",
+              episodeId: "e1",
+              episodeVersionId: "v1",
+              segmentOrder: 1,
+              payload: { index: 0, source: "unknown", key: "a" },
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+          ],
+          adventureEpisodes: [{ id: "e1", title: "森林" }],
+          adventureEpisodeVersions: [
+            {
+              id: "v1",
+              payload: {
+                segments: [
+                  {
+                    order: 1,
+                    options: { choices: [{ key: "a", text: "红" }] },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+      const result = await content.getAdventureChoices({});
+      expect(result.matchedTotal).toBe(1);
+      expect(result.sourceCounts).toEqual({ deterministic: 0, llm: 0 });
+    });
+
+    it("adventure-choices：choices[index] 越界 → text 为 null", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          adventureEvents: [
+            {
+              eventType: "choice_matched",
+              episodeId: "e1",
+              episodeVersionId: "v1",
+              segmentOrder: 1,
+              payload: { index: 5, source: "llm", key: null },
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+          ],
+          adventureEpisodes: [{ id: "e1", title: "森林" }],
+          adventureEpisodeVersions: [
+            {
+              id: "v1",
+              payload: {
+                segments: [
+                  {
+                    order: 1,
+                    options: { choices: [{ key: "a", text: "红" }] },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+      const result = await content.getAdventureChoices({});
+      expect(result.byEpisode[0].choices[0].text).toBeNull();
+    });
+
+    it("adventure-choices：episode 不在 titleMap → 标题回落 '未知'", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          adventureEvents: [
+            {
+              eventType: "answered",
+              episodeId: "e-unknown",
+              segmentOrder: 1,
+              payload: { interactionType: "two_choice" },
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+          ],
+          adventureEpisodes: [],
+          adventureEpisodeVersions: [],
+        }),
+      );
+      const result = await content.getAdventureChoices({});
+      expect(result.byEpisode[0].title).toBe("未知");
+    });
+
+    it("adventure-choices：segmentOrder null 的 choice 排在最后", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          adventureEvents: [
+            {
+              eventType: "choice_matched",
+              episodeId: "e1",
+              episodeVersionId: "v1",
+              segmentOrder: null,
+              payload: { index: 0, source: "llm", key: "a" },
+              createdAt: spokeAtOn("2026-11-01"),
+            },
+            {
+              eventType: "choice_matched",
+              episodeId: "e1",
+              episodeVersionId: "v1",
+              segmentOrder: 1,
+              payload: { index: 1, source: "llm", key: "b" },
+              createdAt: spokeAtOn("2026-11-01", 13),
+            },
+          ],
+          adventureEpisodes: [{ id: "e1", title: "森林" }],
+          adventureEpisodeVersions: [
+            {
+              id: "v1",
+              payload: {
+                segments: [
+                  {
+                    order: 1,
+                    options: {
+                      choices: [
+                        { key: "a", text: "红" },
+                        { key: "b", text: "蓝" },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+      const result = await content.getAdventureChoices({});
+      // segmentOrder 非 null 的排前，null 的排后
+      expect(result.byEpisode[0].choices[0].segmentOrder).toBe(1);
+      expect(result.byEpisode[0].choices[1].segmentOrder).toBeNull();
+    });
+
+    it("learning：targetDays 0 / 无活跃设备", async () => {
+      const { content } = await buildServices(
+        buildPrisma({
+          stats: [],
+          messages: [],
+          habitPlans: [{ status: "active", targetDays: 0, dailyRecords: [] }],
+        }),
+      );
+      const result = await content.getLearning({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.avgNewWordsPerActiveDevice).toBe(0);
+      expect(result.habitCompletionRate).not.toBeNull();
+    });
+
+    it("learning：无习惯计划 → habitCompletionRate 为 null", async () => {
+      const { content } = await buildServices(
+        buildPrisma({ stats: [], messages: [], habitPlans: [] }),
+      );
+      const result = await content.getLearning({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.habitCompletionRate).toBeNull();
+    });
+
+    it("parent-report：generated 0 / 无反馈 → successRate/usefulRate 为 null", async () => {
+      const { content } = await buildServices(
+        buildPrisma({ reports: [], feedbacks: [] }),
+      );
+      const result = await content.getParentReport({
+        startDate: "2026-11-01",
+        endDate: "2026-11-05",
+      });
+      expect(result.successRate).toBeNull();
+      expect(result.usefulRate).toBeNull();
+    });
+  });
 });
 
 describe("QualityService", () => {
