@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { AdventureService } from "./adventure.service";
+import { AdventureTestAccessService } from "./adventure-test-access.service";
 import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
 
 /**
@@ -106,6 +107,17 @@ describe("AdventureService · 游玩交互契约", () => {
           },
         },
         { provide: ConfigService, useValue: { get: jest.fn() } },
+        {
+          provide: AdventureTestAccessService,
+          useValue: {
+            isEnabled: jest.fn().mockReturnValue(false),
+            matchTrigger: jest.fn().mockReturnValue(null),
+            peek: jest.fn().mockResolvedValue(null),
+            arm: jest.fn(),
+            clear: jest.fn(),
+            listArmed: jest.fn().mockResolvedValue([]),
+          },
+        },
       ],
     }).compile();
 
