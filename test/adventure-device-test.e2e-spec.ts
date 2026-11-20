@@ -277,4 +277,15 @@ describe("Adventure device test (e2e)", () => {
       progressCreates.some((p) => p.episodeVersionId === "v-draft-9"),
     ).toBe(true);
   });
+
+  it("starts the episode despite a trailing period in the ASR title", async () => {
+    prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
+    prisma.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+
+    const content = await chatCompletions("我想玩听风原野第一天。");
+
+    expect(content).toBe(
+      [episode.recap, segments[0].text, segments[1].text].join(""),
+    );
+  });
 });

@@ -2827,5 +2827,98 @@ describe("AdventureService", () => {
       expect(await service.restartTestRun("dev-uuid-1")).toBeNull();
       expect(testAccess.arm).not.toHaveBeenCalled();
     });
+
+    describe("voice title matching（ASR 容错）", () => {
+      const voicedEpisode = {
+        ...episode,
+        id: "ep-voice",
+        title: "Elly与三个巨人",
+        episodeNumber: 3,
+      };
+
+      beforeEach(() => {
+        enableTestMode();
+        prisma.adventureEpisode.findMany.mockResolvedValue([voicedEpisode]);
+        prisma.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+        prisma.adventureDailyRecord.findUnique.mockResolvedValue(null);
+        prisma.adventureProgress.findFirst.mockResolvedValue(null);
+        testAccess.arm.mockResolvedValue({
+          ...testSession,
+          episodeId: "ep-voice",
+          title: "Elly与三个巨人",
+        });
+      });
+
+      it("starts the episode despite a trailing period in the ASR title", async () => {
+        const reply = await service.startByTitle(
+          "dev-uuid-1",
+          "Elly与三个巨人。",
+        );
+        expect(reply?.texts).toContain(segments[0].text);
+        expect(testAccess.arm).toHaveBeenCalledWith(
+          "dev-uuid-1",
+          expect.objectContaining({ episodeId: "ep-voice" }),
+        );
+      });
+
+      it("starts the episode when the IP name is transliterated by ASR", async () => {
+        const reply = await service.startByTitle(
+          "dev-uuid-1",
+          "艾丽与三个巨人",
+        );
+        expect(reply?.texts).toContain(segments[0].text);
+        expect(testAccess.arm).toHaveBeenCalledWith(
+          "dev-uuid-1",
+          expect.objectContaining({ episodeId: "ep-voice" }),
+        );
+      });
+
+      it("starts the episode by number shortcut", async () => {
+        const reply = await service.startByTitle("dev-uuid-1", "第3集");
+        expect(reply?.texts).toContain(segments[0].text);
+        expect(testAccess.arm).toHaveBeenCalledWith(
+          "dev-uuid-1",
+          expect.objectContaining({ episodeId: "ep-voice" }),
+        );
+      });
+
+      it("starts via a fuzzy single-char slip", async () => {
+        const reply = await service.startByTitle(
+          "dev-uuid-1",
+          "艾丽与三歌巨人",
+        );
+        expect(reply?.texts).toContain(segments[0].text);
+        expect(testAccess.arm).toHaveBeenCalledWith(
+          "dev-uuid-1",
+          expect.objectContaining({ episodeId: "ep-voice" }),
+        );
+      });
+
+      it("asks to disambiguate when two candidates are equally plausible", async () => {
+        prisma.adventureEpisode.findMany.mockResolvedValue([
+          { ...voicedEpisode, id: "ep-a", title: "三个巨人", episodeNumber: 3 },
+          { ...voicedEpisode, id: "ep-b", title: "三只巨人", episodeNumber: 4 },
+        ]);
+
+        const reply = await service.startByTitle("dev-uuid-1", "三棵巨人");
+
+        expect(reply?.action).toBe("narrate");
+        expect(reply?.texts[0]).toContain("第3集");
+        expect(reply?.texts[0]).toContain("第4集");
+        expect(testAccess.arm).not.toHaveBeenCalled();
+      });
+
+      it("replies not-found with the normalized title and the number hint", async () => {
+        prisma.adventureEpisode.findMany.mockResolvedValue([]);
+
+        const reply = await service.startByTitle(
+          "dev-uuid-1",
+          "不存在的故事。",
+        );
+
+        expect(reply?.texts[0]).toBe(adventureTestNotFoundText("不存在的故事"));
+        expect(reply?.texts[0]).toContain("第几集");
+      });
+    });
   });
 });

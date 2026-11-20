@@ -12,6 +12,7 @@ import {
   ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   ADVENTURE_EXIT_TEXT,
+  adventureTestAmbiguousText,
   adventureTestNotFoundText,
   AdventureFailurePhase,
   AdventureFailureReport,
@@ -26,6 +27,12 @@ import {
   AdventureTestAccessService,
   AdventureTestSession,
 } from "./adventure-test-access.service";
+import {
+  AdventureTestTitleCandidate,
+  matchTestTitle,
+  normalizeTestTitle,
+  parseTestEpisodeShortcut,
+} from "./adventure-test-title-matcher";
 import {
   AdventureDailyRecord,
   AdventureEpisode,
@@ -159,6 +166,17 @@ const CHARACTER_PERSONAS: Record<string, string> = {
   polly:
     "小马 Polly：听风原野的居民，性格开朗勇敢，说话活泼简洁，喜欢邀请孩子一起尝试，也爱鼓励孩子。",
 };
+
+/** 语音触发标题解析的三态结果（只在样机试播路径出现，不进对外契约）。 */
+type TestTitleResolveResult =
+  | {
+      kind: "found";
+      episode: AdventureEpisode;
+      episodeVersionId: string | null;
+      matchedBy: "exact" | "alias" | "fuzzy" | "episode_number";
+    }
+  | { kind: "ambiguous"; candidates: AdventureTestTitleCandidate[] }
+  | { kind: "none"; normalizedTitle: string };
 
 /**
  * 冒险引擎：故事是数据不是 prompt。
@@ -731,12 +749,22 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
     const characterKey = await this.getCharacterKey(deviceInternalId);
-    const match = await this.resolveTitleToEpisode(characterKey, title);
-    if (!match) {
+    const resolved = await this.resolveTestTitleByVoice(characterKey, title);
+    if (resolved.kind === "none") {
       // 确定性话术，不走 LLM、不写库、不武装。
-      return { texts: [adventureTestNotFoundText(title)], action: "narrate" };
+      return {
+        texts: [adventureTestNotFoundText(resolved.normalizedTitle)],
+        action: "narrate",
+      };
     }
-    const { episode, episodeVersionId } = match;
+    if (resolved.kind === "ambiguous") {
+      // 歧义绝不静默猜：列出候选，引导用「第N集」或完整标题消歧。
+      return {
+        texts: [adventureTestAmbiguousText(resolved.candidates)],
+        action: "narrate",
+      };
+    }
+    const { episode, episodeVersionId } = resolved;
     const session = await this.testAccess.arm(deviceInternalId, {
       episodeId: episode.id,
       episodeVersionId,
@@ -760,10 +788,101 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 标题 → 集的解析（仅试播环境）：先按已发布标题列精确匹配（同 characterKey
-   * 下按 season/episodeNumber 升序取第一个），未命中再扫草稿版本 payload 的
-   * 标题。草稿命中时返回的 versionId 指向草稿版本行——引擎的版本锁定机制
-   * 天然支持播未发布快照。跨 IP 同名不匹配（只认本设备 characterKey）。
+   * 语音触发的结果：确定性唯一命中 / 歧义（须消歧）/ 未命中。
+   * matchedBy 供日志与看板观察识别质量，不进任何对外契约。
+   */
+  private resolveTestTitleByVoice = async (
+    characterKey: string,
+    title: string,
+  ): Promise<TestTitleResolveResult> => {
+    const normalized = normalizeTestTitle(title);
+    const [published, drafts] = await Promise.all([
+      this.prisma.adventureEpisode.findMany({
+        where: { characterKey },
+        orderBy: { season: "asc", episodeNumber: "asc" },
+      }),
+      this.prisma.adventureEpisodeVersion.findMany({
+        where: { status: "draft", episode: { characterKey } },
+        select: { id: true, payload: true, episode: true },
+      }),
+    ]);
+
+    // 每个集一个候选身份：有草稿则用草稿（标题 + 版本），否则用已发布（标题 + 当前版本）。
+    // 试播要验证的是「最新内容」，草稿优先符合这个意图，也顺带让同一集不会因
+    // 「已发布标题 == 草稿标题」被误判成歧义。
+    const episodeById = new Map<string, AdventureEpisode>();
+    const candidateByEpisode = new Map<string, AdventureTestTitleCandidate>();
+    for (const episode of published) {
+      episodeById.set(episode.id, episode);
+      candidateByEpisode.set(episode.id, {
+        episodeId: episode.id,
+        title: episode.title,
+        episodeNumber: episode.episodeNumber,
+        season: episode.season,
+        episodeVersionId: episode.currentVersionId ?? null,
+      });
+    }
+    for (const draft of drafts) {
+      const payloadTitle = (draft.payload as { title?: unknown } | null)?.title;
+      if (typeof payloadTitle !== "string" || !payloadTitle.trim()) {
+        continue;
+      }
+      episodeById.set(draft.episode.id, draft.episode);
+      candidateByEpisode.set(draft.episode.id, {
+        episodeId: draft.episode.id,
+        title: payloadTitle.trim(),
+        episodeNumber: draft.episode.episodeNumber,
+        season: draft.episode.season,
+        episodeVersionId: draft.id,
+      });
+    }
+    const candidates = [...candidateByEpisode.values()];
+
+    // 集号短口令：确定性退路，也用于消歧。
+    const shortcut = parseTestEpisodeShortcut(normalized);
+    if (shortcut !== null) {
+      const found =
+        candidates.find(
+          (c) => c.season === 1 && c.episodeNumber === shortcut,
+        ) ?? candidates.find((c) => c.episodeNumber === shortcut);
+      if (found) {
+        const episode = episodeById.get(found.episodeId);
+        if (episode) {
+          return {
+            kind: "found",
+            episode,
+            episodeVersionId:
+              found.episodeVersionId ?? episode.currentVersionId ?? null,
+            matchedBy: "episode_number",
+          };
+        }
+      }
+      return { kind: "none", normalizedTitle: normalized };
+    }
+
+    const match = matchTestTitle(normalized, candidates);
+    if (match.matched && !match.ambiguous) {
+      const episode = episodeById.get(match.matched.episodeId);
+      if (episode) {
+        return {
+          kind: "found",
+          episode,
+          episodeVersionId:
+            match.matched.episodeVersionId ?? episode.currentVersionId ?? null,
+          matchedBy: match.matchedBy,
+        };
+      }
+    }
+    if (match.ambiguous) {
+      return { kind: "ambiguous", candidates: match.candidates };
+    }
+    return { kind: "none", normalizedTitle: normalized };
+  };
+
+  /**
+   * 标题 → 集的解析（管理台武装入口用）：**精确匹配**（已发布标题列 → 草稿
+   * payload 标题），不做模糊、不做集号。管理台从集列表里取的是规范标题，
+   * 走模糊反而可能臂错集。跨 IP 同名不匹配（只认本设备 characterKey）。
    */
   private async resolveTitleToEpisode(
     characterKey: string,
