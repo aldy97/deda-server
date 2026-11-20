@@ -254,6 +254,12 @@ export interface VoiceReconcilePort {
   getTimbreForCharacter(characterKey: string | null): string | null;
   /** 语速档位 → spd 倍数；映射未配置时返回 null */
   resolveSpd(speechRate: string | null): number | null;
+  /**
+   * 对设备当前活跃实例实时下发指定语速倍数 spd（不改变音色，vcn 沿用权威映射）。
+   * 用于哄睡模式这类「临时降速、退出恢复」的场景：直接给倍数，不走语速档位映射。
+   * 永不抛错；无活跃实例 / client 未启用时返回 deferred，由 getvalue 兜底。
+   */
+  applySpd(mac: string, vcn: string, spd: number): Promise<VoiceApplyOutcome>;
 }
 
 /**

@@ -1,8 +1,14 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { isInSleepWindow } from "@/modules/sleep-configs/sleep-window.util";
+import {
+  SLEEP_TEST_MODE_ENV,
+  SLEEP_TEST_MODE_TRIGGER,
+  SleepModeService,
+} from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
 
@@ -48,6 +54,7 @@ const CONVERSATION_INTENTS: ConversationIntent[] = [
  * - session_sticky：活跃会话中调了模型，但模型判为 free_chat → 维持原模式
  * - force_sleep：家长开了强制哄睡且在哄睡时段内，未调模型直接覆写为 sleep_story
  * - sleep_window_closed：模型判为 sleep_story 但当前不在哄睡时段 → 降级 free_chat
+ * - test_sleep：staging 下命中「测试哄睡模式」触发词，绕过时段门禁直接进 sleep_story
  */
 export type IntentSource =
   | "model"
@@ -58,7 +65,8 @@ export type IntentSource =
   | "session_sticky"
   | "explicit_exit"
   | "force_sleep"
-  | "sleep_window_closed";
+  | "sleep_window_closed"
+  | "test_sleep";
 
 export interface IntentDecision {
   intent: ConversationIntent;
@@ -84,6 +92,8 @@ export class ConversationSessionService {
     private readonly llmService: LlmService,
     private readonly sleepConfigs: SleepConfigsService,
     private readonly promptRegistry: PromptRegistryService,
+    private readonly configService: ConfigService,
+    private readonly sleepMode: SleepModeService,
   ) {}
 
   /**
@@ -129,15 +139,24 @@ export class ConversationSessionService {
       return { intent: "sleep_story", source: "force_sleep" };
     }
 
+    // 测试哄睡模式（仅 staging）：命中触发词 + 开关开启时绕过时段门禁直接进哄睡。
+    // 排在被判 sleep_story 之前，保证白天也能用这个触发词验证降速/降音量。
+    if (this.isTestSleepTrigger(asrText)) {
+      await this.activate(deviceId, "sleep_story");
+      return { intent: "sleep_story", source: "test_sleep" };
+    }
+
     const sleepTime = sleepConfig?.sleepTime ?? null;
     const session = await this.prisma.conversationSession.findUnique({
       where: { deviceId },
     });
     const activeMode = this.persistentMode(session?.currentMode);
+    const wasSleepMode = activeMode === "sleep_story";
 
     if (session && activeMode) {
       if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) {
         await this.reset(deviceId);
+        if (wasSleepMode) await this.exitSleepMode(deviceId);
       } else {
         if (this.isContinuation(asrText)) {
           await this.activate(deviceId, activeMode);
@@ -145,15 +164,20 @@ export class ConversationSessionService {
         }
         if (this.isExplicitExit(asrText)) {
           await this.reset(deviceId);
+          if (wasSleepMode) await this.exitSleepMode(deviceId);
           return { intent: "free_chat", source: "explicit_exit" };
         }
-        return this.classifySticky(
+        const decision = await this.classifySticky(
           deviceId,
           asrText,
           activeMode,
           sleepTime,
           turnId,
         );
+        if (wasSleepMode && decision.intent !== "sleep_story") {
+          await this.exitSleepMode(deviceId);
+        }
+        return decision;
       }
     }
 
@@ -177,6 +201,19 @@ export class ConversationSessionService {
   /** 定时进入哄睡：无条件覆写会话为 sleep_story（45 分钟 TTL）。 */
   async activateSleepMode(deviceId: string): Promise<void> {
     await this.activate(deviceId, "sleep_story");
+  }
+
+  /** 「测试哄睡模式」触发词 + staging 开关：命中即无条件进哄睡，绕过时段门禁。 */
+  private isTestSleepTrigger(asrText: string): boolean {
+    return (
+      this.configService.get<string>(SLEEP_TEST_MODE_ENV.enabled) === "true" &&
+      asrText.includes(SLEEP_TEST_MODE_TRIGGER)
+    );
+  }
+
+  /** 退出哄睡：恢复进入前的音速/音量（下一轮非 sleep_story 意图时调用）。 */
+  private async exitSleepMode(deviceId: string): Promise<void> {
+    await this.sleepMode.exit(deviceId);
   }
 
   private async classifyAndActivate(

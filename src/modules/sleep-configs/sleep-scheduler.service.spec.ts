@@ -1,5 +1,6 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { SleepSchedulerService } from "./sleep-scheduler.service";
+import { SleepModeService } from "./sleep-mode.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { ConfigService } from "@nestjs/config";
@@ -15,6 +16,7 @@ describe("SleepSchedulerService", () => {
   let session: any;
   let pushSender: { sendSleepReminder: jest.Mock };
   let configGet: jest.Mock;
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
 
   // 2026-11-03T12:30:00Z = 北京时间 2026-11-03 20:30
   const NOW = new Date("2026-11-03T12:30:00.000Z");
@@ -39,6 +41,7 @@ describe("SleepSchedulerService", () => {
     pushSender = {
       sendSleepReminder: jest.fn().mockResolvedValue({ sent: 1, skipped: 0 }),
     };
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SleepSchedulerService,
@@ -65,6 +68,7 @@ describe("SleepSchedulerService", () => {
           useValue: { activateSleepMode: jest.fn() },
         },
         { provide: PushSenderService, useValue: pushSender },
+        { provide: SleepModeService, useValue: sleepMode },
       ],
     }).compile();
 
@@ -136,6 +140,7 @@ describe("SleepSchedulerService", () => {
         }),
       );
       expect(session.activateSleepMode).toHaveBeenCalledWith("device-uuid-001");
+      expect(sleepMode.enter).toHaveBeenCalledWith("device-uuid-001");
     });
 
     it("should skip when sleepTime does not match current Beijing HH:mm", async () => {
@@ -180,6 +185,7 @@ describe("SleepSchedulerService", () => {
       // 离线跳过当天：标记已消耗（claim 先于推送）
       expect(prisma.sleepConfig.updateMany).toHaveBeenCalled();
       expect(session.activateSleepMode).not.toHaveBeenCalled();
+      expect(sleepMode.enter).not.toHaveBeenCalled();
     });
 
     it("should fall back to story for song/mixed content types", async () => {

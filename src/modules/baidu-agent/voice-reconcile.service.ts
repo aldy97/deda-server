@@ -194,6 +194,30 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     }
   }
 
+  /**
+   * 对设备当前活跃实例实时下发指定语速倍数（不改变音色，vcn 沿用权威映射）。
+   * 用于哄睡模式的临时降速：直接给倍数，不走语速档位映射。
+   * 永不抛错；无活跃实例 / client 未启用时返回 deferred，由 getvalue 兜底。
+   */
+  async applySpd(
+    mac: string,
+    vcn: string,
+    spd: number,
+  ): Promise<VoiceApplyOutcome> {
+    if (!this.client.enabled) {
+      this.logger.debug(`Voice apply deferred: client disabled, mac=${mac}`);
+      return { applied: "deferred", reason: "disabled" };
+    }
+
+    const instanceId = await this.redis.getValue(botCurrentKey(mac));
+    if (!instanceId) {
+      this.logger.warn(`Voice apply deferred: no active instance, mac=${mac}`);
+      return { applied: "deferred", reason: "no_active_instance" };
+    }
+
+    return this.dispatchSpd(mac, instanceId, vcn, spd);
+  }
+
   // ---------------------------------------------------------------------------
   // private helpers
   // ---------------------------------------------------------------------------
@@ -332,6 +356,72 @@ export class VoiceReconcileService implements VoiceReconcilePort {
 
     this.logger.log(
       `Voice reconcile live, mac=${mac}, instanceId=${instanceId}`,
+    );
+    return { applied: "live" };
+  }
+
+  /**
+   * 已拿到 instanceId 后按指定 spd 下发。与 dispatchToInstance 的差别：
+   * 这里直接收倍数、不走语速档位映射，也不校验音色目录（vcn 是 IP 权威映射，
+   * 不是目录查询，目录本身还是 placeholder）。
+   */
+  private async dispatchSpd(
+    mac: string,
+    instanceId: string,
+    vcn: string,
+    spd: number,
+  ): Promise<VoiceApplyOutcome> {
+    const trimmed = vcn?.trim();
+    if (!trimmed) {
+      this.logger.warn(
+        `Voice apply deferred: incomplete tts target, mac=${mac}, instanceId=${instanceId}`,
+      );
+      return { applied: "deferred", reason: "incomplete_tts_target" };
+    }
+    if (!Number.isFinite(spd) || spd < TTS_SPD_MIN || spd > TTS_SPD_MAX) {
+      this.logger.warn(
+        `Voice apply deferred: invalid spd, mac=${mac}, instanceId=${instanceId}, spd=${spd}`,
+      );
+      return { applied: "deferred", reason: "invalid_request" };
+    }
+
+    const record = await this.readInstance(mac, instanceId);
+    if (!record) {
+      this.logger.warn(
+        `Voice apply deferred: no active instance record, mac=${mac}, instanceId=${instanceId}`,
+      );
+      return { applied: "deferred", reason: "no_active_instance" };
+    }
+
+    let tts: string;
+    try {
+      tts = buildTtsConfig({ vcn: trimmed, spd });
+    } catch {
+      this.logger.warn(
+        `Voice apply deferred: invalid tts config, mac=${mac}, instanceId=${instanceId}`,
+      );
+      return { applied: "deferred", reason: "invalid_request" };
+    }
+
+    const result = await this.client.switchSceneRole({
+      appId: record.appid,
+      instanceId: record.instanceid,
+      tts,
+      lang: record.lang,
+      authString: record.authorization_Role,
+      cloudNode: record.cloudNode,
+    });
+
+    if (!result.ok) {
+      const reason = (result as { reason: VoiceApplyBlockReason }).reason;
+      this.logger.warn(
+        `Voice apply deferred: upstream, mac=${mac}, instanceId=${instanceId}, reason=${reason}`,
+      );
+      return { applied: "deferred", reason };
+    }
+
+    this.logger.log(
+      `Voice apply spd live, mac=${mac}, instanceId=${instanceId}, spd=${spd}`,
     );
     return { applied: "live" };
   }

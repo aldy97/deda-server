@@ -11,6 +11,7 @@ import { ClientApiService } from "./client-api.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { VOICE_RECONCILE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
+import { SLEEP_MODE_SPEED } from "@/modules/sleep-configs/sleep-mode.service";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   DEFAULT_PROVISION_WINDOW_SECONDS,
@@ -27,7 +28,10 @@ const GOLDEN_PASSWORD = "84080871e18d02315d66c72e07bcaf45";
 
 describe("ClientApiService", () => {
   let service: ClientApiService;
-  let prisma: { device: { upsert: jest.Mock; findUnique: jest.Mock } };
+  let prisma: {
+    device: { upsert: jest.Mock; findUnique: jest.Mock };
+    conversationSession: { findUnique: jest.Mock };
+  };
   let redisStore: Map<string, string>;
   let redis: {
     getValue: jest.Mock;
@@ -68,6 +72,9 @@ describe("ClientApiService", () => {
         findUnique: jest
           .fn()
           .mockResolvedValue({ id: "device-uuid-1", characterKey: "elly" }),
+      },
+      conversationSession: {
+        findUnique: jest.fn().mockResolvedValue(null),
       },
     };
     redisStore = new Map();
@@ -548,6 +555,39 @@ describe("ClientApiService", () => {
 
       await expect(service.botGetValue(dto)).resolves.toMatchObject({
         vcn: "1000957",
+      });
+    });
+
+    it("returns sleep speed when the device is in an active sleep_story session", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        deviceId: "device-uuid-1",
+        currentMode: "sleep_story",
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      });
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        spd: SLEEP_MODE_SPEED,
+      });
+      expect(voiceReconcile.resolveSpd).not.toHaveBeenCalled();
+    });
+
+    it("uses rate-map speed when the sleep session is expired", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        deviceId: "device-uuid-1",
+        currentMode: "sleep_story",
+        expiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        spd: 1.2,
+      });
+    });
+
+    it("uses rate-map speed when no sleep session exists", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(null);
+
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        spd: 1.2,
       });
     });
   });

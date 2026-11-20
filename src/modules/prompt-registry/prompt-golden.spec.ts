@@ -10,6 +10,7 @@ import { ConversationSessionService } from "@/modules/vendor/conversation-sessio
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "./prompt-registry.service";
 
 /**
@@ -332,6 +333,11 @@ describe("prompt 黄金基线等价性", () => {
         {
           provide: SleepConfigsService,
           useValue: { getByDeviceId: jest.fn().mockResolvedValue(null) },
+        },
+        { provide: ConfigService, useValue: { get: () => undefined } },
+        {
+          provide: SleepModeService,
+          useValue: { enter: jest.fn(), exit: jest.fn() },
         },
         REGISTRY_PROVIDER,
       ]);
