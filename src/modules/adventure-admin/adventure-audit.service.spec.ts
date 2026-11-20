@@ -198,5 +198,29 @@ describe("AdventureAuditService", () => {
         prisma.adventureContentAuditLog.findMany.mock.calls[0][0].where,
       ).toEqual({});
     });
+
+    it("omits the filter argument entirely → 空 where、默认分页", async () => {
+      const result = await service.list();
+
+      expect(prisma.adventureContentAuditLog.findMany).toHaveBeenCalledWith({
+        where: {},
+        orderBy: { createdAt: "desc" },
+        skip: 0,
+        take: 50,
+      });
+      expect(result.items).toEqual([{ id: "a1", action: "publish" }]);
+    });
+
+    it("只给 from → 只有下界；只给 to → 只有上界", async () => {
+      await service.list({ from: new Date("2026-11-01T00:00:00Z") });
+      expect(
+        prisma.adventureContentAuditLog.findMany.mock.calls.at(-1)[0].where,
+      ).toEqual({ createdAt: { gte: new Date("2026-11-01T00:00:00Z") } });
+
+      await service.list({ to: new Date("2026-11-02T00:00:00Z") });
+      expect(
+        prisma.adventureContentAuditLog.findMany.mock.calls.at(-1)[0].where,
+      ).toEqual({ createdAt: { lte: new Date("2026-11-02T00:00:00Z") } });
+    });
   });
 });

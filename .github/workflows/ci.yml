@@ -50,7 +50,8 @@ jobs:
 
       - run: npm run build
 
-      - run: npm run test
+      # coverageThreshold 只在收集覆盖率时才被评估，所以走 test:cov 而非 test。
+      - run: npm run test:cov
 
       # e2e 使用独立 PostgreSQL；LLM 与外部服务保持 mock，禁止 forceExit 掩盖泄漏。
       # --runInBand：所有 e2e 套件共用同一个库，而 analytics-fleet 仍有两条全局口径断言

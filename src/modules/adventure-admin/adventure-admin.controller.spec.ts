@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
-import { RequestMethod, UnauthorizedException } from "@nestjs/common";
+import { Logger, RequestMethod, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureContentService } from "./adventure-content.service";
@@ -290,6 +290,7 @@ describe("AdventureAdminController", () => {
       retireImpact: jest.fn(),
       checkContent: jest.fn(),
       simulate: jest.fn(),
+      choiceStats: jest.fn(),
     };
     content = {
       createEpisode: jest.fn(),
@@ -512,6 +513,15 @@ describe("AdventureAdminController", () => {
       } as never);
 
       expect(query.diffVersions).toHaveBeenCalledWith("ep1", "v1", "v2");
+    });
+
+    it("forwards choice-stats with the raw date window untouched", async () => {
+      query.choiceStats.mockResolvedValue({ hits: [] });
+      const window = { startDate: "2026-01-01", endDate: "2026-01-31" };
+
+      await controller.choiceStats("ep1", window as never);
+
+      expect(query.choiceStats).toHaveBeenCalledWith("ep1", window);
     });
 
     it("converts audit from/to to Date and trims the rest", async () => {
@@ -891,6 +901,17 @@ describe("AdventureAdminController", () => {
       );
     });
 
+    it("export with a non-array episodeIds treats it as no filter rather than crashing", async () => {
+      transfer.exportBundle.mockResolvedValue({ bundleHash: "h" });
+
+      await controller.exportBundle(
+        { episodeIds: "ep1,ep2" } as never,
+        adminRequest(),
+      );
+
+      expect(transfer.exportBundle).toHaveBeenCalledWith({}, expect.anything());
+    });
+
     it("import applies the confirm token and expected hash from the preview", async () => {
       const bundle = { bundleSchemaVersion: 1, episodes: [] };
       transfer.applyImport.mockResolvedValue({ bundleHash: "h" });
@@ -1009,6 +1030,49 @@ describe("AdventureAdminController", () => {
 
       expect(result.audited).toBe(false);
       expect(result.report).toBeDefined();
+    });
+
+    it("survives a recovery service that returns no report: audit detail 全落空值", async () => {
+      recovery.sweepBrokenProgress.mockResolvedValue(undefined);
+
+      await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      const entry = audit.record.mock.calls[0][1] as { detail: unknown };
+      expect(entry.detail).toEqual({
+        startedAt: null,
+        finishedAt: null,
+        durationMs: null,
+        skipped: false,
+        skipReason: null,
+        scanned: null,
+        repairCount: 0,
+        alertCount: 0,
+        errorCount: 0,
+        repairs: [],
+        alerts: [],
+      });
+    });
+
+    it("logs the audit failure even when the thrown value is not an Error", async () => {
+      const logSpy = jest
+        .spyOn(Logger.prototype, "error")
+        .mockReturnValue(undefined);
+      recovery.sweepBrokenProgress.mockResolvedValue(emptyReport);
+      audit.record.mockRejectedValue("审计表不可用");
+
+      const result = await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      expect(result.audited).toBe(false);
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining("审计表不可用"),
+      );
+      logSpy.mockRestore();
     });
 
     it("caps the audit detail so one sweep cannot write an unbounded Json blob", async () => {
@@ -1162,5 +1226,14 @@ describe("AdventureAdminController", () => {
     const configService = { get: () => undefined } as unknown as ConfigService;
 
     expect(resolveContentAdminProfile(configService)).toBe("readonly");
+  });
+
+  it("auditFilter 拿到 falsy DTO（管线之后的防御路径）→ 空筛选，不崩", () => {
+    const filter = (
+      controller as unknown as {
+        auditFilter(dto: unknown): Record<string, unknown>;
+      }
+    ).auditFilter(undefined);
+    expect(filter).toEqual({});
   });
 });

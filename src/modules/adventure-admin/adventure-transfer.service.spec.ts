@@ -315,6 +315,36 @@ describe("AdventureTransferService", () => {
       expect(body.skipped[0].reason).toContain("不是已发布");
       expect(body.skipped[1].reason).toContain("从未发布");
     });
+
+    it("exports by character when no episode ids are given (including an empty array)", async () => {
+      for (const selector of [
+        { characterKey: "elly" },
+        { characterKey: "elly", episodeIds: [] },
+      ]) {
+        await service.exportBundle(selector as never, actor);
+        const where =
+          prisma.adventureEpisode.findMany.mock.calls.at(-1)[0].where;
+        expect(where.id).toBeUndefined();
+        expect(where.characterKey).toBe("elly");
+      }
+    });
+
+    it("skips an episode whose current version row has vanished", async () => {
+      prisma.adventureEpisode.findMany.mockResolvedValue([
+        episodeRow({ currentVersionId: "v-ghost" }),
+      ]);
+      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+
+      const error = await service
+        .exportBundle({ episodeIds: ["ep-a"] }, actor)
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      const body = error.getResponse();
+      expect(body.code).toBe("NOTHING_TO_EXPORT");
+      expect(body.skipped[0]).toMatchObject({ businessKey: "elly/1/1" });
+      expect(body.skipped[0].reason).toContain("从未发布");
+    });
   });
 
   describe("planImport", () => {
@@ -647,6 +677,63 @@ describe("AdventureTransferService", () => {
       expect(preview.bundleHash.startsWith(preview.confirmToken)).toBe(true);
       expect(preview.message).toContain(preview.confirmToken);
     });
+
+    it("classifies an episode whose current version id points at nothing as a replace with no hash", async () => {
+      mockTargetEnvironment({
+        episodes: [episodeRow({ currentVersionId: "v-ghost" })],
+        publishedVersions: [],
+      });
+
+      const preview = await service.planImport(makeBundle([episodeA()]));
+
+      expect(preview.plan.items[0].action).toBe("replace");
+      expect(preview.plan.items[0].existingHash).toBeNull();
+    });
+
+    it("classifies an episode with no current version id at all as a replace with no hash", async () => {
+      mockTargetEnvironment({
+        episodes: [episodeRow({ currentVersionId: null })],
+      });
+
+      const preview = await service.planImport(makeBundle([episodeA()]));
+
+      expect(preview.plan.items[0].action).toBe("replace");
+      expect(preview.plan.items[0].existingHash).toBeNull();
+    });
+
+    it("keeps the first draft row per episode when the query returns duplicates", async () => {
+      mockTargetEnvironment({
+        publishedVersions: [
+          {
+            id: "v-a",
+            episodeId: "ep-a",
+            version: 1,
+            status: "published",
+            contentHash: "stale-hash-from-an-older-export",
+            payload: episodeA("旧内容"),
+          },
+        ],
+        drafts: [
+          {
+            episodeId: "ep-a",
+            version: 3,
+            contentHash: "someone-elses-draft",
+            createdByName: "Carol",
+          },
+          {
+            episodeId: "ep-a",
+            version: 4,
+            contentHash: "someone-elses-draft",
+            createdByName: "Dave",
+          },
+        ],
+      });
+
+      const preview = await service.planImport(makeBundle([episodeA()]));
+
+      expect(preview.plan.items[0].action).toBe("reject");
+      expect(preview.plan.items[0].reason).toContain("Carol");
+    });
   });
 
   describe("applyImport", () => {
@@ -830,6 +917,54 @@ describe("AdventureTransferService", () => {
 
       expect(content.createEpisode).toHaveBeenCalledTimes(1);
       expect(content.saveDraft).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies the default options when the caller omits them entirely", async () => {
+      const error = await service.applyImport(bundle(), actor).catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse().code).toBe("REASON_REQUIRED");
+      expect(content.createEpisode).not.toHaveBeenCalled();
+    });
+
+    it("refuses a bundle that does not parse, naming every parse error", async () => {
+      const error = await service
+        .applyImport("不是 bundle", actor, {
+          reason: "导入失败也要有理由",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      const body = error.getResponse();
+      expect(body.code).toBe("BUNDLE_INVALID");
+      expect(body.errors).toEqual(["bundle 必须是一个 JSON 对象。"]);
+      expect(body.message).toContain("bundle 无法解析");
+    });
+
+    it("treats a missing confirm token as a mismatch instead of skipping the check", async () => {
+      const error = await service
+        .applyImport(bundle(), actor, { reason: "没有确认码不能导入" })
+        .catch((e) => e);
+
+      expect(error.getResponse().code).toBe("CONFIRM_TEXT_MISMATCH");
+      expect(content.createEpisode).not.toHaveBeenCalled();
+    });
+
+    it("says how many identical episodes were skipped when the batch is mixed", async () => {
+      mockTargetEnvironment();
+      const raw = makeBundle([episodeA(), episodeC()]);
+      const { token } = await tokenFor(raw);
+
+      const result = await service.applyImport(raw, actor, {
+        confirmText: token,
+        reason: "一集一致、一集新增的混合批次",
+      });
+
+      expect(result.written.map((item) => item.businessKey)).toEqual([
+        "elly/1/3",
+      ]);
+      expect(result.skipped).toEqual(["elly/1/1"]);
+      expect(result.message).toContain("已跳过 1 集（内容一致）。");
     });
   });
 });

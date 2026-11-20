@@ -2,6 +2,7 @@ import {
   ArgumentsHost,
   BadRequestException,
   ConflictException,
+  HttpException,
   Logger,
 } from "@nestjs/common";
 import { HttpExceptionFilter } from "@/common/filters/http-exception.filter";
@@ -141,4 +142,58 @@ describe("ContentAdminExceptionFilter", () => {
     ).not.toThrow();
     expect(response.status).not.toHaveBeenCalled();
   });
+
+  it("http 上下文里拿不到 response 对象 → 委托全局过滤器，不自造半截响应", () => {
+    const noResponseHost = {
+      switchToHttp: () => ({ getResponse: () => null }),
+      getType: () => "http",
+    } as unknown as ArgumentsHost;
+    const exception = new BadRequestException("x");
+
+    filter.catch(exception, noResponseHost);
+
+    expect(delegate).toHaveBeenCalledWith(exception, noResponseHost);
+    expect(response.status).not.toHaveBeenCalled();
+  });
+
+  it("载荷是裸字符串 → message 原样、data null（老版本 Nest 的字符串载荷形状）", () => {
+    filter.catch(new RawStringPayloadException("字段不合法"), host);
+
+    expect(body()).toEqual({
+      code: 400,
+      message: "字段不合法",
+      data: null,
+    });
+  });
+
+  it.each([[null], [42], [true]])(
+    "载荷是 %p（既不是对象也不是字符串）→ 兜底 Internal server error，不崩",
+    (raw) => {
+      filter.catch(new RawStringPayloadException(raw), host);
+
+      expect(body().message).toBe("Internal server error");
+      expect(body().data).toBeNull();
+    },
+  );
+
+  it.each([[{ message: "   " }], [{ message: 42 }]])(
+    "对象载荷的 message=%j 不是非空字符串 → 兜底 Internal server error",
+    (payload) => {
+      filter.catch(new BadRequestException(payload as never), host);
+
+      expect(body().message).toBe("Internal server error");
+      expect(body().data).toBeNull();
+    },
+  );
 });
+
+/** getResponse() 原样返回裸载荷的 HttpException：模拟老版本 Nest 或子类化的遗留形状。 */
+class RawStringPayloadException extends HttpException {
+  constructor(private readonly rawResponse: unknown) {
+    super("占位", 400);
+  }
+
+  override getResponse(): string | object {
+    return this.rawResponse as string | object;
+  }
+}
