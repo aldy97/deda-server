@@ -972,7 +972,10 @@ describe("VoiceReconcileService", () => {
     it("should return invalid_request deferred when spd out of range", async () => {
       setupActiveInstance();
       const result = await service.applySpd(MAC, "1000957", 3);
-      expect(result).toEqual({ applied: "deferred", reason: "invalid_request" });
+      expect(result).toEqual({
+        applied: "deferred",
+        reason: "invalid_request",
+      });
       expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
     });
 

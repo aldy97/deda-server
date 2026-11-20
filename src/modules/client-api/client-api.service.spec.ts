@@ -578,13 +578,17 @@ describe("ClientApiService", () => {
         expiresAt: new Date(Date.now() - 1000),
       });
 
-      await expect(service.botGetValue(dto)).resolves.toMatchObject({ spd: 1.2 });
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        spd: 1.2,
+      });
     });
 
     it("uses rate-map speed when no sleep session exists", async () => {
       prisma.conversationSession.findUnique.mockResolvedValue(null);
 
-      await expect(service.botGetValue(dto)).resolves.toMatchObject({ spd: 1.2 });
+      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+        spd: 1.2,
+      });
     });
   });
 });
