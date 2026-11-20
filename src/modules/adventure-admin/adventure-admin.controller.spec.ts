@@ -8,7 +8,6 @@ import { AdventureContentQueryService } from "./adventure-content-query.service"
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
-import { AdventureDeviceTestService } from "./adventure-device-test.service";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
@@ -191,36 +190,6 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     path: "recovery/reset",
     readOnlyExempt: false,
   },
-  {
-    handler: "deviceTestState",
-    method: RequestMethod.GET,
-    path: "device-test/state",
-    readOnlyExempt: false,
-  },
-  {
-    handler: "deviceTestSessionDetail",
-    method: RequestMethod.GET,
-    path: "device-test/sessions/:deviceId",
-    readOnlyExempt: false,
-  },
-  {
-    handler: "deviceTestArm",
-    method: RequestMethod.POST,
-    path: "device-test/sessions",
-    readOnlyExempt: false,
-  },
-  {
-    handler: "deviceTestRestart",
-    method: RequestMethod.POST,
-    path: "device-test/sessions/:deviceId/restart",
-    readOnlyExempt: false,
-  },
-  {
-    handler: "deviceTestClear",
-    method: RequestMethod.POST,
-    path: "device-test/sessions/:deviceId/clear",
-    readOnlyExempt: false,
-  },
 ];
 
 function normalizePath(value: unknown): string {
@@ -276,7 +245,6 @@ describe("AdventureAdminController", () => {
   let audit: Record<string, jest.Mock>;
   let recovery: Record<string, jest.Mock>;
   let profile: string;
-  let deviceTest: Record<string, jest.Mock>;
 
   beforeEach(async () => {
     profile = "authoring";
@@ -313,13 +281,6 @@ describe("AdventureAdminController", () => {
       sweepBrokenProgress: jest.fn(),
       resetBreaker: jest.fn(),
     };
-    deviceTest = {
-      state: jest.fn(),
-      sessionDetail: jest.fn(),
-      arm: jest.fn(),
-      restart: jest.fn(),
-      clear: jest.fn(),
-    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -329,7 +290,6 @@ describe("AdventureAdminController", () => {
         { provide: AdventureTransferService, useValue: transfer },
         { provide: AdventureAuditService, useValue: audit },
         { provide: AdventureRecoveryService, useValue: recovery },
-        { provide: AdventureDeviceTestService, useValue: deviceTest },
         {
           provide: ConfigService,
           useValue: {
@@ -1120,105 +1080,6 @@ describe("AdventureAdminController", () => {
         controller.recoveryReset({} as never, adminRequest()),
       ).rejects.toThrow();
       expect(recovery.resetBreaker).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("device test routes", () => {
-    it("forwards the state read without an actor", async () => {
-      deviceTest.state.mockResolvedValue({ enabled: true, sessions: [] });
-
-      await expect(controller.deviceTestState()).resolves.toEqual({
-        enabled: true,
-        sessions: [],
-      });
-      expect(deviceTest.state).toHaveBeenCalledTimes(1);
-    });
-
-    it("forwards the session detail read for the given device", async () => {
-      deviceTest.sessionDetail.mockResolvedValue({ session: null });
-
-      await expect(
-        controller.deviceTestSessionDetail("dev-1001"),
-      ).resolves.toEqual({ session: null });
-      expect(deviceTest.sessionDetail).toHaveBeenCalledWith("dev-1001");
-    });
-
-    it("arms with actor and only the picked fields", async () => {
-      deviceTest.arm.mockResolvedValue({ ok: true });
-
-      await controller.deviceTestArm(
-        {
-          deviceId: "dev-1001",
-          title: "听风原野第一天",
-          reason: "测试环境验收这一集",
-          evil: "should be dropped",
-        } as never,
-        adminRequest(),
-      );
-
-      expect(deviceTest.arm).toHaveBeenCalledWith(
-        {
-          deviceId: "dev-1001",
-          title: "听风原野第一天",
-          reason: "测试环境验收这一集",
-        },
-        { username: "alice", displayName: "Alice", profile: "authoring" },
-      );
-    });
-
-    it("drops blank arm fields before forwarding", async () => {
-      deviceTest.arm.mockResolvedValue({ ok: true });
-
-      await controller.deviceTestArm(
-        { deviceId: " ", title: "   ", reason: "" } as never,
-        adminRequest(),
-      );
-
-      expect(deviceTest.arm).toHaveBeenCalledWith({}, expect.anything());
-    });
-
-    it("restarts and clears with actor and the raw reason", async () => {
-      deviceTest.restart.mockResolvedValue({ ok: true });
-      deviceTest.clear.mockResolvedValue({ ok: true });
-
-      await controller.deviceTestRestart(
-        "dev-1001",
-        { reason: "手动重开验证重玩" } as never,
-        adminRequest(),
-      );
-      await controller.deviceTestClear(
-        "dev-1001",
-        { reason: "验收完成解除武装" } as never,
-        adminRequest(),
-      );
-
-      expect(deviceTest.restart).toHaveBeenCalledWith(
-        "dev-1001",
-        { username: "alice", displayName: "Alice", profile: "authoring" },
-        "手动重开验证重玩",
-      );
-      expect(deviceTest.clear).toHaveBeenCalledWith(
-        "dev-1001",
-        { username: "alice", displayName: "Alice", profile: "authoring" },
-        "验收完成解除武装",
-      );
-    });
-
-    it.each([
-      ["missing user", { user: undefined }],
-      ["blank username", adminRequest({ username: "   " })],
-    ])("refuses to arm anonymously: %s", async (_label, request) => {
-      await expect(
-        controller.deviceTestArm(
-          {
-            deviceId: "dev-1001",
-            title: "听风原野第一天",
-            reason: "测试环境验收这一集",
-          } as never,
-          request as never,
-        ),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
-      expect(deviceTest.arm).not.toHaveBeenCalled();
     });
   });
 

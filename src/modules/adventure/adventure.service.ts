@@ -12,8 +12,6 @@ import {
   ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   ADVENTURE_EXIT_TEXT,
-  adventureTestAmbiguousText,
-  adventureTestNotFoundText,
   AdventureFailurePhase,
   AdventureFailureReport,
   isAdventureExitRequest,
@@ -23,16 +21,6 @@ import {
   matchChoiceDeterministic,
   parseChoiceVerdict,
 } from "./adventure-match";
-import {
-  AdventureTestAccessService,
-  AdventureTestSession,
-} from "./adventure-test-access.service";
-import {
-  AdventureTestTitleCandidate,
-  matchTestTitle,
-  normalizeTestTitle,
-  parseTestEpisodeShortcut,
-} from "./adventure-test-title-matcher";
 import {
   AdventureDailyRecord,
   AdventureEpisode,
@@ -167,17 +155,6 @@ const CHARACTER_PERSONAS: Record<string, string> = {
     "小马 Polly：听风原野的居民，性格开朗勇敢，说话活泼简洁，喜欢邀请孩子一起尝试，也爱鼓励孩子。",
 };
 
-/** 语音触发标题解析的三态结果（只在样机试播路径出现，不进对外契约）。 */
-type TestTitleResolveResult =
-  | {
-      kind: "found";
-      episode: AdventureEpisode;
-      episodeVersionId: string | null;
-      matchedBy: "exact" | "alias" | "contains" | "fuzzy" | "episode_number";
-    }
-  | { kind: "ambiguous"; candidates: AdventureTestTitleCandidate[] }
-  | { kind: "none"; normalizedTitle: string };
-
 /**
  * 冒险引擎：故事是数据不是 prompt。
  * 状态机推进、旁白原文直出；小模型仅在开放交互点/首次跑题引回时接话。
@@ -202,7 +179,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
     private readonly configService: ConfigService,
-    private readonly testAccess: AdventureTestAccessService,
   ) {}
 
   onModuleInit() {
@@ -259,11 +235,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /** 今日是否已经完成任意一集；这是所有冒险入口的确定性门禁。 */
   async isCompletedToday(deviceInternalId: string): Promise<boolean> {
-    // 样机试播：武装中的设备豁免每日一集门禁（不限次数、不限顺序是试播的
-    // 核心诉求）。会话由 TTL 约束，过期后自动恢复原门禁。
-    if (await this.testAccess.peek(deviceInternalId)) {
-      return false;
-    }
     const record = await this.prisma.adventureDailyRecord.findFirst({
       where: {
         deviceId: deviceInternalId,
@@ -367,20 +338,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /** 新分配一集的开场前情回顾：优先当前版本 payload，回落 episode 行的物化副本。 */
   private async resolveRecap(episode: AdventureEpisode): Promise<string[]> {
-    return this.resolveRecapFor(episode, undefined);
-  }
-
-  /**
-   * 指定版本的前情回顾：试播草稿版本时 recap 必须来自草稿 payload，
-   * 而不是 episode 行的已发布物化副本。
-   */
-  private async resolveRecapFor(
-    episode: AdventureEpisode,
-    versionId: string | null | undefined,
-  ): Promise<string[]> {
-    const content = await this.resolveVersionContent(
-      versionId ?? episode.currentVersionId,
-    );
+    const content = await this.resolveVersionContent(episode.currentVersionId);
     const recap = content?.recap ?? episode.recap;
     return recap ? [recap] : [];
   }
@@ -510,7 +468,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     deviceInternalId: string,
     episodeId: string,
-    opts?: { allowCompletedOverwrite?: boolean },
   ): Promise<AdventureDailyRecord> {
     const today = this.dateKey();
     const existing = await tx.adventureDailyRecord.findUnique({
@@ -532,25 +489,12 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       });
     }
     if (existing.status === "completed") {
-      if (!opts?.allowCompletedOverwrite) {
-        // 不可达：isCompletedToday 已在上游拦住。真到了这里说明每日额度判定
-        // 出了意外，此时宁可本轮不写库，也不能把孩子的完集记录改成 in_progress。
-        this.logger.warn(
-          `Refusing to overwrite completed daily record: deviceId=${deviceInternalId} dailyId=${existing.id} assignedDate=${today}`,
-        );
-        return existing;
-      }
-      // 仅样机试播可达：同一台设备一天可以反复玩同一集，完集行必须能改回
-      // in_progress，唯一约束 [deviceId, assignedDate] 决定一天只能有一行。
-      return tx.adventureDailyRecord.update({
-        where: { id: existing.id },
-        data: {
-          episodeId,
-          status: "in_progress",
-          completedAt: null,
-          completedDate: null,
-        },
-      });
+      // 不可达：isCompletedToday 已在上游拦住。真到了这里说明每日额度判定
+      // 出了意外，此时宁可本轮不写库，也不能把孩子的完集记录改成 in_progress。
+      this.logger.warn(
+        `Refusing to overwrite completed daily record: deviceId=${deviceInternalId} dailyId=${existing.id} assignedDate=${today}`,
+      );
+      return existing;
     }
     return tx.adventureDailyRecord.update({
       where: { id: existing.id },
@@ -595,45 +539,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   ): Promise<AdventureReply | null> {
     if (await this.isCompletedToday(deviceInternalId)) {
       return null;
-    }
-
-    // 样机试播分支：armed 会话直接指定要播的集，完全跳过顺序选集。
-    // in_progress/awaiting_reply 的同一集续玩（可测中断恢复）；其余一切状态
-    // （completed/exited/换集）都重置到第 0 段重开——试播要的是可重复的
-    // 「从头到尾」体验。
-    const testSession = await this.testAccess.peek(deviceInternalId);
-    if (testSession) {
-      const episode = await this.prisma.adventureEpisode.findUnique({
-        where: { id: testSession.episodeId },
-      });
-      if (!episode) {
-        return null;
-      }
-      const current = await this.findCurrentAdventure(deviceInternalId);
-      const resumable =
-        current !== null &&
-        current.progress.episodeId === testSession.episodeId &&
-        ["in_progress", "awaiting_reply"].includes(current.progress.status);
-      if (resumable && current) {
-        const segments = await this.loadSegmentsForPlay(current.progress);
-        return this.playFrom(current.progress, segments, [], current.daily, {
-          runSeq: testSession.runSeq,
-        });
-      }
-      const { daily, progress } = await this.openTestRun(
-        deviceInternalId,
-        episode,
-        testSession.episodeVersionId ?? episode.currentVersionId ?? null,
-        testSession,
-      );
-      const segments = await this.loadSegmentsForPlay(progress);
-      const prefix = await this.resolveRecapFor(
-        episode,
-        testSession.episodeVersionId,
-      );
-      return this.playFrom(progress, segments, prefix, daily, {
-        runSeq: testSession.runSeq,
-      });
     }
 
     const current = await this.findCurrentAdventure(deviceInternalId);
@@ -709,369 +614,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 样机试播的语音入口（两条对话链路共用）：判定「我想玩+完整标题」触发词，
-   * 命中即从第 0 段播对应的集；未命中标题时返回确定性 not-found 话术；
-   * 不是触发词（或环境未开启）返回 null，由链路层落回正常意图路由。
-   * 与 startToday 同款兜底：任何异常都不允许冒到对话入口。
-   */
-  async tryTestTrigger(
-    deviceInternalId: string,
-    asrText: string | null | undefined,
-  ): Promise<AdventureReply | null> {
-    try {
-      const title = this.testAccess.matchTrigger(asrText);
-      if (!title) {
-        return null;
-      }
-      return await this.startByTitleInternal(deviceInternalId, title);
-    } catch (error) {
-      return this.handleEngineFailure(deviceInternalId, "start_today", error);
-    }
-  }
-
-  /** 指定标题开播（管理台武装链路也可能复用同一入口）。 */
-  async startByTitle(
-    deviceInternalId: string,
-    title: string,
-  ): Promise<AdventureReply | null> {
-    try {
-      return await this.startByTitleInternal(deviceInternalId, title);
-    } catch (error) {
-      return this.handleEngineFailure(deviceInternalId, "start_today", error);
-    }
-  }
-
-  private async startByTitleInternal(
-    deviceInternalId: string,
-    title: string,
-  ): Promise<AdventureReply | null> {
-    if (!this.testAccess.isEnabled()) {
-      return null;
-    }
-    const characterKey = await this.getCharacterKey(deviceInternalId);
-    const resolved = await this.resolveTestTitleByVoice(characterKey, title);
-    if (resolved.kind === "none") {
-      // 确定性话术，不走 LLM、不写库、不武装。
-      return {
-        texts: [adventureTestNotFoundText(resolved.normalizedTitle)],
-        action: "narrate",
-      };
-    }
-    if (resolved.kind === "ambiguous") {
-      // 歧义绝不静默猜：列出候选，引导用「第N集」或完整标题消歧。
-      return {
-        texts: [adventureTestAmbiguousText(resolved.candidates)],
-        action: "narrate",
-      };
-    }
-    const { episode, episodeVersionId } = resolved;
-    const session = await this.testAccess.arm(deviceInternalId, {
-      episodeId: episode.id,
-      episodeVersionId,
-      title: episode.title || title,
-      source: "voice_trigger",
-    });
-    if (!session) {
-      return null;
-    }
-    const { daily, progress } = await this.openTestRun(
-      deviceInternalId,
-      episode,
-      episodeVersionId,
-      session,
-    );
-    const segments = await this.loadSegmentsForPlay(progress);
-    const prefix = await this.resolveRecapFor(episode, episodeVersionId);
-    return this.playFrom(progress, segments, prefix, daily, {
-      runSeq: session.runSeq,
-    });
-  }
-
-  /**
-   * 语音触发的结果：确定性唯一命中 / 歧义（须消歧）/ 未命中。
-   * matchedBy 供日志与看板观察识别质量，不进任何对外契约。
-   */
-  private resolveTestTitleByVoice = async (
-    characterKey: string,
-    title: string,
-  ): Promise<TestTitleResolveResult> => {
-    const normalized = normalizeTestTitle(title);
-    const [published, drafts] = await Promise.all([
-      this.prisma.adventureEpisode.findMany({
-        where: { characterKey },
-        orderBy: [{ season: "asc" }, { episodeNumber: "asc" }],
-      }),
-      this.prisma.adventureEpisodeVersion.findMany({
-        where: { status: "draft", episode: { characterKey } },
-        select: { id: true, payload: true, episode: true },
-      }),
-    ]);
-
-    // 每个集一个候选身份：有草稿则用草稿（标题 + 版本），否则用已发布（标题 + 当前版本）。
-    // 试播要验证的是「最新内容」，草稿优先符合这个意图，也顺带让同一集不会因
-    // 「已发布标题 == 草稿标题」被误判成歧义。
-    const episodeById = new Map<string, AdventureEpisode>();
-    const candidateByEpisode = new Map<string, AdventureTestTitleCandidate>();
-    for (const episode of published) {
-      episodeById.set(episode.id, episode);
-      candidateByEpisode.set(episode.id, {
-        episodeId: episode.id,
-        title: episode.title,
-        episodeNumber: episode.episodeNumber,
-        season: episode.season,
-        episodeVersionId: episode.currentVersionId ?? null,
-      });
-    }
-    for (const draft of drafts) {
-      const payloadTitle = (draft.payload as { title?: unknown } | null)?.title;
-      if (typeof payloadTitle !== "string" || !payloadTitle.trim()) {
-        continue;
-      }
-      episodeById.set(draft.episode.id, draft.episode);
-      candidateByEpisode.set(draft.episode.id, {
-        episodeId: draft.episode.id,
-        title: payloadTitle.trim(),
-        episodeNumber: draft.episode.episodeNumber,
-        season: draft.episode.season,
-        episodeVersionId: draft.id,
-      });
-    }
-    const candidates = [...candidateByEpisode.values()];
-
-    // 集号短口令：确定性退路，也用于消歧。
-    const shortcut = parseTestEpisodeShortcut(normalized);
-    if (shortcut !== null) {
-      const found =
-        candidates.find(
-          (c) => c.season === 1 && c.episodeNumber === shortcut,
-        ) ?? candidates.find((c) => c.episodeNumber === shortcut);
-      if (found) {
-        const episode = episodeById.get(found.episodeId);
-        if (episode) {
-          return {
-            kind: "found",
-            episode,
-            episodeVersionId:
-              found.episodeVersionId ?? episode.currentVersionId ?? null,
-            matchedBy: "episode_number",
-          };
-        }
-      }
-      return { kind: "none", normalizedTitle: normalized };
-    }
-
-    const match = matchTestTitle(normalized, candidates);
-    if (match.matched && !match.ambiguous) {
-      const episode = episodeById.get(match.matched.episodeId);
-      if (episode) {
-        return {
-          kind: "found",
-          episode,
-          episodeVersionId:
-            match.matched.episodeVersionId ?? episode.currentVersionId ?? null,
-          matchedBy: match.matchedBy,
-        };
-      }
-    }
-    if (match.ambiguous) {
-      return { kind: "ambiguous", candidates: match.candidates };
-    }
-    return { kind: "none", normalizedTitle: normalized };
-  };
-
-  /**
-   * 标题 → 集的解析（管理台武装入口用）：**精确匹配**（已发布标题列 → 草稿
-   * payload 标题），不做模糊、不做集号。管理台从集列表里取的是规范标题，
-   * 走模糊反而可能臂错集。跨 IP 同名不匹配（只认本设备 characterKey）。
-   */
-  private async resolveTitleToEpisode(
-    characterKey: string,
-    title: string,
-  ): Promise<{
-    episode: AdventureEpisode;
-    episodeVersionId: string | null;
-  } | null> {
-    const episodes = await this.prisma.adventureEpisode.findMany({
-      where: { characterKey, title },
-      orderBy: [{ season: "asc" }, { episodeNumber: "asc" }],
-    });
-    if (episodes.length > 0) {
-      const episode = episodes[0];
-      return { episode, episodeVersionId: episode.currentVersionId ?? null };
-    }
-    const drafts = await this.prisma.adventureEpisodeVersion.findMany({
-      where: { status: "draft", episode: { characterKey } },
-      select: { id: true, payload: true, episode: true },
-    });
-    for (const draft of drafts) {
-      const payloadTitle = (draft.payload as { title?: unknown } | null)?.title;
-      if (typeof payloadTitle === "string" && payloadTitle.trim() === title) {
-        return { episode: draft.episode, episodeVersionId: draft.id };
-      }
-    }
-    return null;
-  }
-
-  /**
-   * 管理台武装入口：与语音触发共用同一份标题解析（已发布标题 → 草稿标题）。
-   * 只 arm 不重置进度——重置发生在下次入口（startToday armed 分支 /
-   * startByTitle），与语音触发行为一致。返回 null 表示未启用或标题未命中。
-   */
-  async armTestSessionByTitle(
-    deviceInternalId: string,
-    title: string,
-    opts: { source: AdventureTestSession["source"]; armedBy?: string | null },
-  ): Promise<AdventureTestSession | null> {
-    if (!this.testAccess.isEnabled()) {
-      return null;
-    }
-    const characterKey = await this.getCharacterKey(deviceInternalId);
-    const match = await this.resolveTitleToEpisode(characterKey, title);
-    if (!match) {
-      return null;
-    }
-    return this.testAccess.arm(deviceInternalId, {
-      episodeId: match.episode.id,
-      episodeVersionId: match.episodeVersionId,
-      title: match.episode.title || title,
-      source: opts.source,
-      armedBy: opts.armedBy ?? null,
-    });
-  }
-
-  /**
-   * 管理台重开：runSeq+1 并立即把该集进度重置到第 0 段（写新 run 的
-   * assigned/started 事件）。下次入口从第 0 段续播（无 recap；要带 recap
-   * 的完整重开请用语音触发词）。未武装/未启用返回 null。
-   */
-  async restartTestRun(
-    deviceInternalId: string,
-  ): Promise<AdventureTestSession | null> {
-    const current = await this.testAccess.peek(deviceInternalId);
-    if (!current) {
-      return null;
-    }
-    const episode = await this.prisma.adventureEpisode.findUnique({
-      where: { id: current.episodeId },
-    });
-    if (!episode) {
-      return null;
-    }
-    const session = await this.testAccess.arm(deviceInternalId, {
-      episodeId: current.episodeId,
-      episodeVersionId: current.episodeVersionId,
-      title: current.title,
-      source: current.source,
-      armedBy: current.armedBy,
-    });
-    if (!session) {
-      return null;
-    }
-    await this.openTestRun(
-      deviceInternalId,
-      episode,
-      session.episodeVersionId ?? episode.currentVersionId ?? null,
-      session,
-    );
-    return session;
-  }
-
-  /**
-   * 试播开跑：清等待定时器 → 事务内复用/改指当日 daily 行、无条件重置进度
-   * 到第 0 段、写带 run 后缀的 assigned/started 事件。终态进度与 completed
-   * daily 行只在试播路径允许覆盖（见 resetProgressForTest 与
-   * openOrReuseTodayDaily 的 opts）。
-   */
-  private async openTestRun(
-    deviceInternalId: string,
-    episode: AdventureEpisode,
-    episodeVersionId: string | null,
-    testSession: AdventureTestSession,
-  ): Promise<{ daily: AdventureDailyRecord; progress: AdventureProgress }> {
-    this.clearTimer(deviceInternalId);
-    return this.prisma.$transaction(async (tx) => {
-      const daily = await this.openOrReuseTodayDaily(
-        tx,
-        deviceInternalId,
-        episode.id,
-        { allowCompletedOverwrite: true },
-      );
-      const progress = await this.resetProgressForTest(
-        tx,
-        deviceInternalId,
-        episode,
-        episodeVersionId,
-      );
-      const runSuffix = `:run:${testSession.runSeq}`;
-      const base = {
-        deviceId: deviceInternalId,
-        episodeId: episode.id,
-        dailyRecordId: daily.id,
-        payload: {
-          test: true,
-          runSeq: testSession.runSeq,
-          source: testSession.source,
-          title: testSession.title,
-        },
-      };
-      await tx.adventureEvent.create({
-        data: {
-          ...base,
-          eventKey: `daily:${daily.id}:assigned${runSuffix}`,
-          eventType: "daily_assigned",
-        },
-      });
-      await tx.adventureEvent.create({
-        data: {
-          ...base,
-          eventKey: `daily:${daily.id}:started${runSuffix}`,
-          eventType: "started",
-        },
-      });
-      return { daily, progress };
-    });
-  }
-
-  /**
-   * 试播专用的进度重置：无条件回到第 0 段，覆盖 completed/abandoned/exited
-   * 等一切状态（普通路径的 assignProgress 对终态只告警不覆盖，试播则必须
-   * 可重开）。版本锁定指向试播会话选定的版本（可能是草稿版本 id）。
-   */
-  private async resetProgressForTest(
-    tx: Prisma.TransactionClient,
-    deviceInternalId: string,
-    episode: AdventureEpisode,
-    episodeVersionId: string | null,
-  ): Promise<AdventureProgress> {
-    const existing = await tx.adventureProgress.findUnique({
-      where: {
-        deviceId_episodeId: {
-          deviceId: deviceInternalId,
-          episodeId: episode.id,
-        },
-      },
-    });
-    const data = {
-      status: "in_progress",
-      nextSegmentOrder: 0,
-      stars: 0,
-      offTopicCount: 0,
-      waitingSince: null,
-      completedAt: null,
-      episodeVersionId: episodeVersionId ?? episode.currentVersionId ?? null,
-    };
-    if (!existing) {
-      return tx.adventureProgress.create({
-        data: { deviceId: deviceInternalId, episodeId: episode.id, ...data },
-      });
-    }
-    return tx.adventureProgress.update({
-      where: { id: existing.id },
-      data,
-    });
-  }
-
-  /**
    * 从 nextSegmentOrder 起连播旁白，直到交互点（等待）或完集。
    * reward 型交互点：播完即发星光并继续，不进入等待。
    */
@@ -1080,7 +622,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     segments: PlayableSegment[],
     prefix: string[],
     daily: AdventureDailyRecord,
-    testRun?: { runSeq: number },
   ): Promise<AdventureReply> {
     const texts = [...prefix];
     let order = progress.nextSegmentOrder;
@@ -1142,25 +683,16 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           },
         });
         await tx.adventureEvent.upsert({
-          where: {
-            eventKey: testRun
-              ? `daily:${daily.id}:completed:run:${testRun.runSeq}`
-              : `daily:${daily.id}:completed`,
-          },
+          where: { eventKey: `daily:${daily.id}:completed` },
           update: {},
           create: {
-            eventKey: testRun
-              ? `daily:${daily.id}:completed:run:${testRun.runSeq}`
-              : `daily:${daily.id}:completed`,
+            eventKey: `daily:${daily.id}:completed`,
             deviceId: progress.deviceId,
             episodeId: progress.episodeId,
             dailyRecordId: daily.id,
             eventType: "completed",
             segmentOrder: order,
-            payload: {
-              stars,
-              ...(testRun ? { test: true, runSeq: testRun.runSeq } : {}),
-            },
+            payload: { stars },
           },
         });
       });
@@ -1657,36 +1189,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     reason: string,
   ): Promise<AdventureReply | null> {
     if (await this.isCompletedToday(deviceInternalId)) {
-      return null;
-    }
-    // 样机试播不平移：测试者必须听到自己选的那一集，故障自愈把它悄悄换到
-    // 下一集等于测试结果造假。只记一条可审计事件，然后落回自由对话链路。
-    const testSession = await this.testAccess.peek(deviceInternalId);
-    if (testSession) {
-      const daily = await this.findCurrentDaily(deviceInternalId);
-      if (daily) {
-        try {
-          await this.prisma.adventureEvent.create({
-            data: {
-              eventKey: `daily:${daily.id}:test_recovery_skipped:${Date.now()}`,
-              deviceId: deviceInternalId,
-              episodeId: daily.episodeId,
-              dailyRecordId: daily.id,
-              eventType: "test_recovery_skipped",
-              payload: { reason, runSeq: testSession.runSeq },
-            },
-          });
-        } catch (error) {
-          this.logger.warn(
-            `Failed to record test_recovery_skipped for deviceId=${deviceInternalId}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-      this.logger.warn(
-        `Adventure recovery skipped for armed test device: deviceId=${deviceInternalId} reason=${reason} episodeId=${testSession.episodeId}`,
-      );
       return null;
     }
     const current = await this.findCurrentAdventure(deviceInternalId);

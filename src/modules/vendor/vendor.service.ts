@@ -226,29 +226,6 @@ export class VendorService {
       );
     }
 
-    // 样机试播触发词（仅测试环境）：「我想玩+完整标题」确定性开播指定集。
-    // 排在等待态接管之前——试播者想重开一集时，触发词不能被等待态吞掉。
-    // 引擎未启用/不是触发词返回 null；标题不存在返回确定性 not-found 话术。
-    // 异常同样落回正常链路，绝不让这一轮静音。
-    try {
-      const testTriggerReply = await this.adventureService.tryTestTrigger(
-        device.id,
-        dto.asrText,
-      );
-      if (testTriggerReply) {
-        return this.sendAdventureReply(
-          device,
-          testTriggerReply,
-          dto.asrText,
-          turnId,
-        );
-      }
-    } catch (error) {
-      this.logger.error(
-        `Adventure test trigger failed, degrading to normal flow for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
-      );
-    }
-
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。

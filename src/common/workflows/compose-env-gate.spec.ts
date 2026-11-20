@@ -95,12 +95,6 @@ describe("compose 环境变量白名单", () => {
     expect("CONTENT_ADMIN_PROFILE" in prodEnv).toBe(false);
     expect(stagingEnv.CONTENT_ADMIN_PROFILE).toBe("authoring");
   });
-
-  it("ADVENTURE_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
-    expect("ADVENTURE_TEST_MODE_ENABLED" in baseEnv).toBe(false);
-    expect("ADVENTURE_TEST_MODE_ENABLED" in prodEnv).toBe(false);
-    expect(stagingEnv.ADVENTURE_TEST_MODE_ENABLED).toBe("true");
-  });
 });
 
 describe("同机双栈的内存护栏", () => {

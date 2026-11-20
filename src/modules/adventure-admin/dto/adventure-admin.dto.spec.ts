@@ -5,8 +5,6 @@ import {
   AuditListQueryDto,
   ChoiceStatsQueryDto,
   CreateEpisodeDto,
-  DeviceTestArmDto,
-  DeviceTestMutationDto,
   EpisodeIdentityDto,
   EpisodeListQueryDto,
   ExportDto,
@@ -591,51 +589,5 @@ describe("ChoiceStatsQueryDto — 日期只挡形状，真实日期合法性归 
     expect(
       props(await errorsOf(ChoiceStatsQueryDto, { start: "2026-01-01" })),
     ).toContain("start");
-  });
-});
-
-describe("DeviceTestArmDto / DeviceTestMutationDto — 样机试播入参外壳", () => {
-  it("arm 三字段齐全 → 通过（理由长度由服务层 assertReason）", async () => {
-    await expect(
-      errorsOf(DeviceTestArmDto, {
-        deviceId: "dev-1001",
-        title: "听风原野第一天",
-        reason: "测试环境验收这一集",
-      }),
-    ).resolves.toHaveLength(0);
-  });
-
-  it.each([
-    ["deviceId", { title: "听风原野第一天" }],
-    ["title", { deviceId: "dev-1001" }],
-  ])("缺 %s → 400", async (key, input) => {
-    expect(props(await errorsOf(DeviceTestArmDto, input))).toContain(key);
-  });
-
-  it("deviceId/title 空串 → 400（IsNotEmpty 只挡空串，不 trim）", async () => {
-    expect(
-      props(await errorsOf(DeviceTestArmDto, { deviceId: "", title: "x" })),
-    ).toContain("deviceId");
-    expect(
-      props(
-        await errorsOf(DeviceTestArmDto, { deviceId: "dev-1001", title: "" }),
-      ),
-    ).toContain("title");
-  });
-
-  it("arm 未知字段 → 400（forbidNonWhitelisted，拼错 deviceId 必须炸）", async () => {
-    expect(
-      props(
-        await errorsOf(DeviceTestArmDto, {
-          deviceId: "dev-1001",
-          title: "听风原野第一天",
-          deviceid: "dev-1001",
-        }),
-      ),
-    ).toContain("deviceid");
-  });
-
-  it("mutation 空 body 通过（reason 长度由服务层断言）", async () => {
-    await expect(errorsOf(DeviceTestMutationDto, {})).resolves.toHaveLength(0);
   });
 });
