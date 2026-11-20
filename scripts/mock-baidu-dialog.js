@@ -12,6 +12,9 @@
  *   LLM_ADAPTER_API_KEY=xxx APP_PORT=4571 npm run start:dev
  *   ADAPTER_KEY=xxx node scripts/mock-baidu-dialog.js
  *   ADAPTER_KEY=xxx DEVICE_ID=dev-baidu-001 node scripts/mock-baidu-dialog.js
+ *   # 样机试播（仅 staging）：触发词开播 → 同标题重玩 → 未知标题
+ *   ADAPTER_KEY=xxx DEVICE_ID=<样机MAC> TEST_TRIGGER_TITLE=<完整标题> \
+ *     API_BASE_URL=http://<staging>:3001 node scripts/mock-baidu-dialog.js
  *
  * DEVICE_ID（2A 起）：设置后按机芯厂约定以 user 字段携带设备标识
  * （真实环境 = 设备 MAC），触发适配层的建档/落库/记忆链路；
@@ -26,7 +29,7 @@ const DEVICE_ID = process.env.DEVICE_ID || "";
 // 与 mock-vendor-dialog.js 相同的 10 轮 edge case：
 // 标准中文 / 纯英文 / 中英混杂 / ASR 混乱无意义 / 拼音乱识别 /
 // 离题 / 重复第 1 轮（测回复多样性）/ 极短 / 长啰嗦句 / 英文离题
-const TURNS = [
+const DEFAULT_TURNS = [
   { tag: "标准中文", text: "我们今天学了打招呼，你会吗" },
   { tag: "纯英文", text: "Hello, how are you?" },
   { tag: "中英混杂", text: "我喜欢 play basketball" },
@@ -50,6 +53,16 @@ const TURNS = [
   { tag: "冒险-交互回答", text: "好呀，我愿意帮忙" },
   { tag: "冒险-继续", text: "继续" },
 ];
+
+// 样机试播（仅 staging 部署有效）：设置 TEST_TRIGGER_TITLE 后只跑试播三连，
+// 跳过常规轮次——触发词开播（从头到尾）→ 同标题重玩（同日不限次数）→
+// 未知标题（确定性 not-found 话术，不落库）。
+const TEST_TURNS = [
+  { tag: "试播-触发", text: `我想玩${process.env.TEST_TRIGGER_TITLE || ""}` },
+  { tag: "试播-重玩", text: `我想玩${process.env.TEST_TRIGGER_TITLE || ""}` },
+  { tag: "试播-未知标题", text: "我想玩不存在的故事" },
+];
+const TURNS = process.env.TEST_TRIGGER_TITLE ? TEST_TURNS : DEFAULT_TURNS;
 
 // 模拟百度 llm_sys 注入的兜底人设
 const SYSTEM_MESSAGE = {
@@ -111,7 +124,7 @@ async function postStream(messages) {
 }
 
 (async () => {
-  console.log(`POST ${BASE_URL}/v1/chat/completions (10 turns)`);
+  console.log(`POST ${BASE_URL}/v1/chat/completions (${TURNS.length} turns)`);
   console.log(
     DEVICE_ID
       ? `device: ${DEVICE_ID}（建档/落库/记忆链路）\n`

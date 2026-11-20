@@ -14,8 +14,10 @@ import { AdventureAdminModule } from "./adventure-admin.module";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureContentQueryService } from "./adventure-content-query.service";
 import { AdventureContentService } from "./adventure-content.service";
+import { AdventureDeviceTestService } from "./adventure-device-test.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
+import { AdventureTestAccessService } from "@/modules/adventure/adventure-test-access.service";
 
 /**
  * 装配测试：只验证「依赖图是完整的」，不碰数据库。
@@ -69,6 +71,7 @@ describe("AdventureAdminModule", () => {
       AdventureContentQueryService,
       AdventureContentService,
       AdventureTransferService,
+      AdventureDeviceTestService,
     ]) {
       expect(moduleRef.get(token)).toBeInstanceOf(token as never);
     }
@@ -106,6 +109,7 @@ describe("AdventureAdminModule", () => {
     expect(adminImports).toContain(AdventureModule);
     expect(engineImports).not.toContain(AdventureAdminModule);
     expect(engineExports).toContain(AdventureRecoveryService);
+    expect(engineExports).toContain(AdventureTestAccessService);
   });
 
   it("exports nothing, so the play engine cannot inject the authoring services", () => {
