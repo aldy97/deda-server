@@ -16,6 +16,7 @@ import {
   RevertDto,
   SaveDraftDto,
   SimulateDto,
+  TestAssignDto,
   VersionDiffQueryDto,
 } from "./adventure-admin.dto";
 
@@ -589,5 +590,39 @@ describe("ChoiceStatsQueryDto — 日期只挡形状，真实日期合法性归 
     expect(
       props(await errorsOf(ChoiceStatsQueryDto, { start: "2026-01-01" })),
     ).toContain("start");
+  });
+});
+
+describe("TestAssignDto — 测试冒险故事下发入参外壳", () => {
+  it("deviceId + reason 齐全 → 通过（理由长度由服务层 assertReason）", async () => {
+    await expect(
+      errorsOf(TestAssignDto, {
+        deviceId: "dev-1001",
+        reason: "测试环境验收这一集",
+      }),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("缺 deviceId → 400", async () => {
+    expect(
+      props(await errorsOf(TestAssignDto, { reason: "测试环境验收这一集" })),
+    ).toContain("deviceId");
+  });
+
+  it("deviceId 空串 → 400", async () => {
+    expect(
+      props(await errorsOf(TestAssignDto, { deviceId: "", reason: "x" })),
+    ).toContain("deviceId");
+  });
+
+  it("未知字段 → 400（forbidNonWhitelisted，拼错 deviceId 必须炸）", async () => {
+    expect(
+      props(
+        await errorsOf(TestAssignDto, {
+          deviceId: "dev-1001",
+          deviceid: "dev-1001",
+        }),
+      ),
+    ).toContain("deviceid");
   });
 });

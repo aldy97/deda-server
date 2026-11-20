@@ -192,3 +192,25 @@ export const ADVENTURE_CHOICE_LLM_DEFAULTS = {
 export const ADVENTURE_CHOICE_LLM_ENV = {
   enabled: "ADVENTURE_CHOICE_LLM_ENABLED",
 } as const;
+
+/**
+ * 测试冒险故事（仅 staging）环境开关。
+ *
+ * 新方案不再用 Redis 武装会话：device 上持久化一条下发关系
+ * （testAdventureEpisodeId + 版本快照），孩子说固定触发词「测试冒险故事」
+ * 即从第 0 段播放被下发的集，不限次数、不限顺序、可播草稿快照。
+ *
+ * 总开关沿用 fail-safe 哲学：只有部署显式写 ADVENTURE_TEST_MODE_ENABLED=true
+ * 才启用（staging compose 硬写，base/prod 刻意不转发，由 compose-env-gate.spec.ts
+ * 钉死）。未开启时触发词不生效、行为与普通设备完全一致。
+ */
+export const ADVENTURE_TEST_ENV = {
+  enabled: "ADVENTURE_TEST_MODE_ENABLED",
+} as const;
+
+/** 测试冒险故事的语音触发词：ASR 文本 trim 后精确等于它即进入测试播放。 */
+export const ADVENTURE_TEST_STORY_TRIGGER = "测试冒险故事";
+
+/** 触发词命中但设备未下发任何集时的确定性话术：不走 LLM、不写库。 */
+export const ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT =
+  "这台设备还没有下发测试冒险故事，请先在看板里给这台设备指定一集。";

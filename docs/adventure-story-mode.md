@@ -265,3 +265,30 @@ npx prisma validate --schema=src/prisma/schema.prisma
 - `test/vendor-stream.e2e-spec.ts`、`test/vendor.e2e-spec.ts`：仅对齐新 Prisma mock。
 
 所有改动保持未提交；不 commit/push 除非明确要求。
+
+---
+
+## 11. 测试冒险故事下发（仅 staging）
+
+**目标**：内容作者在 staging 上拿样机自由验收任意一集——不限次数、不限顺序、可播未发布草稿。
+
+**触发方式**：对样机说固定短语「**测试冒险故事**」，即播放看板下发到该设备的集。不再是「我想玩+标题」的语音标题匹配——下发关系在 dashboard 的 episode 抽屉里直接绑定到具体 `episodeId`，触发词零歧义。
+
+**状态真相**：device 上两条持久化字段（`testAdventureEpisodeId` + `testAdventureEpisodeVersionId`），不再用 Redis 武装会话（无 TTL、无 runSeq、无 zset 索引）。孩子每说一次触发词，就从第 0 段重播一遍。
+
+**两道闸**（照内容管理台同一套双闸哲学）：
+
+1. **环境闸**：`ADVENTURE_TEST_MODE_ENABLED` 必须是字面 `"true"`。base/prod 的 compose 刻意不转发（`compose-env-gate.spec.ts` 钉死），staging override 硬写 `'true'`。未开启时触发词不生效、引擎行为与普通设备完全一致。
+2. **设备闸（隐式）**：只有被下发过的设备才进入测试态（字段非空）。下发前说触发词返回确定性「还没有下发」话术，不落库、不进正常意图路由。
+
+**管理台接口**（见 `docs/analytics-api.md`）：
+
+- `POST episodes/:episodeId/test-assign`：下发当前集（`{deviceId, reason}`，优先锁草稿快照，否则锁当前发布版本，重置粘滞会话，留审计）；
+- `POST episodes/:episodeId/test-clear`：清除该设备当前下发（仅当它正是这一集，否则 409，留审计）；
+- `GET device-test/assignment/:deviceId`：读设备当前下发（prod 返回 `enabled=false`）。
+
+写操作沿用 ContentAdminGuard（scope `adventure-content` + `CONTENT_ADMIN_PROFILE=authoring`）+ 环境闸三重保险，理由过 `assertReason`，动作留 `AdventureContentAuditLog`。
+
+**测试播放的行为差异**（以下发字段为前置条件，普通设备零影响）：每次触发词都从第 0 段重开（含 recap）；当日 daily 行允许覆盖完集状态（`openOrReuseTodayDaily` 的 `allowCompletedOverwrite`）；事件键带时间戳后缀避免重玩撞 `eventKey` 唯一约束；测试播放不走每日一集门禁、不走顺序选集，也不豁免 L1/L2 安全闸与内容熔断。
+
+**体验提示**：主链路（百度 RTC）无服务器推送通道，试播时交互点没有 10s 沉默兜底——停下就必须开口或说「不想玩了」；备用链路（vendor WS）有超时推送，行为不同属设计使然。

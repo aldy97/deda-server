@@ -421,3 +421,15 @@ export class ImportApplyDto {
   @MaxLength(128)
   expectedBundleHash?: string;
 }
+
+export class TestAssignDto {
+  @ApiProperty({ description: "设备业务 ID（小写 MAC）或设备编码" })
+  @IsString()
+  @IsNotEmpty()
+  deviceId: string;
+
+  @ApiPropertyOptional({ description: "变更理由，至少 8 个字" })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}

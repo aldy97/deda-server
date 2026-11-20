@@ -8,6 +8,7 @@ import { AdventureContentQueryService } from "./adventure-content-query.service"
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
+import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
@@ -190,6 +191,24 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     path: "recovery/reset",
     readOnlyExempt: false,
   },
+  {
+    handler: "deviceTestAssignment",
+    method: RequestMethod.GET,
+    path: "device-test/assignment/:deviceId",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "testAssignEpisode",
+    method: RequestMethod.POST,
+    path: "episodes/:episodeId/test-assign",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "testClearEpisode",
+    method: RequestMethod.POST,
+    path: "episodes/:episodeId/test-clear",
+    readOnlyExempt: false,
+  },
 ];
 
 function normalizePath(value: unknown): string {
@@ -244,6 +263,7 @@ describe("AdventureAdminController", () => {
   let transfer: Record<string, jest.Mock>;
   let audit: Record<string, jest.Mock>;
   let recovery: Record<string, jest.Mock>;
+  let testAssign: Record<string, jest.Mock>;
   let profile: string;
 
   beforeEach(async () => {
@@ -281,6 +301,11 @@ describe("AdventureAdminController", () => {
       sweepBrokenProgress: jest.fn(),
       resetBreaker: jest.fn(),
     };
+    testAssign = {
+      assignment: jest.fn(),
+      assign: jest.fn(),
+      clear: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -290,6 +315,7 @@ describe("AdventureAdminController", () => {
         { provide: AdventureTransferService, useValue: transfer },
         { provide: AdventureAuditService, useValue: audit },
         { provide: AdventureRecoveryService, useValue: recovery },
+        { provide: AdventureTestAssignService, useValue: testAssign },
         {
           provide: ConfigService,
           useValue: {
@@ -1080,6 +1106,70 @@ describe("AdventureAdminController", () => {
         controller.recoveryReset({} as never, adminRequest()),
       ).rejects.toThrow();
       expect(recovery.resetBreaker).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("test story assign routes", () => {
+    it("forwards the assignment read without an actor", async () => {
+      testAssign.assignment.mockResolvedValue({
+        enabled: true,
+        assignment: null,
+      });
+
+      await expect(
+        controller.deviceTestAssignment("dev-1001"),
+      ).resolves.toEqual({ enabled: true, assignment: null });
+      expect(testAssign.assignment).toHaveBeenCalledWith("dev-1001");
+    });
+
+    it("assigns with actor and only the picked fields", async () => {
+      testAssign.assign.mockResolvedValue({ ok: true });
+
+      await controller.testAssignEpisode(
+        "ep1",
+        {
+          deviceId: "dev-1001",
+          reason: "测试环境验收这一集",
+          evil: "should be dropped",
+        } as never,
+        adminRequest(),
+      );
+
+      expect(testAssign.assign).toHaveBeenCalledWith(
+        "ep1",
+        { deviceId: "dev-1001", reason: "测试环境验收这一集" },
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+      );
+    });
+
+    it("clears with actor and the picked fields", async () => {
+      testAssign.clear.mockResolvedValue({ ok: true });
+
+      await controller.testClearEpisode(
+        "ep1",
+        { deviceId: "dev-1001", reason: "验收完成清除下发" } as never,
+        adminRequest(),
+      );
+
+      expect(testAssign.clear).toHaveBeenCalledWith(
+        "ep1",
+        { deviceId: "dev-1001", reason: "验收完成清除下发" },
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+      );
+    });
+
+    it.each([
+      ["missing user", { user: undefined }],
+      ["blank username", adminRequest({ username: "   " })],
+    ])("refuses to assign anonymously: %s", async (_label, request) => {
+      await expect(
+        controller.testAssignEpisode(
+          "ep1",
+          { deviceId: "dev-1001", reason: "测试环境验收这一集" } as never,
+          request as never,
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(testAssign.assign).not.toHaveBeenCalled();
     });
   });
 

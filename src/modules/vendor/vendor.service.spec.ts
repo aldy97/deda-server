@@ -25,6 +25,7 @@ describe("VendorService", () => {
   let configService: jest.Mocked<ConfigService>;
   let adventureService: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordPresented: jest.Mock;
@@ -151,6 +152,7 @@ describe("VendorService", () => {
           provide: AdventureService,
           useValue: {
             handleChildReply: jest.fn().mockResolvedValue(null),
+            tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
             startToday: jest.fn().mockResolvedValue(null),
             isCompletedToday: jest.fn().mockResolvedValue(false),
             recordPresented: jest.fn().mockResolvedValue(undefined),

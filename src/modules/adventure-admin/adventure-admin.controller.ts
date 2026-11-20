@@ -39,6 +39,7 @@ import {
   ExportSelector,
   ImportOptions,
 } from "./adventure-transfer.service";
+import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { ADVENTURE_SEASON, EpisodeIdentity } from "./adventure-content.types";
 import { resolveContentAdminProfile } from "./content-admin-profile";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
@@ -61,6 +62,7 @@ import {
   RevertDto,
   SaveDraftDto,
   SimulateDto,
+  TestAssignDto,
   VersionDiffQueryDto,
 } from "./dto/adventure-admin.dto";
 
@@ -137,6 +139,7 @@ export class AdventureAdminController {
     private readonly audit: AdventureAuditService,
     private readonly configService: ConfigService,
     private readonly recovery: AdventureRecoveryService,
+    private readonly testAssign: AdventureTestAssignService,
   ) {}
 
   @Get("capabilities")
@@ -523,6 +526,60 @@ export class AdventureAdminController {
       null,
     );
     return { ok: true, audited };
+  }
+
+  /**
+   * 测试冒险故事下发（仅 staging）。人的闸 = ContentAdminGuard（scope + authoring），
+   * 环境的闸 = ADVENTURE_TEST_MODE_ENABLED（服务层 403，prod 永不可用）。
+   * 写操作与内容变更同规则：理由必须过 assertReason，动作留审计。
+   */
+  @Get("device-test/assignment/:deviceId")
+  @ApiOperation({
+    summary:
+      "测试冒险故事：读设备当前下发（dashboard 展示用；prod 返回 enabled=false）",
+  })
+  async deviceTestAssignment(@Param("deviceId") deviceId: string) {
+    return this.testAssign.assignment(deviceId);
+  }
+
+  @Post("episodes/:episodeId/test-assign")
+  @ApiOperation({
+    summary:
+      "测试冒险故事：把当前集下发到设备（优先锁草稿快照；写操作，留审计）",
+  })
+  async testAssignEpisode(
+    @Param("episodeId") episodeId: string,
+    @Body() dto: TestAssignDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.testAssign.assign(
+      episodeId,
+      this.picked(dto, ["deviceId", "reason"]) as {
+        deviceId: string;
+        reason?: string;
+      },
+      this.actor(req),
+    );
+  }
+
+  @Post("episodes/:episodeId/test-clear")
+  @ApiOperation({
+    summary:
+      "测试冒险故事：清除设备当前下发（仅当它正是这一集；写操作，留审计）",
+  })
+  async testClearEpisode(
+    @Param("episodeId") episodeId: string,
+    @Body() dto: TestAssignDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.testAssign.clear(
+      episodeId,
+      this.picked(dto, ["deviceId", "reason"]) as {
+        deviceId: string;
+        reason?: string;
+      },
+      this.actor(req),
+    );
   }
 
   /**

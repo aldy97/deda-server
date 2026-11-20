@@ -119,7 +119,11 @@ describe("AdventureService", () => {
           useValue: {
             $transaction: jest.fn((callback) => callback(prisma)),
             device: { findUnique: jest.fn() },
-            adventureEpisode: { findFirst: jest.fn(), findMany: jest.fn() },
+            adventureEpisode: {
+              findFirst: jest.fn(),
+              findMany: jest.fn(),
+              findUnique: jest.fn(),
+            },
             adventureSegment: { findMany: jest.fn() },
             adventureEpisodeVersion: {
               findUnique: jest.fn(),
@@ -177,6 +181,7 @@ describe("AdventureService", () => {
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
     prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
+    prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
     prisma.adventureSegment.findMany.mockResolvedValue(segments);
     prisma.adventureDailyRecord.create.mockResolvedValue(baseDaily);
     prisma.adventureDailyRecord.update.mockImplementation((args) =>
@@ -2413,6 +2418,78 @@ describe("AdventureService", () => {
 
       expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
       expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("测试冒险故事（仅 staging）", () => {
+    function enableTestStory() {
+      configService.get.mockImplementation((key: string) =>
+        key === "ADVENTURE_TEST_MODE_ENABLED" ? "true" : undefined,
+      );
+    }
+
+    it("isTestStoryEnabled 只在环境变量为字面 true 时为真", () => {
+      configService.get.mockReturnValue("true");
+      expect(service.isTestStoryEnabled()).toBe(true);
+      configService.get.mockReturnValue("false");
+      expect(service.isTestStoryEnabled()).toBe(false);
+    });
+
+    it("环境未开启时触发词返回 null（落回正常链路）", async () => {
+      configService.get.mockReturnValue(undefined);
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("不是触发词返回 null", async () => {
+      enableTestStory();
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "我想听故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("触发词命中但设备未下发 → 确定性 not-assigned 话术", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: null,
+        testAdventureEpisodeVersionId: null,
+      });
+
+      const reply = await service.tryTestStoryTrigger(
+        "dev-uuid-1",
+        "测试冒险故事",
+      );
+
+      expect(reply).toEqual({
+        texts: [expect.stringContaining("还没有下发")],
+        action: "narrate",
+      });
+    });
+
+    it("触发词命中且有下发 → 从第 0 段播放并写 assigned/started 事件", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: "v1",
+      });
+
+      const reply = await service.tryTestStoryTrigger(
+        "dev-uuid-1",
+        "测试冒险故事",
+      );
+
+      expect(reply?.action).toBe("await_reply");
+      expect(reply?.texts).toContain("今天 Elly 要出门啦。");
+      const createdKeys = prisma.adventureEvent.create.mock.calls.map(
+        (call) => call[0].data.eventKey,
+      );
+      expect(createdKeys.some((key) => key.includes(":assigned:"))).toBe(true);
+      expect(createdKeys.some((key) => key.includes(":started:"))).toBe(true);
     });
   });
 });

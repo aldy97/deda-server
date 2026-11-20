@@ -61,6 +61,7 @@ describe("LlmAdapterModule", () => {
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let adventure: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordEntryBlocked: jest.Mock;
@@ -158,6 +159,7 @@ describe("LlmAdapterModule", () => {
     };
     adventure = {
       handleChildReply: jest.fn().mockResolvedValue(null),
+      tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
       startToday: jest.fn().mockResolvedValue(null),
       isCompletedToday: jest.fn().mockResolvedValue(false),
       recordEntryBlocked: jest.fn().mockResolvedValue(undefined),

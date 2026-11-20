@@ -4,6 +4,7 @@ import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureContentQueryService } from "./adventure-content-query.service";
 import { AdventureContentService } from "./adventure-content.service";
+import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
 
@@ -31,6 +32,7 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
     AdventureAuditService,
     AdventureContentQueryService,
     AdventureContentService,
+    AdventureTestAssignService,
     AdventureTransferService,
   ],
 })

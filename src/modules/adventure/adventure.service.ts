@@ -12,6 +12,9 @@ import {
   ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   ADVENTURE_EXIT_TEXT,
+  ADVENTURE_TEST_ENV,
+  ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT,
+  ADVENTURE_TEST_STORY_TRIGGER,
   AdventureFailurePhase,
   AdventureFailureReport,
   isAdventureExitRequest,
@@ -234,6 +237,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 今日是否已经完成任意一集；这是所有冒险入口的确定性门禁。 */
+  /** 测试冒险故事环境总闸：非字面 "true" 一律视为关（prod 永远不可用）。 */
+  isTestStoryEnabled(): boolean {
+    return (
+      this.configService.get<string>(ADVENTURE_TEST_ENV.enabled) === "true"
+    );
+  }
+
   async isCompletedToday(deviceInternalId: string): Promise<boolean> {
     const record = await this.prisma.adventureDailyRecord.findFirst({
       where: {
@@ -338,7 +348,15 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /** 新分配一集的开场前情回顾：优先当前版本 payload，回落 episode 行的物化副本。 */
   private async resolveRecap(episode: AdventureEpisode): Promise<string[]> {
-    const content = await this.resolveVersionContent(episode.currentVersionId);
+    return this.resolveRecapFor(episode, episode.currentVersionId);
+  }
+
+  /** 指定版本快照的开场前情回顾（测试冒险故事可播草稿快照的 recap）。 */
+  private async resolveRecapFor(
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<string[]> {
+    const content = await this.resolveVersionContent(episodeVersionId);
     const recap = content?.recap ?? episode.recap;
     return recap ? [recap] : [];
   }
@@ -468,6 +486,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     deviceInternalId: string,
     episodeId: string,
+    opts?: { allowCompletedOverwrite?: boolean },
   ): Promise<AdventureDailyRecord> {
     const today = this.dateKey();
     const existing = await tx.adventureDailyRecord.findUnique({
@@ -489,6 +508,19 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       });
     }
     if (existing.status === "completed") {
+      if (opts?.allowCompletedOverwrite) {
+        // 测试冒险故事：同一天反复重玩要覆盖完集状态，否则第二次「测试冒险故事」
+        // 会被完集记录挡住。
+        return tx.adventureDailyRecord.update({
+          where: { id: existing.id },
+          data: {
+            episodeId,
+            status: "in_progress",
+            completedAt: null,
+            completedDate: null,
+          },
+        });
+      }
       // 不可达：isCompletedToday 已在上游拦住。真到了这里说明每日额度判定
       // 出了意外，此时宁可本轮不写库，也不能把孩子的完集记录改成 in_progress。
       this.logger.warn(
@@ -508,6 +540,89 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       select: { characterKey: true },
     });
     return device?.characterKey || "elly";
+  }
+
+  /**
+   * 测试冒险故事开跑：清等待定时器 → 事务内复用/改指当日 daily 行（允许覆盖完集）、
+   * 无条件把进度重置到第 0 段、写带时间戳后缀的 assigned/started 事件（重玩不撞
+   * eventKey 唯一约束）。与正常开集路径分家：测试播放不走每日一集门禁、不走顺序选集。
+   */
+  private async openTestRun(
+    deviceInternalId: string,
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<{ daily: AdventureDailyRecord; progress: AdventureProgress }> {
+    this.clearTimer(deviceInternalId);
+    return this.prisma.$transaction(async (tx) => {
+      const daily = await this.openOrReuseTodayDaily(
+        tx,
+        deviceInternalId,
+        episode.id,
+        { allowCompletedOverwrite: true },
+      );
+      const progress = await this.resetProgressForTest(
+        tx,
+        deviceInternalId,
+        episode,
+        episodeVersionId,
+      );
+      const run = Date.now();
+      await tx.adventureEvent.create({
+        data: {
+          eventKey: `daily:${daily.id}:assigned:${run}`,
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+          dailyRecordId: daily.id,
+          eventType: "daily_assigned",
+        },
+      });
+      await tx.adventureEvent.create({
+        data: {
+          eventKey: `daily:${daily.id}:started:${run}`,
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+          dailyRecordId: daily.id,
+          eventType: "started",
+        },
+      });
+      return { daily, progress };
+    });
+  }
+
+  /**
+   * 测试冒险故事的进度重置：无条件回到第 0 段。与 assignProgress 的区别是它
+   * 覆盖终态（completed/exited/failed_over），因为测试要的是可重复的从头到尾体验。
+   */
+  private async resetProgressForTest(
+    tx: Prisma.TransactionClient,
+    deviceInternalId: string,
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<AdventureProgress> {
+    return tx.adventureProgress.upsert({
+      where: {
+        deviceId_episodeId: {
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+        },
+      },
+      create: {
+        deviceId: deviceInternalId,
+        episodeId: episode.id,
+        status: "in_progress",
+        episodeVersionId,
+        nextSegmentOrder: 0,
+      },
+      update: {
+        status: "in_progress",
+        episodeVersionId,
+        nextSegmentOrder: 0,
+        stars: 0,
+        offTopicCount: 0,
+        waitingSince: null,
+        completedAt: null,
+      },
+    });
   }
 
   /**
@@ -531,6 +646,77 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       return this.handleEngineFailure(deviceInternalId, "start_today", error);
     }
+  }
+
+  /**
+   * 测试冒险故事的语音入口（两条对话链路共用）：固定触发词「测试冒险故事」，
+   * 命中即从第 0 段播放该设备下发的集；未下发返回确定性话术；不是触发词或
+   * 环境未开启返回 null，由链路层落回正常意图路由。任何异常都返回 null 落回
+   * 正常链路，绝不让这一轮静音。
+   */
+  async tryTestStoryTrigger(
+    deviceInternalId: string,
+    asrText: string | null | undefined,
+  ): Promise<AdventureReply | null> {
+    if (!this.isTestStoryEnabled()) {
+      return null;
+    }
+    if ((asrText ?? "").trim() !== ADVENTURE_TEST_STORY_TRIGGER) {
+      return null;
+    }
+    try {
+      const reply = await this.playTestEpisode(deviceInternalId);
+      if (reply) {
+        return reply;
+      }
+      return {
+        texts: [ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT],
+        action: "narrate",
+      };
+    } catch (error) {
+      this.logger.error(
+        `Test story trigger failed, degrading to normal flow for device=${deviceInternalId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /** 播放下发的测试集：读 device 字段 → 锁定版本 → 从第 0 段重开。未下发返回 null。 */
+  async playTestEpisode(
+    deviceInternalId: string,
+  ): Promise<AdventureReply | null> {
+    if (!this.isTestStoryEnabled()) {
+      return null;
+    }
+    const device = await this.prisma.device.findUnique({
+      where: { id: deviceInternalId },
+      select: {
+        testAdventureEpisodeId: true,
+        testAdventureEpisodeVersionId: true,
+      },
+    });
+    const episodeId = device?.testAdventureEpisodeId;
+    if (!episodeId) {
+      return null;
+    }
+    const episode = await this.prisma.adventureEpisode.findUnique({
+      where: { id: episodeId },
+    });
+    if (!episode) {
+      return null;
+    }
+    const episodeVersionId =
+      device.testAdventureEpisodeVersionId ?? episode.currentVersionId ?? null;
+    const { daily, progress } = await this.openTestRun(
+      deviceInternalId,
+      episode,
+      episodeVersionId,
+    );
+    const segments = await this.loadSegmentsForPlay(progress);
+    const prefix = await this.resolveRecapFor(episode, episodeVersionId);
+    return this.playFrom(progress, segments, prefix, daily);
   }
 
   private async startTodayInternal(

@@ -226,6 +226,28 @@ export class VendorService {
       );
     }
 
+    // 测试冒险故事触发词（仅测试环境）：固定短语「测试冒险故事」确定性开播下发集。
+    // 排在等待态接管之前——测试者想重玩时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；未下发返回确定性话术；异常落回正常链路。
+    try {
+      const testStoryReply = await this.adventureService.tryTestStoryTrigger(
+        device.id,
+        dto.asrText,
+      );
+      if (testStoryReply) {
+        return this.sendAdventureReply(
+          device,
+          testStoryReply,
+          dto.asrText,
+          turnId,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Adventure test story trigger failed, degrading to normal flow for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
