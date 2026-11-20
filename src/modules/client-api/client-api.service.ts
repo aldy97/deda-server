@@ -28,6 +28,7 @@ import {
   resolveProvisionWindowMs,
   resolveTtsDefaultVol,
 } from "./client-api.constants";
+import { SLEEP_MODE_SPEED } from "@/modules/sleep-configs/sleep-mode.service";
 import { LoginMacDto } from "./dto/login-mac.dto";
 import { BotGetValueDto } from "./dto/bot-getvalue.dto";
 import { BotStartDto } from "./dto/bot-start.dto";
@@ -202,12 +203,23 @@ export class ClientApiService {
     }
 
     const desired = await this.voiceReconcile.readDesired(device.id);
+
+    // 哄睡会话内：直接返回哄睡语速（产品常量 0.7），绕过语速档位映射。
+    // getvalue 每轮建实例前拉取，定时进入（设备空闲无实例）时下次建实例即生效。
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { deviceId: device.id },
+    });
+    const inSleepMode =
+      session?.currentMode === "sleep_story" &&
+      (!session.expiresAt || session.expiresAt.getTime() > Date.now());
+
     // 未设档位 → 走中档；档位无法映射为倍数（SPEECH_RATE_MAP_JSON 缺该项）→
     // 回落 v1.4 §4.2 的基础语速。spd 与 vcn 不同：它有书面兜底值，不会让设备停摆。
-    const spd =
-      this.voiceReconcile.resolveSpd(
-        desired.speechRate ?? DEFAULT_SPEECH_RATE,
-      ) ?? TTS_BASE_SPD;
+    const spd = inSleepMode
+      ? SLEEP_MODE_SPEED
+      : (this.voiceReconcile.resolveSpd(
+          desired.speechRate ?? DEFAULT_SPEECH_RATE,
+        ) ?? TTS_BASE_SPD);
 
     return { vcn, vol: this.ttsDefaultVol, spd };
   }

@@ -15,6 +15,7 @@ import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
@@ -44,6 +45,7 @@ describe("VendorService", () => {
     getByDeviceId: jest.Mock;
   };
   let sleepVoiceConfigService: { handle: jest.Mock };
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
 
   async function* streamOf(
     deltas: string[],
@@ -82,6 +84,7 @@ describe("VendorService", () => {
     );
 
   beforeEach(async () => {
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PROMPT_REGISTRY_PROVIDER,
@@ -182,6 +185,7 @@ describe("VendorService", () => {
             handle: jest.fn(),
           },
         },
+        { provide: SleepModeService, useValue: sleepMode },
       ],
     }).compile();
 
@@ -939,6 +943,7 @@ describe("VendorService", () => {
       const promptOptions = llmService.buildEnglishTutorPrompt.mock.calls[0][2];
       expect(promptOptions?.promptTemplate).toContain("不要提问");
       expect(promptOptions?.promptTemplate).toContain("不要邀请互动");
+      expect(sleepMode.enter).toHaveBeenCalledWith("uuid-s1");
     });
 
     describe("sleep story voice config", () => {
