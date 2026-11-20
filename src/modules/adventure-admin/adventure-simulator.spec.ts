@@ -1,4 +1,5 @@
 import {
+  awardsStar,
   DEFAULT_SIMULATION_THRESHOLDS,
   simulateEpisode,
   TTS_CHARS_PER_SECOND,
@@ -7,6 +8,7 @@ import {
   EpisodeContentDraft,
   EpisodeIdentity,
   EpisodeSegmentDraft,
+  AdventureInteractionType,
 } from "./adventure-content.types";
 
 /**
@@ -334,5 +336,129 @@ describe("adventure-simulator", () => {
       "结尾。",
     ]);
     expect(codes(result)).toContain("INTERACTION_WITHOUT_TYPE");
+  });
+
+  it("segments 不是数组时按空集处理，报 NO_SEGMENTS 而不是崩", () => {
+    const result = simulateEpisode(
+      identity,
+      {
+        title: "坏数据",
+        segments: "不是数组",
+      } as unknown as EpisodeContentDraft,
+    );
+    expect(result.beats).toEqual([]);
+    expect(codes(result)).toContain("NO_SEGMENTS");
+  });
+
+  it("segment.text 不是字符串时按空文本播，不崩", () => {
+    const result = simulateEpisode(
+      identity,
+      content([{ order: 0, kind: "narration", text: 42 } as unknown as EpisodeSegmentDraft]),
+    );
+    expect(result.beats[0].says).toEqual([RECAP, ""]);
+  });
+
+  it("two_choice 的 options 缺失或 choices 不是数组 → 空选择，不崩", () => {
+    const noOptions = simulateEpisode(
+      identity,
+      content([
+        {
+          order: 0,
+          kind: "interaction",
+          text: "选一个。",
+          interactionType: "two_choice",
+        },
+        narration(1, "结尾。"),
+      ]),
+    );
+    expect(noOptions.beats[0].choices).toEqual([]);
+
+    const badChoices = simulateEpisode(
+      identity,
+      content([
+        {
+          order: 0,
+          kind: "interaction",
+          text: "选一个。",
+          interactionType: "two_choice",
+          options: { choices: "不是数组" },
+        } as unknown as EpisodeSegmentDraft,
+        narration(1, "结尾。"),
+      ]),
+    );
+    expect(badChoices.beats[0].choices).toEqual([]);
+  });
+
+  it("choice 缺 key/text/reply 时各自兜底为空串，null 元素被过滤", () => {
+    const result = simulateEpisode(
+      identity,
+      content([
+        {
+          order: 0,
+          kind: "interaction",
+          text: "选一个。",
+          interactionType: "two_choice",
+          options: {
+            choices: [null, { key: 1, text: null, reply: undefined }, {}],
+          },
+        } as unknown as EpisodeSegmentDraft,
+        narration(1, "结尾。"),
+      ]),
+    );
+    expect(result.beats[0].choices).toEqual([
+      { key: "", text: "", reply: "" },
+      { key: "", text: "", reply: "" },
+    ]);
+  });
+
+  it("repeat_after_me 的 praise 缺失、纯空白或非字符串 → 不念也不计字数", () => {
+    const blank = simulateEpisode(
+      identity,
+      content([
+        {
+          order: 0,
+          kind: "interaction",
+          text: "跟我念。",
+          interactionType: "repeat_after_me",
+          options: { praise: "   " },
+        },
+        narration(1, "结尾。"),
+      ]),
+    );
+    expect(blank.beats[0].praise).toBeNull();
+    expect(blank.totalSpokenChars).toBe(
+      RECAP.length + "跟我念。".length + "结尾。".length,
+    );
+
+    const nonString = simulateEpisode(
+      identity,
+      content([
+        {
+          order: 0,
+          kind: "interaction",
+          text: "跟我念。",
+          interactionType: "repeat_after_me",
+          options: { praise: 42 },
+        } as unknown as EpisodeSegmentDraft,
+        narration(1, "结尾。"),
+      ]),
+    );
+    expect(nonString.beats[0].praise).toBeNull();
+  });
+});
+
+describe("awardsStar — 与引擎发星分支保持一致的口径", () => {
+  it.each<[AdventureInteractionType, boolean]>([
+    ["reward", true],
+    ["two_choice", true],
+    ["open_question", false],
+    ["repeat_after_me", false],
+  ])("type=%s → %p", (type, expected) => {
+    expect(awardsStar(type)).toBe(expected);
+  });
+
+  it("type 为 null / undefined → false（防御：调用方可能拿到缺类型的段）", () => {
+    expect(awardsStar(null)).toBe(false);
+    expect(awardsStar(undefined)).toBe(false);
   });
 });

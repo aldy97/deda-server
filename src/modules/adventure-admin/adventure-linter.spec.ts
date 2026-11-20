@@ -484,6 +484,30 @@ describe("adventure-linter", () => {
       const issue = report.errors.find((i) => i.code === "CHOICES_REQUIRED");
       expect(issue?.segmentOrder).toBe(1);
     });
+
+    it("null 选项与字段类型不对 → 按空值走校验而不是崩", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [null, { key: 1, text: 2, reply: 3 }],
+        }),
+      );
+      expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
+      expect(codes(report.errors)).toContain("CHOICE_REPLY_REQUIRED");
+    });
+
+    it("另一个选项是 null 时子串检查按空文本跳过，不误报也不崩", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            null,
+          ],
+        }),
+      );
+      expect(codes(report.errors)).not.toContain("CHOICE_TEXT_SUBSTRING");
+    });
   });
 
   describe("repeat_after_me options", () => {
@@ -635,5 +659,65 @@ describe("adventure-linter", () => {
     expect(issue.message.length).toBeGreaterThan(0);
     expect(issue.businessKey).toBe("elly/2/1");
     expect(issue.severity).toBe("error");
+  });
+
+  describe("畸形输入防御", () => {
+    it("segments 不是数组 → 报 NO_SEGMENTS 而不是崩", () => {
+      const report = lintEpisode(
+        identity,
+        { title: "x", segments: "不是数组" } as unknown as EpisodeContentDraft,
+      );
+      expect(codes(report.errors)).toContain("NO_SEGMENTS");
+    });
+
+    it("title 不是字符串 → 按空标题报 TITLE_REQUIRED", () => {
+      const report = lintEpisode(
+        identity,
+        { title: 42, segments: [] } as unknown as EpisodeContentDraft,
+      );
+      expect(codes(report.errors)).toContain("TITLE_REQUIRED");
+    });
+
+    it.each([-1, 1.5, "abc"])(
+      "segment.order=%p 不是不小于 0 的整数 → SEGMENT_ORDER_INVALID",
+      (order) => {
+        const report = lintEpisode(identity, {
+          ...valid(),
+          segments: [
+            {
+              order,
+              kind: "narration",
+              text: "第一段。",
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        });
+        expect(codes(report.errors)).toContain("SEGMENT_ORDER_INVALID");
+      },
+    );
+
+    it("segment.text 不是字符串 → 按空文本报 SEGMENT_TEXT_REQUIRED", () => {
+      const report = lintEpisode(identity, {
+        ...valid(),
+        segments: [
+          {
+            order: 0,
+            kind: "narration",
+            text: 42,
+          } as unknown as EpisodeSegmentDraft,
+        ],
+      });
+      expect(codes(report.errors)).toContain("SEGMENT_TEXT_REQUIRED");
+    });
+
+    it("配了禁用词但正文没命中 → 什么都不报", () => {
+      const report = lintEpisode(
+        identity,
+        valid(),
+        { forPublish: true },
+        { forbiddenWords: ["刀子"] },
+      );
+      expect(codes(report.errors)).not.toContain("FORBIDDEN_WORD");
+      expect(report.ok).toBe(true);
+    });
   });
 });

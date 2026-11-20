@@ -14,6 +14,7 @@ import {
 import {
   EpisodeContentDraft,
   EpisodeIdentity,
+  EpisodeSegmentDraft,
 } from "./adventure-content.types";
 
 /**
@@ -80,6 +81,12 @@ describe("adventure-bundle", () => {
         { y: 4, x: 3 },
       ];
       expect(canonicalJson(a)).toBe(canonicalJson(b));
+    });
+
+    it("serializes a Date as its ISO string so hashes are stable across processes", () => {
+      const date = new Date("2026-01-02T03:04:05.000Z");
+      expect(canonicalJson(date)).toBe('"2026-01-02T03:04:05.000Z"');
+      expect(canonicalJson({ at: date })).toBe('{"at":"2026-01-02T03:04:05.000Z"}');
     });
   });
 
@@ -246,6 +253,133 @@ describe("adventure-bundle", () => {
         ],
       });
       expect(episode.segments).toHaveLength(1);
+    });
+
+    it("two_choice 的 choices 不是数组 → options 整体置空，而不是崩", () => {
+      const episode = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "选一个。",
+              interactionType: "two_choice",
+              options: { choices: "不是数组" },
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(episode.segments[0].options).toBeNull();
+    });
+
+    it("two_choice 的 choices 里 null 元素被过滤，合法项原样保留", () => {
+      const episode = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "选一个。",
+              interactionType: "two_choice",
+              options: {
+                choices: [null, { key: "a", text: "甲", reply: "好呀" }],
+              },
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(episode.segments[0].options).toEqual({
+        choices: [{ key: "a", text: "甲", reply: "好呀" }],
+      });
+    });
+
+    it("repeat_after_me：有 praise 保留为 {praise}，空白 praise 整体置空", () => {
+      const withPraise = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "跟我念。",
+              interactionType: "repeat_after_me",
+              options: { praise: "真棒！" },
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(withPraise.segments[0].options).toEqual({ praise: "真棒！" });
+
+      const blankPraise = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "跟我念。",
+              interactionType: "repeat_after_me",
+              options: { praise: "   " },
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(blankPraise.segments[0].options).toBeNull();
+    });
+
+    it("segments 不是数组或含非对象元素 → 按空处理，不崩", () => {
+      const noArray = toBundleEpisode(identity, content({ segments: undefined }));
+      expect(noArray.segments).toEqual([]);
+
+      const withNull = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            null as unknown as EpisodeSegmentDraft,
+            { order: 0, kind: "narration", text: "保留下来的。" },
+          ],
+        }),
+      );
+      expect(withNull.segments).toHaveLength(1);
+      expect(withNull.segments[0].text).toBe("保留下来的。");
+    });
+
+    it("interaction 段的 options 不是对象，或类型不需要选项 → 归一化成 null", () => {
+      const badOptions = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "选一个。",
+              interactionType: "two_choice",
+              options: "不是对象",
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(badOptions.segments[0].options).toBeNull();
+
+      const openQuestion = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            {
+              order: 0,
+              kind: "interaction",
+              text: "你想去哪？",
+              interactionType: "open_question",
+              options: {
+                choices: [{ key: "a", text: "甲", reply: "好呀" }],
+              },
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        }),
+      );
+      expect(openQuestion.segments[0].options).toBeNull();
     });
   });
 
@@ -450,6 +584,90 @@ describe("adventure-bundle", () => {
       }
       expect(parsed.bundle.episodes[0].segments).toHaveLength(3);
     });
+
+    it.each([
+      {
+        label: "bundleSchemaVersion 是字符串",
+        mutate: (b: Record<string, unknown>) => {
+          b.bundleSchemaVersion = "1";
+        },
+        fragment: "bundleSchemaVersion 缺失或不是整数",
+      },
+      {
+        label: "bundleSchemaVersion 是小数",
+        mutate: (b: Record<string, unknown>) => {
+          b.bundleSchemaVersion = 1.5;
+        },
+        fragment: "bundleSchemaVersion 缺失或不是整数",
+      },
+      {
+        label: "episodes[0] 不是对象",
+        mutate: (b: Record<string, unknown>) => {
+          (b.episodes as unknown[])[0] = "不是对象";
+        },
+        fragment: "episodes[0] 不是对象",
+      },
+      {
+        label: "characterKey 不在白名单",
+        mutate: (b: Record<string, unknown>) => {
+          (b.episodes as Array<Record<string, unknown>>)[0].characterKey =
+            "momo";
+        },
+        fragment: "不在白名单内",
+      },
+      {
+        label: "season 是 0",
+        mutate: (b: Record<string, unknown>) => {
+          (b.episodes as Array<Record<string, unknown>>)[0].season = 0;
+        },
+        fragment: "不是不小于 1 的整数",
+      },
+      {
+        label: "title 是空白串",
+        mutate: (b: Record<string, unknown>) => {
+          (b.episodes as Array<Record<string, unknown>>)[0].title = "   ";
+        },
+        fragment: "title 不能为空",
+      },
+      {
+        label: "segments 不是数组",
+        mutate: (b: Record<string, unknown>) => {
+          (b.episodes as Array<Record<string, unknown>>)[0].segments =
+            "不是数组";
+        },
+        fragment: "segments 缺失或不是数组",
+      },
+    ])("$label → ok=false 且报错含「$fragment」", ({ mutate, fragment }) => {
+      const bundle = buildBundle([{ identity, content: content() }], {
+        sourceProfile: "authoring",
+      });
+      const tampered = JSON.parse(JSON.stringify(bundle)) as Record<
+        string,
+        unknown
+      >;
+      mutate(tampered);
+
+      const parsed = parseBundle(tampered);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.errors.join(" ")).toContain(fragment);
+      }
+    });
+
+    it("hand-made bundle 缺 exportedAt / sourceProfile → 落 now 与 unknown", () => {
+      const parsed = parseBundle({
+        bundleSchemaVersion: BUNDLE_SCHEMA_VERSION,
+        episodes: [
+          JSON.parse(JSON.stringify(toBundleEpisode(identity, content()))),
+        ],
+      });
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) {
+        return;
+      }
+      expect(parsed.bundle.sourceProfile).toBe("unknown");
+      expect(parsed.bundle.exportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
   });
 
   describe("diffEpisodes", () => {
@@ -505,6 +723,24 @@ describe("adventure-bundle", () => {
       expect(diffEpisodes(shorter, episode).segmentDiffs).toContainEqual(
         expect.objectContaining({ order: 2, change: "added" }),
       );
+    });
+
+    it("sorts segment diffs by order even when the incoming array is shuffled", () => {
+      const base = content();
+      const shuffled = toBundleEpisode(
+        identity,
+        content({
+          segments: [
+            { ...base.segments[2], text: "改过的结尾。" },
+            { ...base.segments[0], text: "改过的开场。" },
+          ],
+        }),
+      );
+      const orders = diffEpisodes(episode, shuffled).segmentDiffs.map(
+        (diff) => diff.order,
+      );
+      expect(orders.length).toBeGreaterThan(1);
+      expect(orders).toEqual([...orders].sort((a, b) => a - b));
     });
 
     it("reports title and recap changes", () => {
@@ -613,6 +849,22 @@ describe("adventure-bundle", () => {
       expect(plan.items[0].action).toBe("reject");
       expect(plan.items[0].reason).toContain("retire");
       expect(plan.rejects).toBe(1);
+    });
+
+    it("renders a non-Date retiredAt as its string form in the reject reason", () => {
+      const plan = planBundleImport(bundle(), [
+        {
+          id: "ep1",
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 1,
+          published: true,
+          retiredAt: "2026-05-01T00:00:00Z",
+          currentContentHash: null,
+        },
+      ]);
+      expect(plan.items[0].action).toBe("reject");
+      expect(plan.items[0].reason).toContain("2026-05-01T00:00:00Z");
     });
 
     it("rejects a bundle that lists the same business key twice", () => {

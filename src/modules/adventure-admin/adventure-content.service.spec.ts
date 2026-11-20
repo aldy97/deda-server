@@ -5,7 +5,11 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { AdventureContentService } from "./adventure-content.service";
+import {
+  assertImportable,
+  AdventureContentService,
+  MAX_REASON_CHARS,
+} from "./adventure-content.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import {
   AdventureContentQueryService,
@@ -15,7 +19,7 @@ import {
   EpisodeContentDraft,
   EpisodeIdentity,
 } from "./adventure-content.types";
-import { LintIssue } from "./adventure-linter";
+import { LintIssue, LintReport } from "./adventure-linter";
 
 /**
  * 写侧的验收标准只有两条：
@@ -327,6 +331,41 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    it("rethrows a transaction failure that is not a business-key race", async () => {
+      prisma.$transaction.mockRejectedValueOnce(new Error("connection lost"));
+
+      await expect(
+        service.createEpisode(identity, content, actor, {
+          reason: "新建一集的初稿内容",
+        }),
+      ).rejects.toThrow("connection lost");
+    });
+
+    it("summarizes lint warnings to bare codes in the audit detail", async () => {
+      query.checkContent.mockResolvedValue({
+        ok: true,
+        issues: [],
+        errors: [],
+        warnings: [
+          {
+            severity: "warning",
+            code: "RECAP_EMPTY",
+            message: "没有回顾",
+            businessKey: "elly/1/3",
+          },
+        ],
+      } as LintReport);
+
+      await service.createEpisode(identity, content, actor, {
+        reason: "新建一集的初稿内容",
+      });
+
+      const entry = audit.record.mock.calls[0][1] as {
+        detail: { lint: { warnings: string[] } };
+      };
+      expect(entry.detail.lint.warnings).toEqual(["RECAP_EMPTY"]);
+    });
   });
 
   describe("saveDraft", () => {
@@ -533,6 +572,41 @@ describe("AdventureContentService", () => {
       ).rejects.toBeInstanceOf(BadRequestException);
 
       expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a reason that runs over the limit with REASON_TOO_LONG", async () => {
+      const error = await service
+        .saveDraft("ep1", content, actor, {
+          reason: "长".repeat(MAX_REASON_CHARS + 1),
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse().code).toBe("REASON_TOO_LONG");
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the draft row carries no updatedAt to compare against", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([
+        versionRow({
+          id: "v3",
+          version: 3,
+          status: "draft",
+          updatedAt: null,
+        }),
+      ]);
+
+      const error = await service
+        .saveDraft("ep1", content, actor, {
+          baseVersionId: "v3",
+          baseDraftUpdatedAt: "2026-11-12T09:30:00.000Z",
+          reason: "草稿行没有时间戳也按已过期处理",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse().code).toBe("DRAFT_CONFLICT");
+      expect(tx.adventureEpisodeVersion.update).not.toHaveBeenCalled();
     });
 
     /**
@@ -856,6 +930,37 @@ describe("AdventureContentService", () => {
         service.publish("ep1", actor, { reason: "自检本身崩了也不该影响发布" }),
       ).resolves.toMatchObject({ versionId: "v3" });
     });
+
+    it("publishes the very first version with previousVersionId null in the audit", async () => {
+      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([draft]);
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([draft]);
+
+      await service.publish("ep1", actor, { reason: "第一版直接上线啦" });
+
+      const entry = audit.record.mock.calls.find(
+        (call) => call[1].action === "publish",
+      )[1] as { detail: { previousVersionId: string | null } };
+      expect(entry.detail.previousVersionId).toBeNull();
+    });
+
+    it("self-check compares against an empty spine when the payload lost its segments", async () => {
+      const bare = versionRow({
+        id: "v3",
+        version: 3,
+        status: "draft",
+        payload: { title: "新标题", recap: null },
+      });
+      prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
+        bare,
+        versionRow({ id: "v2", version: 2, status: "published" }),
+      ]);
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([bare]);
+      prisma.adventureSegment.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.publish("ep1", actor, { reason: "payload 缺 segments 也不该崩" }),
+      ).resolves.toMatchObject({ versionId: "v3" });
+    });
   });
 
   describe("revert", () => {
@@ -991,6 +1096,26 @@ describe("AdventureContentService", () => {
       expect(result.newVersion).toBe(5);
       expect(result.draftStillPending).toBe(true);
     });
+
+    it("reverts into a vanished version history, numbering the new version 1", async () => {
+      tx.adventureEpisodeVersion.findMany.mockResolvedValue([]);
+
+      const result = await service.revert("ep1", "v1", actor, {
+        confirmText: "elly/1/3",
+        reason: "历史表被清了也要能回滚",
+      });
+
+      expect(tx.adventureEpisodeVersion.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ version: 1 }),
+        }),
+      );
+      const entry = audit.record.mock.calls[0][1] as {
+        detail: { revertedFromVersionId: string | null };
+      };
+      expect(entry.detail.revertedFromVersionId).toBeNull();
+      expect(result.newVersion).toBe(1);
+    });
   });
 
   describe("retire", () => {
@@ -1015,6 +1140,16 @@ describe("AdventureContentService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("treats a missing confirm text as a mismatch instead of skipping the check", async () => {
+      const error = await service
+        .retire("ep1", actor, { reason: "这一集的故事线砍掉了" })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse().code).toBe("CONFIRM_TEXT_MISMATCH");
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -1219,6 +1354,22 @@ describe("AdventureContentService", () => {
       expect(tx.adventureEpisode.update).not.toHaveBeenCalled();
     });
 
+    it("refuses to discard a row that is already published, before even looking at versions", async () => {
+      query.loadEpisode.mockResolvedValue({ ...episodeRow, published: true });
+
+      const error = await service
+        .discardEpisode("ep1", actor, {
+          confirmText: "elly/1/3",
+          reason: "想作废一集已经发布过的故事",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse().code).toBe("EPISODE_WAS_PUBLISHED");
+      expect(error.getResponse().message).toContain("已经有孩子玩过它了");
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
     it("demands the typed business key", async () => {
       await expect(
         service.discardEpisode("ep1", actor, {
@@ -1282,6 +1433,83 @@ describe("AdventureContentService", () => {
           expect(payloadKeys).toEqual([]);
         }
       }
+    });
+  });
+
+  describe("options 缺省（默认 {}）", () => {
+    const calls: Array<
+      [string, (s: AdventureContentService) => Promise<unknown>]
+    > = [
+      [
+        "createEpisode",
+        (s) => s.createEpisode(identity, content, actor),
+      ],
+      ["saveDraft", (s) => s.saveDraft("ep1", content, actor)],
+      ["publish", (s) => s.publish("ep1", actor)],
+      ["revert", (s) => s.revert("ep1", "v1", actor)],
+      ["retire", (s) => s.retire("ep1", actor)],
+      ["restore", (s) => s.restore("ep1", actor)],
+      ["discardDraft", (s) => s.discardDraft("ep1", actor)],
+      ["discardEpisode", (s) => s.discardEpisode("ep1", actor)],
+    ];
+
+    it.each(calls)(
+      "%s 漏传 options → 走默认值并给出 REASON_REQUIRED 领域错误，而不是 TypeError",
+      async (_name, call) => {
+        const error = await call(service).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect(
+          (error as BadRequestException).getResponse() as { code: string },
+        ).toMatchObject({ code: "REASON_REQUIRED" });
+      },
+    );
+  });
+
+  describe("assertImportable（跨环境导入的闸口，transfer 在 apply 前调用）", () => {
+    it("treats a report without an issues array as clean", () => {
+      expect(() =>
+        assertImportable(
+          identity,
+          content,
+          { ok: true } as unknown as LintReport,
+        ),
+      ).not.toThrow();
+    });
+
+    it("survives content whose segments array is missing entirely", () => {
+      expect(() =>
+        assertImportable(
+          identity,
+          { title: "x", segments: undefined } as unknown as EpisodeContentDraft,
+          {
+            ok: true,
+            issues: [],
+            errors: [],
+            warnings: [],
+          } as LintReport,
+        ),
+      ).not.toThrow();
+    });
+
+    it("rejects on a blocking code regardless of issue severity", () => {
+      const report = {
+        ok: false,
+        issues: [
+          {
+            severity: "warning",
+            code: "FORBIDDEN_WORD",
+            message: "含禁用词",
+            businessKey: "elly/1/3",
+          },
+        ],
+        errors: [],
+        warnings: [],
+      } as unknown as LintReport;
+
+      expect(() => assertImportable(identity, content, report)).toThrow(
+        BadRequestException,
+      );
     });
   });
 });

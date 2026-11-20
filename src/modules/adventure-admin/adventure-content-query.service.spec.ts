@@ -175,6 +175,56 @@ describe("AdventureContentQueryService", () => {
       expect(where.retiredAt).toBeUndefined();
     });
 
+    it("translates a whitelisted characterKey, published and a numeric search into the where clause", async () => {
+      await service.listEpisodes({
+        characterKey: "elly",
+        published: false,
+        search: "3",
+      });
+
+      const where = prisma.adventureEpisode.findMany.mock.calls[0][0].where;
+      expect(where.characterKey).toBe("elly");
+      expect(where.published).toBe(false);
+      // 纯数字 search 同时命中标题 contains 与集号精确匹配
+      expect(where.OR).toEqual([
+        { title: { contains: "3" } },
+        { episodeNumber: 3 },
+      ]);
+    });
+
+    it("ignores a characterKey outside the whitelist and a non-numeric search's episode-number arm", async () => {
+      await service.listEpisodes({ characterKey: "momo", search: "森林" });
+
+      const where = prisma.adventureEpisode.findMany.mock.calls[0][0].where;
+      expect(where.characterKey).toBeUndefined();
+      expect(where.OR).toEqual([{ title: { contains: "森林" } }]);
+    });
+
+    it("omits the filter argument entirely and still paginates by default", async () => {
+      await service.listEpisodes();
+
+      const args = prisma.adventureEpisode.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(50);
+    });
+
+    it("clamps page and pageSize the same way the audit list does", async () => {
+      await service.listEpisodes({ page: 1.5, pageSize: 201 });
+      let args = prisma.adventureEpisode.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(200);
+
+      await service.listEpisodes({ page: 0, pageSize: 0.5 });
+      args = prisma.adventureEpisode.findMany.mock.calls[1][0];
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(50);
+
+      await service.listEpisodes({ page: Infinity, pageSize: 200 });
+      args = prisma.adventureEpisode.findMany.mock.calls[2][0];
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(200);
+    });
+
     it("derives the business key and the draft/published version numbers for each row", async () => {
       prisma.adventureEpisode.findMany.mockResolvedValue([ellyEpisode]);
       prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
@@ -508,6 +558,23 @@ describe("AdventureContentQueryService", () => {
       expect(result.content.segments).toHaveLength(2);
       expect(result.content.title).toBe("第三集");
     });
+
+    it("parses a payload with missing segments and title into empty defaults", async () => {
+      prisma.adventureEpisode.findUnique.mockResolvedValue(ellyEpisode);
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue({
+        id: "v2",
+        episodeId: "ep1",
+        version: 2,
+        status: "published",
+        payload: null,
+      });
+
+      const result = await service.getVersion("ep1", "v2");
+
+      expect(result.meta.title).toBe("");
+      expect(result.meta.segmentCount).toBe(0);
+      expect(result.content.segments).toEqual([]);
+    });
   });
 
   describe("diffVersions", () => {
@@ -636,6 +703,13 @@ describe("AdventureContentQueryService", () => {
       });
 
       expect(content.segments).toHaveLength(1);
+    });
+
+    it("survives a null payload: 空标题、空段，而不是崩", () => {
+      const parsed = contentFromPayload(identity, null);
+
+      expect(parsed.title).toBe("");
+      expect(parsed.segments).toEqual([]);
     });
   });
 
@@ -790,6 +864,27 @@ describe("AdventureContentQueryService", () => {
       // 未覆盖的阈值保持默认，避免半套配置静默生效
       expect(caps.lintThresholds.maxTitleChars).toBe(
         DEFAULT_LINT_THRESHOLDS.maxTitleChars,
+      );
+    });
+
+    it("falls back to defaults when the env list produces no words", () => {
+      const tuned = new AdventureContentQueryService(
+        prisma as never,
+        {
+          get: (key: string) => {
+            if (key === "CONTENT_ADMIN_PROFILE") {
+              return "authoring";
+            }
+            if (key === "ADVENTURE_LINT_FORBIDDEN_WORDS") {
+              return "，,  ";
+            }
+            return undefined;
+          },
+        } as never,
+      );
+
+      expect(tuned.capabilities().lintThresholds.forbiddenWords).toEqual(
+        DEFAULT_LINT_THRESHOLDS.forbiddenWords,
       );
     });
   });
@@ -1217,6 +1312,139 @@ describe("AdventureContentQueryService", () => {
       expect(json).not.toContain("asrText");
       expect(json).not.toContain("messageId");
       expect(json).not.toContain("deviceId");
+    });
+
+    it("拒绝形状不对或倒挂的日期区间", async () => {
+      await expect(
+        service.choiceStats("ep1", {
+          startDate: "2026-1-1",
+          endDate: "2026-01-02",
+        }),
+      ).rejects.toThrow("Invalid date");
+      await expect(
+        service.choiceStats("ep1", {
+          startDate: "2026-13-01",
+          endDate: "2026-01-01",
+        }),
+      ).rejects.toThrow("Invalid date");
+      await expect(
+        service.choiceStats("ep1", {
+          startDate: "2026-02-01",
+          endDate: "2026-01-01",
+        }),
+      ).rejects.toThrow("startDate must be <= endDate");
+      expect(prisma.adventureEvent.findMany).not.toHaveBeenCalled();
+    });
+
+    it("事件 payload 缺失或类型不对 → 兜底计数，不崩", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        { eventType: "choice_matched", segmentOrder: 1, payload: null },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: "x", key: 1, source: 2 },
+        },
+        {
+          eventType: "choice_matched",
+          segmentOrder: 1,
+          payload: { index: 2 },
+        },
+        { eventType: "choice_matched", segmentOrder: 1 },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      const seg = result.segments[0];
+      expect(seg.matchedTotal).toBe(4);
+      // 版本选项在前，事件里兜底 key 的孤儿选项追加在后
+      expect(seg.choices).toHaveLength(4);
+      expect(seg.choices[2]).toMatchObject({ index: 0, key: "", hits: 3 });
+      expect(seg.choices[3]).toMatchObject({ index: 2, key: "", hits: 1 });
+    });
+
+    it("fallback / answered / timeout 的 interactionType 不是 two_choice → 不计入", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "fallback",
+          segmentOrder: 1,
+          payload: { interactionType: "open_question" },
+        },
+        { eventType: "fallback", segmentOrder: 1, payload: null },
+        {
+          eventType: "answered",
+          segmentOrder: 1,
+          payload: { interactionType: 1 },
+        },
+        { eventType: "timeout", segmentOrder: 1, payload: null },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.totalInteractions).toBe(0);
+    });
+
+    it("版本 payload 缺失、segments 不是数组、段/选项缺字段 → 空值兜底", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(null);
+      await expect(service.choiceStats("ep1", {})).resolves.toMatchObject({
+        segments: [],
+      });
+
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue({
+        id: "v1",
+        episodeId: "ep1",
+        payload: {
+          segments: [
+            {
+              order: 1,
+              kind: "interaction",
+              interactionType: "two_choice",
+            },
+            {
+              order: 2,
+              kind: "interaction",
+              interactionType: "two_choice",
+              options: "不是对象",
+            },
+            {
+              order: 3,
+              kind: "interaction",
+              interactionType: "two_choice",
+              options: { choices: [{}, { key: "c" }] },
+            },
+          ],
+        },
+      });
+
+      const result = await service.choiceStats("ep1", {});
+
+      expect(result.segments[0]).toMatchObject({
+        segmentOrder: 1,
+        promptText: null,
+      });
+      expect(result.segments[1].choices).toEqual([]);
+      expect(result.segments[2].choices).toEqual([
+        expect.objectContaining({ index: 0, key: null, text: null }),
+        expect.objectContaining({ index: 1, key: "c", text: null }),
+      ]);
+    });
+
+    it("null 段只有 fallback → 仍出现在末尾，share 全 null", async () => {
+      prisma.adventureEvent.findMany.mockResolvedValue([
+        {
+          eventType: "fallback",
+          segmentOrder: null,
+          payload: { interactionType: "two_choice" },
+        },
+      ]);
+
+      const result = await service.choiceStats("ep1", {});
+
+      const nullSeg = result.segments[result.segments.length - 1];
+      expect(nullSeg.segmentOrder).toBeNull();
+      expect(nullSeg.matchedTotal).toBe(0);
+      expect(nullSeg.fallbackTotal).toBe(1);
+      expect(nullSeg.choices).toEqual([]);
+      expect(nullSeg.neverChosen).toBe(true);
     });
   });
 });

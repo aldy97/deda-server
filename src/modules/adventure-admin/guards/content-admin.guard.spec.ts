@@ -228,18 +228,21 @@ describe("ContentAdminGuard", () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it("treats a request with no method as a write rather than waving it through", async () => {
-      const guard = buildGuard("readonly");
+    it.each(["", undefined])(
+      "treats a request with %p method as a write rather than waving it through",
+      async (method) => {
+        const guard = buildGuard("readonly");
 
-      await expect(
-        guard.canActivate(
-          makeContext({
-            method: "",
-            user: scopedUser(),
-            handler: SampleController.prototype.publish,
-          }),
-        ),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-    });
+        await expect(
+          guard.canActivate(
+            makeContext({
+              method: method as string,
+              user: scopedUser(),
+              handler: SampleController.prototype.publish,
+            }),
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      },
+    );
   });
 });
