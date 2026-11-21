@@ -19,6 +19,14 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MqttService.name);
   private client?: mqtt.MqttClient;
   private messageHandlers: Array<(topic: string, payload: Buffer) => void> = [];
+  /**
+   * client 尚未建立时请求的订阅（模块初始化时序竞态窗口）。
+   * subscribe() 遇到 client 未建立不再丢弃，而是记在这里，
+   * 等 'connect' 事件统一补订——否则像 2026-11-20 事故那样：
+   * DeviceLinkService.onModuleInit 先于 MqttService.onModuleInit 执行时，
+   * loginMac / device/up/+ 订阅被静默丢弃，设备心跳整条链路瘫痪而服务无异常。
+   */
+  private readonly pendingSubscriptions = new Map<string, 0 | 1 | 2>();
 
   constructor(private readonly config: ConfigService) {}
 
@@ -54,6 +62,7 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on("connect", () => {
       this.logger.log(`MQTT connected to ${url}`);
+      this.flushPendingSubscriptions();
     });
 
     this.client.on("message", (topic: string, payload: Buffer) => {
@@ -88,17 +97,38 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 订阅指定 topic（默认 QoS 1）
+   *
+   * client 已建立时立即下发；尚未建立（如订阅方 onModuleInit 先于
+   * MqttService.onModuleInit 执行）时记入 pending 队列，待 'connect' 后补订，
+   * 不会静默丢失。同 topic 重复订阅去重。
+   *
    * @param topic 主题名称或通配符
    * @param qos QoS 等级，默认 1
    */
   subscribe(topic: string, qos: 0 | 1 | 2 = 1): void {
     if (!this.client) {
+      if (!this.pendingSubscriptions.has(topic)) {
+        this.pendingSubscriptions.set(topic, qos);
+      }
       this.logger.warn(
-        `Cannot subscribe to ${topic}: MQTT client not connected`,
+        `Cannot subscribe to ${topic}: MQTT client not connected; queued for retry on connect`,
       );
       return;
     }
-    this.client.subscribe(topic, { qos }, (err?: Error) => {
+    this.doSubscribe(topic, qos);
+  }
+
+  /** 补订 pending 队列：只在首次 connect 时有内容，重连补订由 mqtt.js 内置 resubscribe 负责 */
+  private flushPendingSubscriptions(): void {
+    if (this.pendingSubscriptions.size === 0) return;
+    for (const [topic, qos] of this.pendingSubscriptions) {
+      this.doSubscribe(topic, qos);
+    }
+    this.pendingSubscriptions.clear();
+  }
+
+  private doSubscribe(topic: string, qos: 0 | 1 | 2): void {
+    this.client!.subscribe(topic, { qos }, (err?: Error) => {
       if (err) {
         this.logger.error(`Failed to subscribe ${topic}`, err);
       } else {
