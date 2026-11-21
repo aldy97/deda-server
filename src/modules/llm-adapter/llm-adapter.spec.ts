@@ -2640,6 +2640,35 @@ describe("LlmAdapterModule", () => {
 
         expect(res.statusCode).toBe(400);
       });
+
+      it("匿名（无 user）非流式抛非 Error 时也能兜底", async () => {
+        jest.spyOn(service, "completeReply").mockRejectedValue("pipeline down");
+        const res = makeRes();
+        await callController(
+          { ...boundRequest, user: undefined, stream: false },
+          res,
+        );
+        expect(res.statusCode).toBe(200);
+        expect(res.jsonBody).toMatchObject({
+          choices: [
+            {
+              message: { content: ADVENTURE_DEGRADED_REPLIES.lastResort },
+            },
+          ],
+        });
+      });
+
+      it("匿名（无 user）流式抛非 Error 时也能兜底", async () => {
+        jest.spyOn(service, "streamReply").mockImplementation(() =>
+          (async function* () {
+            throw "pipeline down";
+          })(),
+        );
+        const res = makeRes();
+        await callController({ ...boundRequest, user: undefined }, res);
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toContain(ADVENTURE_DEGRADED_REPLIES.lastResort);
+      });
     });
   });
 });

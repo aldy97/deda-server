@@ -478,4 +478,31 @@ describe("MemoriesAnalyticsService", () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+
+  describe("listDevices 边界补测", () => {
+    it("空列表 → 空页", async () => {
+      const service = await buildService(buildPrisma({}));
+      const result = await service.listDevices({});
+      expect(result.total).toBe(0);
+      expect(result.items).toEqual([]);
+    });
+
+    it("device 不在 devices 表 → deviceId 回落 uuid，deviceCode null", async () => {
+      const prisma = buildPrisma({
+        memories: [
+          {
+            deviceId: "uuid-1",
+            key: "favorite_color",
+            status: "active",
+            createdAt: "2026-11-01T08:00:00Z",
+          },
+        ],
+      });
+      const service = await buildService(prisma);
+      const result = await service.listDevices({});
+      expect(result.total).toBe(1);
+      expect(result.items[0].deviceId).toBe("uuid-1");
+      expect(result.items[0].deviceCode).toBeNull();
+    });
+  });
 });

@@ -567,4 +567,98 @@ describe("LlmAnalyticsService", () => {
       ).rejects.toThrow(BadRequestException);
     });
   });
+
+  describe("边界补测", () => {
+    it("getTrend：totalTokens/firstTokenMs 为 null 的行不污染", async () => {
+      prisma.llmUsageLog.findMany.mockResolvedValue([
+        logRow({ totalTokens: null, firstTokenMs: null }),
+      ]);
+      const result = await service.getTrend({
+        startDate: "2026-11-07",
+        endDate: "2026-11-07",
+        granularity: "day",
+      });
+      expect(result.series[0].totalTokens).toBe(0);
+      expect(result.series[0].avgFirstTokenMs).toBeNull();
+      expect(result.series[0].p50FirstTokenMs).toBeNull();
+    });
+
+    it("getTurnHandoff：同轮多个 filler 取最后完成的那次", async () => {
+      const base = new Date("2026-11-09T10:00:00.000Z");
+      const plus = (ms: number) => new Date(base.getTime() + ms);
+      prisma.llmUsageLog.findMany.mockResolvedValue([
+        {
+          turnId: "t1",
+          scene: "filler",
+          latencyMs: 400,
+          firstTokenMs: null,
+          createdAt: plus(0),
+        },
+        {
+          turnId: "t1",
+          scene: "filler",
+          latencyMs: 600,
+          firstTokenMs: null,
+          createdAt: plus(200),
+        },
+        {
+          turnId: "t1",
+          scene: "chat_main",
+          latencyMs: 2000,
+          firstTokenMs: 500,
+          createdAt: plus(300),
+        },
+      ]);
+      const result = await service.getTurnHandoff({
+        startDate: "2026-11-09",
+        endDate: "2026-11-09",
+      });
+      expect(result.turnsWithBoth).toBe(1);
+    });
+
+    it("getSlowCalls：turnId/device 为 null → 回落 null", async () => {
+      prisma.llmUsageLog.findMany.mockResolvedValue([
+        logRow({
+          id: "log-1",
+          turnId: null,
+          totalTokens: null,
+          firstTokenMs: null,
+          device: null,
+        }),
+      ]);
+      const result = await service.getSlowCalls({
+        startDate: "2026-11-07",
+        endDate: "2026-11-07",
+      });
+      expect(result.items[0].turnId).toBeNull();
+      expect(result.items[0].deviceId).toBeNull();
+    });
+
+    it("getRecentFailures：默认 page/pageSize", async () => {
+      prisma.llmUsageLog.count.mockResolvedValue(0);
+      prisma.llmUsageLog.findMany.mockResolvedValue([]);
+      const result = await service.getRecentFailures({});
+      expect(result.page).toBe(1);
+      expect(result.pageSize).toBe(20);
+    });
+
+    it("getTurnHandoff：只有 filler 无 chat → 不计入", async () => {
+      const base = new Date("2026-11-09T10:00:00.000Z");
+      prisma.llmUsageLog.findMany.mockResolvedValue([
+        {
+          turnId: "t1",
+          scene: "filler",
+          latencyMs: 400,
+          firstTokenMs: null,
+          createdAt: new Date(base.getTime()),
+        },
+      ]);
+      const result = await service.getTurnHandoff({
+        startDate: "2026-11-09",
+        endDate: "2026-11-09",
+      });
+      expect(result.turnsWithChat).toBe(0);
+      expect(result.turnsWithBoth).toBe(0);
+    });
+  });
 });

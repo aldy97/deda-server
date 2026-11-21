@@ -439,4 +439,41 @@ describe("LearningStatsController", () => {
       expect(service.getModeUsage).not.toHaveBeenCalled();
     });
   });
+
+  describe("缺省参数 fallback", () => {
+    it("daily 不带 days → 7", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      service.getDailyTrend.mockResolvedValue([]);
+      await controller.daily(req, {});
+      expect(service.getDailyTrend).toHaveBeenCalledWith(
+        "user-001",
+        undefined,
+        7,
+        expect.anything(),
+      );
+    });
+
+    it("timeline 不带 page/pageSize → 1/10", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      service.getTimeline.mockResolvedValue([]);
+      await controller.timeline(req, {});
+      expect(service.getTimeline).toHaveBeenCalledWith(
+        "user-001",
+        undefined,
+        1,
+        10,
+      );
+    });
+
+    it("activities 不带 page/pageSize → 1/10", async () => {
+      const req = { user: { userId: "user-001" } } as any;
+      service.getActivities = jest.fn().mockResolvedValue([]);
+      await controller.activities(req, {});
+      expect(service.getActivities).toHaveBeenCalledWith(
+        "user-001",
+        undefined,
+        expect.objectContaining({ page: 1, pageSize: 10 }),
+      );
+    });
+  });
 });

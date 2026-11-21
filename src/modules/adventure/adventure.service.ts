@@ -21,6 +21,20 @@ import {
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
 import {
+  buildClosedEpisodeIds,
+  isClosedStatus,
+  isExitableStatus,
+  isReassignableStatus,
+  selectFirstPlayableEpisode,
+} from "./adventure-progress";
+import {
+  buildMatchedChoice,
+  findCurrentInteraction,
+  resolveChoiceLlmEnabled,
+  toRecapLines,
+  withInteractionMeta,
+} from "./adventure-reply";
+import {
   matchChoiceDeterministic,
   parseChoiceVerdict,
 } from "./adventure-match";
@@ -89,21 +103,6 @@ export interface EpisodeContent {
 
 /** 沉默超时：引导词最后一个 chunk ack 后 10s 无上行则兜底续播 */
 const REPLY_TIMEOUT_MS = 10000;
-
-/**
- * 允许被「不想玩了」接管的进度状态（词表见 ADVENTURE_EXIT_KEYWORDS）。
- *
- * 终态一律不在其中：completed / abandoned 是「任何路径都不得覆盖」的进度终态，
- * failed_over 是这一集已被自愈收走。这三种情况下念「之后再一起继续冒险」是假承诺，
- * 所以不接管，让这句话掉回正常的意图路由。
- */
-const EXITABLE_PROGRESS_STATUSES = ["in_progress", "awaiting_reply", "exited"];
-
-/** 进度终态：选集时永久排除，且任何路径都不得覆盖 */
-const CLOSED_PROGRESS_STATUSES = ["completed", "abandoned"];
-
-/** 已被收走、不再续玩的进度：落到选集重新分配（区别于 exited 的当日可续玩） */
-const REASSIGNABLE_PROGRESS_STATUSES = ["abandoned", "failed_over"];
 
 /** 版本快照缓存上限；payload 不可变，故只做容量淘汰，永不失效 */
 const VERSION_CACHE_LIMIT = 200;
@@ -358,7 +357,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   ): Promise<string[]> {
     const content = await this.resolveVersionContent(episodeVersionId);
     const recap = content?.recap ?? episode.recap;
-    return recap ? [recap] : [];
+    return toRecapLines(recap);
   }
 
   /**
@@ -384,23 +383,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         select: { episodeId: true, status: true },
       }),
     ]);
-    const closedEpisodeIds = new Set(
-      progresses
-        .filter((progress) =>
-          CLOSED_PROGRESS_STATUSES.includes(progress.status),
-        )
-        .map((progress) => progress.episodeId),
+    const closedEpisodeIds = buildClosedEpisodeIds(
+      progresses,
+      excludeEpisodeId,
     );
-    if (excludeEpisodeId) {
-      closedEpisodeIds.add(excludeEpisodeId);
-    }
-    const episode = episodes.find(
-      (item) => !closedEpisodeIds.has(item.id) && !item.retiredAt,
-    );
-    if (!episode || !episode.published) {
-      return null;
-    }
-    return episode;
+    return selectFirstPlayableEpisode(episodes, closedEpisodeIds);
   }
 
   /**
@@ -430,7 +417,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
-    if (CLOSED_PROGRESS_STATUSES.includes(existing.status)) {
+    if (isClosedStatus(existing.status)) {
       this.logger.warn(
         `Refusing to overwrite terminal adventure progress: deviceId=${deviceInternalId} episodeId=${episode.id} status=${existing.status}`,
       );
@@ -729,10 +716,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
     const current = await this.findCurrentAdventure(deviceInternalId);
     // abandoned（admin retire 收走）与 failed_over（故障自愈收走）都不再续玩，落到选集重新分配。
-    if (
-      current &&
-      !REASSIGNABLE_PROGRESS_STATUSES.includes(current.progress.status)
-    ) {
+    if (current && !isReassignableStatus(current.progress.status)) {
       const { daily, progress } = current;
       if (progress.status === "exited" && !explicitlyRequested) {
         return null;
@@ -910,17 +894,6 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.scheduleTimeout(deviceInternalId);
   }
 
-  /** 当前等待回答的交互点（已播，order = nextSegmentOrder - 1）；非交互段一律不认。 */
-  private currentInteraction(
-    progress: AdventureProgress,
-    segments: PlayableSegment[],
-  ) {
-    return segments.find(
-      (s) =>
-        s.order === progress.nextSegmentOrder - 1 && s.kind === "interaction",
-    );
-  }
-
   /**
    * 孩子回话：明确拒绝在任何阶段都接管（见 exitAdventure），其余四类处置只在
    * 交互等待态生效；非等待态返回 null（不接管上行）。
@@ -960,13 +933,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.clearTimer(deviceInternalId);
 
     const segments = await this.loadSegmentsForPlay(progress);
-    const interaction = this.currentInteraction(progress, segments);
+    const interaction = findCurrentInteraction(progress, segments);
     if (!interaction) {
       return null;
     }
 
     if (interaction.interactionType === "two_choice") {
-      return this.withInteractionMeta(
+      return withInteractionMeta(
         await this.handleTwoChoice(
           deviceInternalId,
           daily,
@@ -987,10 +960,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       } | null;
       const praise = options?.praise || "说得真好！给你鼓掌！";
       const reply = await this.playFrom(progress, segments, [praise], daily);
-      return this.withInteractionMeta(
-        { ...reply, result: "answered" },
-        interaction,
-      );
+      return withInteractionMeta({ ...reply, result: "answered" }, interaction);
     }
     // open_question：小模型接话（含正常/跑题/超前发挥），失败降级兜底
     const bridge = await this.generateBridge(
@@ -1000,31 +970,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       "open_question",
     );
     const reply = await this.playFrom(progress, segments, [bridge], daily);
-    return this.withInteractionMeta(
-      { ...reply, result: "answered" },
-      interaction,
-    );
-  }
-
-  /**
-   * 把交互点的类型与段号盖到回复上，供 recordPresented 写进 result 事件。
-   * 四种交互类型共用同一批 result 事件名，不带类型就无法把「二选一兜底率」
-   * 的分母从开放提问里摘出来。interaction 为空（超时路径拿不到当前段）时原样返回。
-   */
-  private withInteractionMeta(
-    reply: AdventureReply,
-    interaction: PlayableSegment | null | undefined,
-  ): AdventureReply {
-    if (!interaction) {
-      return reply;
-    }
-    return {
-      ...reply,
-      interaction: {
-        type: interaction.interactionType ?? "unknown",
-        order: interaction.order,
-      },
-    };
+    return withInteractionMeta({ ...reply, result: "answered" }, interaction);
   }
 
   /**
@@ -1042,7 +988,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     deviceInternalId: string,
     progress: AdventureProgress,
   ): Promise<AdventureReply | null> {
-    if (!EXITABLE_PROGRESS_STATUSES.includes(progress.status)) {
+    if (!isExitableStatus(progress.status)) {
       return null;
     }
     // 等待中的 10s 沉默超时必须取消：孩子已经走了，定时器不该再追一句兜底话术
@@ -1061,14 +1007,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isChoiceLlmEnabled(): boolean {
-    const raw = this.configService.get<string>(
-      ADVENTURE_CHOICE_LLM_ENV.enabled,
-    ) as string | undefined;
-    if (raw === undefined || raw === null || String(raw).trim() === "") {
-      return ADVENTURE_CHOICE_LLM_DEFAULTS.enabled;
-    }
-    const normalized = String(raw).trim().toLowerCase();
-    return normalized !== "false" && normalized !== "0";
+    return resolveChoiceLlmEnabled(
+      this.configService.get<string>(ADVENTURE_CHOICE_LLM_ENV.enabled) as
+        string | undefined,
+      ADVENTURE_CHOICE_LLM_DEFAULTS.enabled,
+    );
   }
 
   /** 小模型二选一兜底判定，失败返回 index=null 降级给上层走旧跑题逻辑 */
@@ -1135,13 +1078,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return {
         ...reply,
         result: "answered",
-        matchedChoice: {
-          index: hitIndex,
+        matchedChoice: buildMatchedChoice({
+          index: hitIndex!,
           source: "deterministic",
-          key: choices[hitIndex]?.key ?? null,
+          choices,
           segmentOrder: interaction.order,
           episodeVersionId: progress.episodeVersionId ?? null,
-        },
+        }),
       };
     }
 
@@ -1168,13 +1111,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         return {
           ...reply,
           result: "answered",
-          matchedChoice: {
+          matchedChoice: buildMatchedChoice({
             index: verdict.index!,
             source: "llm",
-            key: choices[verdict.index!]?.key ?? null,
+            choices,
             segmentOrder: interaction.order,
             episodeVersionId: progress.episodeVersionId ?? null,
-          },
+          }),
         };
       }
 
@@ -1292,14 +1235,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
 
     const segments = await this.loadSegmentsForPlay(progress);
-    const interaction = this.currentInteraction(progress, segments);
+    const interaction = findCurrentInteraction(progress, segments);
     const fallback = interaction?.fallbackText || "没关系，我们继续吧。";
     this.clearTimer(deviceInternalId);
     const reply = await this.playFrom(progress, segments, [fallback], daily);
-    return this.withInteractionMeta(
-      { ...reply, result: "timeout" },
-      interaction,
-    );
+    return withInteractionMeta({ ...reply, result: "timeout" }, interaction);
   }
 
   /**

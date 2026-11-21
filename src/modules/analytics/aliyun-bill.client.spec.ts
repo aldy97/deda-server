@@ -377,4 +377,51 @@ describe("AliyunBillClient", () => {
       expect(parseModelName(item)).toBe(expected);
     });
   });
+
+  describe("toRow 字段 fallback", () => {
+    it("字段缺失 → billingCycle/productCode/itemKind 等走默认值", async () => {
+      const client = await buildClient(AK_ENV);
+      mockDescribeBill.mockResolvedValueOnce(
+        billResponse([
+          billItem({
+            billingCycle: undefined,
+            productCode: undefined,
+            productName: undefined,
+            item: undefined,
+            subscriptionType: undefined,
+            usageUnit: undefined,
+            currency: undefined,
+          }),
+        ]),
+      );
+      const items = await client.fetchBillingItems("2026-11-10");
+      const row = items[0];
+      expect(row.billingCycle).toBe("2026-11");
+      expect(row.productCode).toBe("unknown");
+      expect(row.productName).toBeNull();
+      expect(row.itemKind).toBe("PayAsYouGoBill");
+      expect(row.subscriptionType).toBe("PayAsYouGo");
+      expect(row.usageUnit).toBeNull();
+      expect(row.currency).toBe("CNY");
+    });
+
+    it("usage 为 number → toUsageCount 直接取整", async () => {
+      const client = await buildClient(AK_ENV);
+      mockDescribeBill.mockResolvedValueOnce(
+        billResponse([billItem({ usage: 1234.5 })]),
+      );
+      const items = await client.fetchBillingItems("2026-11-10");
+      expect(items[0].usage).toBe(1235);
+    });
+
+    it("同一 client 两次 fetch → 第二次命中 SDK 客户端缓存", async () => {
+      const client = await buildClient(AK_ENV);
+      mockDescribeBill
+        .mockResolvedValueOnce(billResponse([billItem()]))
+        .mockResolvedValueOnce(billResponse([billItem()]));
+      await client.fetchBillingItems("2026-11-10");
+      await client.fetchBillingItems("2026-11-10");
+      expect(mockDescribeBill).toHaveBeenCalledTimes(2);
+    });
+  });
 });

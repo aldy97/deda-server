@@ -116,5 +116,18 @@ describe("VendorController", () => {
       await expect(controller.textExchange(dto)).resolves.toEqual(reply);
       expect(vendorService.sendDegradedReply).not.toHaveBeenCalled();
     });
+
+    it("服务抛非 Error（字符串）时也能兜底", async () => {
+      const degraded = {
+        deviceId: "dev-001",
+        responseText: "兜底话术",
+        context: { degraded: true },
+        ttsOptions: {},
+      };
+      vendorService.handleTextIn.mockRejectedValue("pipeline down");
+      vendorService.sendDegradedReply.mockResolvedValue(degraded);
+
+      await expect(controller.textExchange(dto)).resolves.toEqual(degraded);
+    });
   });
 });

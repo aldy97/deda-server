@@ -780,4 +780,30 @@ describe("DevicesService", () => {
       });
     });
   });
+
+  describe("边界补测", () => {
+    it("bind 缺 deviceId 和 deviceCode → 抛错", async () => {
+      await expect(service.bind("user-001", {} as never)).rejects.toThrow(
+        "deviceId or deviceCode is required",
+      );
+    });
+
+    it("control 时 macAddress null → 回落 deviceId", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "u1",
+        deviceId: "dev-001",
+        macAddress: null,
+      });
+      const result = await service.control("dev-001", {
+        action: "volume",
+        volume: 50,
+      } as never);
+      expect(deviceLink.setVolume).toHaveBeenCalledWith("dev-001", 50);
+      expect(result).toEqual({
+        success: true,
+        deviceId: "dev-001",
+        action: "volume",
+      });
+    });
+  });
 });
