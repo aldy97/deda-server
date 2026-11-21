@@ -125,7 +125,8 @@ export class SleepModeService {
       if (vcn) {
         const desired = await this.voiceReconcile.readDesired(device.id);
         const spd =
-          this.voiceReconcile.resolveSpd(desired.speechRate) ?? TTS_BASE_SPD;
+          (await this.voiceReconcile.resolveSpd(desired.speechRate)) ??
+          TTS_BASE_SPD;
         await this.voiceReconcile.applySpd(mac, vcn, spd);
       }
 

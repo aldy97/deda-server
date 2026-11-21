@@ -520,6 +520,17 @@ model SleepConfig {
   @@map("sleep_configs")
 }
 
+// 语速档位 → 倍数映射（全局平台配置，替代原 env SPEECH_RATE_MAP_JSON）。
+// 档位键来自设备端协议 v1.4（slow/normal/fast），spd 合法范围 [0.5, 2.0]。
+// 管理端 /analytics/speech-rate 读写；getvalue 每轮实时查，改后无需重启。
+model SpeechRateConfig {
+  tier      String   @id // slow / normal / fast
+  spd       Float // 语速倍数 [0.5, 2.0]
+  updatedAt DateTime @updatedAt
+
+  @@map("speech_rate_configs")
+}
+
 // LLM 调用日志（主模型 + 小模型全量），模型监控页数据源
 model LlmUsageLog {
   id               String   @id @default(uuid())

@@ -157,16 +157,14 @@ export class DeviceConfigsService {
     let canApplyLive = false;
     let reason: string | null = null;
 
+    const spd = speechRate ? await this.reconcile.resolveSpd(speechRate) : null;
+
     if (!available) {
       reason = "empty_catalog";
     } else if (vcn === null && speechRate === null) {
       // 没有期望值，reason 用 null 而不是编造一个
       reason = null;
-    } else if (
-      vcn !== null &&
-      speechRate !== null &&
-      this.reconcile.resolveSpd(speechRate) !== null
-    ) {
+    } else if (vcn !== null && speechRate !== null && spd !== null) {
       canApplyLive = true;
     } else {
       reason = "incomplete_tts_target";
@@ -176,7 +174,7 @@ export class DeviceConfigsService {
       deviceId,
       vcn,
       speechRate,
-      spd: speechRate ? this.reconcile.resolveSpd(speechRate) : null,
+      spd,
       catalog: catalog.map(({ timbreId, name, language }) => ({
         timbreId,
         name,
@@ -265,7 +263,7 @@ export class DeviceConfigsService {
 
     // 下发：mac 口径与 devices.service.ts 一致
     const mac = device.macAddress ?? device.deviceId;
-    const spd = this.reconcile.resolveSpd(newSpeechRate);
+    const spd = await this.reconcile.resolveSpd(newSpeechRate);
 
     let applied: string;
     let reason: string | null;

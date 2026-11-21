@@ -41,7 +41,7 @@
 | `no_active_instance` | reconcile | Redis 无当前实例，或实例记录缺失/已结束/无 `authorization_Role` |
 | `empty_catalog` | reconcile | 音色目录为空（placeholder 未填充） |
 | `voice_not_in_catalog` | reconcile | 期望 vcn 不在目录内，或与实例 `lang` 语种不匹配 |
-| `speech_rate_map_missing` | reconcile | `SPEECH_RATE_MAP_JSON` 未配置该档位，或值越界 `[0.5, 2.0]` |
+| `speech_rate_map_missing` | reconcile | `speech_rate_configs` 表无该档位行，或值越界 `[0.5, 2.0]` |
 | `incomplete_tts_target` | reconcile | vcn 与 spd 未同时齐备（见 `TODO(Q9)`） |
 | `internal_error` | reconcile / device-configs | 编排抛出未预期异常，已吞掉以保住主流程响应 |
 

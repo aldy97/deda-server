@@ -43,6 +43,8 @@ import { FleetController } from "./fleet.controller";
 import { FleetService } from "./fleet.service";
 import { PromptAdminController } from "./prompt-admin.controller";
 import { PromptAdminService } from "./prompt-admin.service";
+import { SpeechRateAdminController } from "./speech-rate-admin.controller";
+import { SpeechRateAdminService } from "./speech-rate-admin.service";
 import { AnalyticsMetaController } from "./analytics-meta.controller";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 
@@ -53,6 +55,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     AnalyticsMetaController,
     DevicesAdminController,
     PromptAdminController,
+    SpeechRateAdminController,
     OverviewController,
     RetentionController,
     EngagementController,
@@ -102,6 +105,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     ParentReportsAnalyticsService,
     TurnDecisionAnalyticsService,
     PromptAdminService,
+    SpeechRateAdminService,
   ],
 })
 export class AnalyticsModule {}

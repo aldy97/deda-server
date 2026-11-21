@@ -252,8 +252,8 @@ export interface VoiceReconcilePort {
    * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
    */
   getTimbreForCharacter(characterKey: string | null): string | null;
-  /** 语速档位 → spd 倍数；映射未配置时返回 null */
-  resolveSpd(speechRate: string | null): number | null;
+  /** 语速档位 → spd 倍数；DB（speech_rate_configs）无该档位行或越界时返回 null */
+  resolveSpd(speechRate: string | null): Promise<number | null>;
   /**
    * 对设备当前活跃实例实时下发指定语速倍数 spd（不改变音色，vcn 沿用权威映射）。
    * 用于哄睡模式这类「临时降速、退出恢复」的场景：直接给倍数，不走语速档位映射。

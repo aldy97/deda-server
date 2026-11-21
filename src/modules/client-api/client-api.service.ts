@@ -213,13 +213,13 @@ export class ClientApiService {
       session?.currentMode === "sleep_story" &&
       (!session.expiresAt || session.expiresAt.getTime() > Date.now());
 
-    // 未设档位 → 走中档；档位无法映射为倍数（SPEECH_RATE_MAP_JSON 缺该项）→
+    // 未设档位 → 走中档；档位无法映射为倍数（speech_rate_configs 表无该档位行）→
     // 回落 v1.4 §4.2 的基础语速。spd 与 vcn 不同：它有书面兜底值，不会让设备停摆。
     const spd = inSleepMode
       ? SLEEP_MODE_SPEED
-      : (this.voiceReconcile.resolveSpd(
+      : ((await this.voiceReconcile.resolveSpd(
           desired.speechRate ?? DEFAULT_SPEECH_RATE,
-        ) ?? TTS_BASE_SPD);
+        )) ?? TTS_BASE_SPD);
 
     return { vcn, vol: this.ttsDefaultVol, spd };
   }

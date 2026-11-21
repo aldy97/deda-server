@@ -5,12 +5,8 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import {
   VOICE_CATALOG_PORT,
-  VoiceCatalogPort,
   BAIDU_AGENT_CLIENT_PORT,
-  BaiduAgentClientPort,
   VOICE_PAYLOAD_KEY,
-  TTS_SPD_MIN,
-  TTS_SPD_MAX,
 } from "./baidu-agent.types";
 import { VoiceReconcileService } from "./voice-reconcile.service";
 import {
@@ -49,6 +45,7 @@ describe("VoiceReconcileService", () => {
   let prisma: {
     device: { findUnique: jest.Mock };
     deviceConfig: { findFirst: jest.Mock };
+    speechRateConfig: { findUnique: jest.Mock };
   };
   let redis: { getValue: jest.Mock };
   let configValues: Record<string, string | undefined>;
@@ -85,6 +82,7 @@ describe("VoiceReconcileService", () => {
     prisma = {
       device: { findUnique: jest.fn().mockResolvedValue(null) },
       deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
+      speechRateConfig: { findUnique: jest.fn().mockResolvedValue(null) },
     };
     redis = { getValue: jest.fn().mockResolvedValue(null) };
     configValues = {};
@@ -108,133 +106,61 @@ describe("VoiceReconcileService", () => {
   // resolveSpd
   // ==========================================================================
   describe("resolveSpd", () => {
-    it("should return null when speechRate is null", () => {
-      expect(service.resolveSpd(null)).toBeNull();
+    it("should return null when speechRate is null", async () => {
+      await expect(service.resolveSpd(null)).resolves.toBeNull();
     });
 
-    it("should return null when SPEECH_RATE_MAP_JSON is not configured", () => {
-      expect(service.resolveSpd("normal")).toBeNull();
+    it("should return null when DB has no row for the tier", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue(null);
+      await expect(service.resolveSpd("normal")).resolves.toBeNull();
     });
 
-    it("should return null when JSON is malformed", () => {
-      configValues = { SPEECH_RATE_MAP_JSON: "bad json" };
-      // Recreate service with new config
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("normal")).toBeNull();
+    it("should return the mapped spd for a valid tier", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "slow",
+        spd: 0.8,
+      });
+      await expect(service.resolveSpd("slow")).resolves.toBe(0.8);
     });
 
-    it("should return null when JSON is not an object", () => {
-      configValues = { SPEECH_RATE_MAP_JSON: '"just a string"' };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("normal")).toBeNull();
+    it("should return null when spd is not a finite number", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "normal",
+        spd: NaN,
+      });
+      await expect(service.resolveSpd("normal")).resolves.toBeNull();
     });
 
-    it("should return null when key is not in map", () => {
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"slow":0.8,"normal":1,"fast":1.25}',
-      };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("unknown_key")).toBeNull();
+    it("should return null when spd is below TTS_SPD_MIN", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "slow",
+        spd: 0.3,
+      });
+      await expect(service.resolveSpd("slow")).resolves.toBeNull();
     });
 
-    it("should return null when value is not a finite number", () => {
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"slow":0.8,"normal":"one","fast":1.25}',
-      };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("normal")).toBeNull();
+    it("should return null when spd is above TTS_SPD_MAX", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "fast",
+        spd: 2.5,
+      });
+      await expect(service.resolveSpd("fast")).resolves.toBeNull();
     });
 
-    it("should return null when value is below TTS_SPD_MIN", () => {
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"slow":0.3,"normal":1,"fast":1.25}',
-      };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("slow")).toBeNull();
+    it("should accept spd exactly at TTS_SPD_MIN", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "slow",
+        spd: 0.5,
+      });
+      await expect(service.resolveSpd("slow")).resolves.toBe(0.5);
     });
 
-    it("should return null when value is above TTS_SPD_MAX", () => {
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"slow":0.8,"normal":1,"fast":2.5}',
-      };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("fast")).toBeNull();
-    });
-
-    it("should return the mapped number for valid key", () => {
-      configValues = {
-        SPEECH_RATE_MAP_JSON: '{"slow":0.8,"normal":1,"fast":1.25}',
-      };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("slow")).toBe(0.8);
-      expect(service.resolveSpd("normal")).toBe(1);
-      expect(service.resolveSpd("fast")).toBe(1.25);
-    });
-
-    it("should accept value exactly at TTS_SPD_MIN", () => {
-      configValues = { SPEECH_RATE_MAP_JSON: '{"slow":0.5}' };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("slow")).toBe(0.5);
-    });
-
-    it("should accept value exactly at TTS_SPD_MAX", () => {
-      configValues = { SPEECH_RATE_MAP_JSON: '{"fast":2}' };
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
-      expect(service.resolveSpd("fast")).toBe(2);
+    it("should accept spd exactly at TTS_SPD_MAX", async () => {
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "fast",
+        spd: 2,
+      });
+      await expect(service.resolveSpd("fast")).resolves.toBe(2);
     });
   });
 
@@ -504,16 +430,10 @@ describe("VoiceReconcileService", () => {
 
     describe("step 9b: incomplete tts target (only spd, vcn missing)", () => {
       it("should return incomplete_tts_target deferred", async () => {
-        configValues = {
-          SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        };
-        service = new VoiceReconcileService(
-          prisma as unknown as PrismaService,
-          redis as unknown as RedisService,
-          { get: (key: string) => configValues[key] } as ConfigService,
-          mockCatalog,
-          mockClient,
-        );
+        prisma.speechRateConfig.findUnique.mockResolvedValue({
+          tier: "normal",
+          spd: 1,
+        });
         setupActiveInstance();
         mockCatalog.available = true;
         const result = await service.applyToActiveInstance(MAC, {
@@ -544,16 +464,10 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        configValues = {
-          SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        };
-        service = new VoiceReconcileService(
-          prisma as unknown as PrismaService,
-          redis as unknown as RedisService,
-          { get: (key: string) => configValues[key] } as ConfigService,
-          mockCatalog,
-          mockClient,
-        );
+        prisma.speechRateConfig.findUnique.mockResolvedValue({
+          tier: "normal",
+          spd: 1,
+        });
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
           speechRate: "normal",
@@ -583,16 +497,10 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        configValues = {
-          SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        };
-        service = new VoiceReconcileService(
-          prisma as unknown as PrismaService,
-          redis as unknown as RedisService,
-          { get: (key: string) => configValues[key] } as ConfigService,
-          mockCatalog,
-          mockClient,
-        );
+        prisma.speechRateConfig.findUnique.mockResolvedValue({
+          tier: "normal",
+          spd: 1,
+        });
 
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
@@ -633,16 +541,10 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        configValues = {
-          SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        };
-        service = new VoiceReconcileService(
-          prisma as unknown as PrismaService,
-          redis as unknown as RedisService,
-          { get: (key: string) => configValues[key] } as ConfigService,
-          mockCatalog,
-          mockClient,
-        );
+        prisma.speechRateConfig.findUnique.mockResolvedValue({
+          tier: "normal",
+          spd: 1,
+        });
 
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
@@ -679,16 +581,10 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        configValues = {
-          SPEECH_RATE_MAP_JSON: '{"normal":1}',
-        };
-        service = new VoiceReconcileService(
-          prisma as unknown as PrismaService,
-          redis as unknown as RedisService,
-          { get: (key: string) => configValues[key] } as ConfigService,
-          mockCatalog,
-          mockClient,
-        );
+        prisma.speechRateConfig.findUnique.mockResolvedValue({
+          tier: "normal",
+          spd: 1,
+        });
 
         await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
@@ -736,7 +632,6 @@ describe("VoiceReconcileService", () => {
     it("should return deferred disabled without calling the client", async () => {
       setupDeviceAndConfig();
       mockClient.enabled = false;
-      configValues = { SPEECH_RATE_MAP_JSON: '{"normal":1}' };
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
 
@@ -755,19 +650,14 @@ describe("VoiceReconcileService", () => {
         status: "TRAINED",
         language: "chinese",
       });
-      configValues = { SPEECH_RATE_MAP_JSON: '{"normal":1}' };
+      prisma.speechRateConfig.findUnique.mockResolvedValue({
+        tier: "normal",
+        spd: 1,
+      });
       (buildTtsConfig as jest.Mock).mockReturnValue(
         'DEFAULT{"vcn":"1000063","spd":1}',
       );
       mockClient.switchSceneRole.mockResolvedValue({ ok: true } as const);
-
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
-      );
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
 

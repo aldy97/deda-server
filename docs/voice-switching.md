@@ -133,11 +133,11 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 **与 §2.3 的重叠（已知冗余，本版刻意不动）**：固件升级到 v1.4 后，「设备离线期间改了语速」这个场景在 getvalue 创建实例时就已覆盖，§2.3 的追平会退化成一次冗余的 `switchSceneRole` 调用；而该调用的 tts 串只带 `vcn`/`spd`、不带 `vol`（Q20），理论上可能把 getvalue 刚设好的音量重置掉。当前不改 §2.3 的理由：它只在设备存在期望值时才触发，默认状态是 `noop`，影响面为零；等 Q20 有答复后再决定是否把它收窄为「只处理同一轮内的变更」。
 
-**发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0，`SPEECH_RATE_MAP_JSON` 缺失只会让 spd 回落 1.0，两者都不阻塞发布。
+**发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0；语速映射已迁入 DB（`speech_rate_configs` 表，migration 已种子 0.7 系），未命中档位回落 1.0，两者都不阻塞发布。
 
 **取值已定（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`，即 `{"elly":"1000957","polly":"1000957"}`；日后拿到各 IP 的专属音色，只改这个映射里对应的一行即可切换（查表发生在每轮 getvalue、固件不缓存，代码零改动）。音色目录 `VOICE_CATALOG_JSON` 不做权威覆盖（staging 现含两条**占位**条目，`status:"TRAINED"` 是我方自述而非百度真值，见 §6「env 填写状态」）。**staging 已于 2026-11-19 12:14 填入并重启生效；prod 仍未填。**
 
-**还有一道容易漏的闸口**：compose 的 `environment` 是白名单，`--env-file` 只做变量替换——键只写在 env 文件里不会进容器，且不报错。2026-11-19 实测 staging 容器内 6 个音色/百度键（`CHARACTER_TIMBRE_JSON`、`TTS_DEFAULT_VOL`、`SPEECH_RATE_MAP_JSON`、`VOICE_CATALOG_JSON`、`BAIDU_AGENT_ENABLED`、`BAIDU_AGENT_TIMEOUT_MS`）全部 UNSET；现已加入 `docker/docker-compose.yml` 并由 `compose-env-gate.spec.ts` 的 `MUST_FORWARD` 钉住。填 env 之后必须重启 compose 才生效。**2026-11-19 12:14 已按此路径复测通过**：追加 4 个键 → 显式带原 `IMAGE_TAG` 重启（镜像未换）→ 容器内 `CHARACTER_TIMBRE_JSON`/`SPEECH_RATE_MAP_JSON`/`VOICE_CATALOG_JSON`/`BAIDU_AGENT_ENABLED` 均 SET 且 JSON 可解析，日志无 `is not valid JSON`、`level:50` 计数 0，`POST /client/bot/bot/getvalue` 由 500 转 **200 且 `vcn=1000957`**。
+**还有一道容易漏的闸口**：compose 的 `environment` 是白名单，`--env-file` 只做变量替换——键只写在 env 文件里不会进容器，且不报错。2026-11-19 实测 staging 容器内 5 个音色/百度键（`CHARACTER_TIMBRE_JSON`、`TTS_DEFAULT_VOL`、`VOICE_CATALOG_JSON`、`BAIDU_AGENT_ENABLED`、`BAIDU_AGENT_TIMEOUT_MS`）全部 UNSET（`SPEECH_RATE_MAP_JSON` 已迁入 DB，见 §6）；现已加入 `docker/docker-compose.yml` 并由 `compose-env-gate.spec.ts` 的 `MUST_FORWARD` 钉住。填 env 之后必须重启 compose 才生效。**2026-11-19 12:14 已按此路径复测通过**：追加 4 个键 → 显式带原 `IMAGE_TAG` 重启（镜像未换）→ 容器内 `CHARACTER_TIMBRE_JSON`/`VOICE_CATALOG_JSON`/`BAIDU_AGENT_ENABLED` 均 SET 且 JSON 可解析，日志无 `is not valid JSON`、`level:50` 计数 0，`POST /client/bot/bot/getvalue` 由 500 转 **200 且 `vcn=1000957`**。
 
 ## 3. 生效时机
 
@@ -167,7 +167,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 | `internal_error`           | 编排过程抛出未预期异常（DB/Redis 故障等），已吞掉以保住主流程响应 | 查服务端错误日志；期望值已落库，下一轮 start 会自动追平      |
 | `empty_catalog`            | 音色目录为空（placeholder 未填充）                           | 从百度导出 timbres 列表填入 `VOICE_CATALOG_JSON`             |
 | `voice_not_in_catalog`     | 期望音色不在目录内，或与实例语种不匹配                       | 确认 timbreId 与百度控制台一致，且语种匹配                   |
-| `speech_rate_map_missing`  | `SPEECH_RATE_MAP_JSON` 未配置，语速档位无法映射为 spd 倍数   | 填入产品决策后的档位→倍数映射                                |
+| `speech_rate_map_missing`  | 语速档位在 `speech_rate_configs` 表无对应行，无法映射为 spd 倍数 | 在管理端 /analytics/speech-rate 补该档位→倍数映射            |
 | `incomplete_tts_target`    | 只有 vcn 或只有 speechRate，不足以组装完整 tts 串            | 两者都需要才能下发（仅落库时不需要）                         |
 | `upstream_error`           | 百度返回非 2xx                                               | 查百度控制台日志；常见错误码见百度文档                       |
 
@@ -188,16 +188,15 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 | `BAIDU_AGENT_ENABLED`    | `false` | 总开关。默认关闭（暗启动）；开启前必须先填 `VOICE_CATALOG_JSON` |
 | `BAIDU_AGENT_TIMEOUT_MS` | `5000`  | 百度云出站请求超时（毫秒）                                   |
 | `VOICE_CATALOG_JSON`     | `[]`    | 音色目录 JSON 数组。权威来源百度 `GET /api/v1/timbres`，我方无 AK/SK 无法自动同步，需机芯公司导出后填入 |
-| `SPEECH_RATE_MAP_JSON`   | `{}`    | 语速档位 → spd 倍数映射。产品决策。未配置时：§2.1 的语速变更只落库不下发；§2.5 的 `spd` 回落基础语速 1.0（不阻塞发布） |
 | `TTS_DEFAULT_VOL`        | `1.0`   | §2.5 getvalue 响应体 `vol` 的唯一来源，全局配置、不做每设备可调。合法范围 `[0.5, 2.0]`（v1.4 §4.2，与 spd 同区间）。非法或越界 → getvalue 一律 500 → 设备每轮对话都创建失败，因此改这个值等于改全量设备可用性 |
 | `CHARACTER_TIMBRE_JSON`  | `{}`    | IP/角色（`Device.characterKey`）→ timbreId 权威映射，例 `{"elly":"1000063","polly":"1000064"}`（示例值非真实音色 id）。v1.4 起是设备每轮音色的**唯一数据源**（§2.5 getvalue），同时供剧情内按角色切音色查表（§2.4）。与人设注入同源（`prompt-registry` 也按 characterKey 取人设）。**取值已定（熊总 2026-11-19）：staging 已填、prod 未填**（见本节「env 填写状态」）：两个 IP 暂统一用 `1000957`，日后按 IP 各填各的即可切换；**未填的环境** getvalue 一律 500，是固件升级到 v1.4 的发布闸口（Q1） |
 
 **env 填写状态（截至 2026-11-19 12:14）**：
 
-| 环境    | `CHARACTER_TIMBRE_JSON`                | `SPEECH_RATE_MAP_JSON`                 | `VOICE_CATALOG_JSON`                                                                     | `BAIDU_AGENT_ENABLED` | `TTS_DEFAULT_VOL` / `BAIDU_AGENT_TIMEOUT_MS` |
-| ------- | -------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------- |
-| staging | `{"elly":"1000957","polly":"1000957"}` | `{"slow":0.56,"normal":0.7,"fast":0.875}`  | 2 条**占位**：`1000957`（在线对话音色）、`1001022`（离线音频音色），均自述 `TRAINED`、`chinese` | `true`                | 沿用默认 `1.0` / `5000`                      |
-| prod    | **未填**（默认 `{}`）                  | **未填**（默认 `{}`）                  | **未填**（默认 `[]`）                                                                    | **未填**（默认 `false`） | 默认                                         |
+| 环境    | `CHARACTER_TIMBRE_JSON`                | `VOICE_CATALOG_JSON`                                                                     | `BAIDU_AGENT_ENABLED` | `TTS_DEFAULT_VOL` / `BAIDU_AGENT_TIMEOUT_MS` |
+| ------- | -------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------- |
+| staging | `{"elly":"1000957","polly":"1000957"}` | 2 条**占位**：`1000957`（在线对话音色）、`1001022`（离线音频音色），均自述 `TRAINED`、`chinese` | `true`                | 沿用默认 `1.0` / `5000`                      |
+| prod    | **未填**（默认 `{}`）                  | **未填**（默认 `[]`）                                                                    | **未填**（默认 `false`） | 默认                                         |
 
 表内 timbreId、语速倍数、目录条目名都不是凭据，可以入库；env 文件本身权限保持 600，值不进仓库。目录条目的 `name` 是中性占位名，`status:"TRAINED"` 是我方自述而非百度真值，两者都等 Q7（只读 AK/SK）/ Q8（试听 url 刷新）有答复后按百度导出结果替换。**L0（两个 id 在线是否真可用 + 听感）服务端测不了**，仍需机芯公司或百度控制台确认，或用 L2 的 `applied` 归因反推（`live` = 可用，`upstream_error` = 该 id 在线不可用）。
 
