@@ -143,22 +143,35 @@ describe("Analytics prompts (e2e)", () => {
   });
 
   describe("读取", () => {
-    it("catalog 恒返回全部 key，未编辑时一律 source=default 且未偏离", async () => {
+    it("catalog 恒返回全部内置 key，动态人设单独标记且未编辑时 source=default/none", async () => {
       const res = await auth(
         request(app.getHttpServer()).get("/analytics/prompts"),
       ).expect(200);
 
-      const items = res.body.data;
-      expect(items).toHaveLength(PROMPT_KEYS.length);
-      expect(items.map((i: { key: string }) => i.key).sort()).toEqual(
+      const items = res.body.data as Array<{
+        key: string;
+        isDynamic: boolean;
+        characterKey: string | null;
+        source: string;
+        deviatesFromDefault: boolean;
+        effectiveContent: string;
+      }>;
+      const builtins = items.filter((item) => !item.isDynamic);
+      expect(builtins.map((i) => i.key).sort()).toEqual(
         [...PROMPT_KEYS].sort(),
       );
-      for (const item of items) {
+      for (const item of builtins) {
         expect(item.source).toBe("default");
         expect(item.deviatesFromDefault).toBe(false);
         expect(item.effectiveContent).toBe(
           PROMPT_DEFAULTS[item.key as keyof typeof PROMPT_DEFAULTS].template,
         );
+      }
+      // character_timbre 里只有内置角色时不应产生动态行；有动态行则必须自洽
+      for (const item of items.filter((entry) => entry.isDynamic)) {
+        expect(item.characterKey).not.toBeNull();
+        expect(item.key).toBe(`persona_${item.characterKey}`);
+        expect(["none", "db"]).toContain(item.source);
       }
     });
 

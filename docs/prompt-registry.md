@@ -212,6 +212,24 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 5. **重新采集黄金基线**：确认 `prompt-golden.spec.ts` 在改动前后断言不变；
 6. `npx tsc --noEmit && npx eslint "src/**/*.ts" && npx jest`。
 
+## 动态角色人设（2026-11-21 起）
+
+新增 IP/角色时不再需要发版加 `persona_<key>` 常量：
+
+1. 音色管理（`/analytics/voice-timbres`）新增角色 → 写入 `character_timbre`；
+2. Prompt 管理的 catalog 自动多出一行「角色人设：xxx」（由 `character_timbre` 派生，
+   `isDynamic: true`、`defaultContent: null`、`source: "none"`）；
+3. 首次保存草稿时惰性建 `persona_<key>` 行（`category=persona`、`renderSchema=[]`），
+   正文**不允许为空**；发布仍走现有确认码闸口；
+4. 运行时解析顺序：内置角色（elly/polly）→ 代码默认值；其他角色 → 动态 key 的
+   **已发布**内容；都没有 → Elly 默认值。绝不返回空串；
+5. 动态人设没有代码默认值，因此禁用「恢复代码默认值」；回滚历史版本仍可用；
+6. 角色被删除后人设行保留，catalog 标记 `characterRegistered: false`，不提供删除。
+
+`PromptCatalogItem.key` 从 `PromptKey` 放宽为 `string`，新增 `isDynamic` /
+`characterKey` / `characterRegistered` / `defaultContent: string | null`；
+`source` 增加 `"none"`（动态人设未发布）。
+
 ## 数据表
 
 ```

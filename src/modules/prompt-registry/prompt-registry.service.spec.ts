@@ -277,6 +277,47 @@ describe("PromptRegistryService", () => {
         PROMPT_DEFAULTS.persona_elly.template,
       );
     });
+
+    it("动态角色人设发布后按 characterKey 命中", async () => {
+      await service.reload();
+      prisma.setPublished("persona_nemo", 1, "Nemo 人设");
+      await service.reload();
+
+      expect(service.getPersona("nemo")).toBe("Nemo 人设");
+      expect(service.getDynamicPersona("nemo")).toEqual({
+        content: "Nemo 人设",
+        revision: 1,
+      });
+    });
+
+    it("动态角色人设未发布时回落 Elly，且 getDynamicPersona 为 null", async () => {
+      await service.reload();
+      expect(service.getPersona("nemo")).toBe(
+        PROMPT_DEFAULTS.persona_elly.template,
+      );
+      expect(service.getDynamicPersona("nemo")).toBeNull();
+    });
+
+    it("hasPersona：内置角色恒 true，动态角色以已发布为准", async () => {
+      await service.reload();
+      expect(service.hasPersona("elly")).toBe(true);
+      expect(service.hasPersona("polly")).toBe(true);
+      expect(service.hasPersona("nemo")).toBe(false);
+
+      prisma.setPublished("persona_nemo", 1, "Nemo 人设");
+      await service.reload();
+      expect(service.hasPersona("nemo")).toBe(true);
+    });
+
+    it("忽略非法 persona key 与空正文，不让脏行进入缓存", async () => {
+      await service.reload();
+      prisma.setPublished("persona_BAD!", 1, "脏行");
+      prisma.setPublished("persona_ghost", 1, "   ");
+      await service.reload();
+
+      expect(service.getDynamicPersona("BAD!")).toBeNull();
+      expect(service.getDynamicPersona("ghost")).toBeNull();
+    });
   });
 
   describe("getStoryPrompt", () => {
