@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
-import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import {
   CreateVoiceTimbreDto,
   UpdateVoiceTimbreDto,
@@ -26,7 +26,7 @@ import { normalizeCharacterKey } from "@/modules/baidu-agent/character-timbre.se
  */
 @ApiTags("analytics-voice-timbres")
 @ApiBearerAuth()
-@UseGuards(AnalyticsAuthGuard)
+@UseGuards(SuperAdminGuard)
 @Controller("analytics/voice-timbres")
 export class VoiceTimbreAdminController {
   constructor(private readonly service: VoiceTimbreAdminService) {}

@@ -636,6 +636,8 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 ## 角色音色映射（admin）
 
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放。
+
 IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue` 每轮从内存缓存读取（启动预加载 + 60s TTL），管理端写后立即失效，下一轮生效，无需重启。prod 与 staging 同样可写（运维配置，非内容台）。
 
 | 方法 | 路径 | 说明 |
