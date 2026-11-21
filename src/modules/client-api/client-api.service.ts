@@ -162,8 +162,8 @@ export class ClientApiService {
    * 所以这里宁可抛 500 也不返回编造的兜底值：一个假的 vcn 会让设备用错音色
    * 且无人察觉，一个 500 至少在服务端日志里留下可归因的原因。
    *
-   * vcn 只取 `CHARACTER_TIMBRE_JSON`（IP → timbreId）：产品定义是一个机芯一个
-   * IP、一个 IP 一个专属音色，家长端不选音色。运维经
+   * vcn 只取 character_timbre 表（IP → timbreId，管理端 /analytics/voice-timbres）：
+   * 产品定义是一个机芯一个 IP、一个 IP 一个专属音色，家长端不选音色。运维经
    * `/device-configs/:deviceId/voice` 写入的 `desired.vcn` 在这里**刻意不采信**，
    * 否则同一个设备会出现「本轮实例用运维值、下一轮实例用角色值」的漂移；
    * 该端点的定位是实时修正与可观测归因，见 docs/voice-switching.md §2.1。
@@ -188,13 +188,14 @@ export class ClientApiService {
       throw new InternalServerErrorException("tts volume not configured");
     }
 
-    const vcn = this.voiceReconcile.getTimbreForCharacter(device.characterKey);
+    const vcn = await this.voiceReconcile.getTimbreForCharacter(
+      device.characterKey,
+    );
     if (!vcn) {
-      // TODO(Q1): timbreId 取值已定（熊总 2026-11-19：两个 IP 暂统一用 1000957），
-      // 但 staging/prod 的 env 都还没填；CHARACTER_TIMBRE_JSON 填上即恢复，
-      // 代码无需改动。这是 v1.4 落地的发布闸口——固件升级到 v1.4 前必须填好。
+      // 映射来源是 character_timbre 表（管理端 /analytics/voice-timbres）。
+      // 未配置即 fail-closed：固件按 v1.4 §4.3 停止本轮创建，不做兜底音色。
       this.logger.error(
-        `getvalue cannot resolve vcn: CHARACTER_TIMBRE_JSON has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
+        `getvalue cannot resolve vcn: character_timbre has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
       );
       throw new InternalServerErrorException("timbre not configured");
     }

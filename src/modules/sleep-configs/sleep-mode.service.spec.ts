@@ -98,7 +98,7 @@ describe("SleepModeService", () => {
 
     it("有音色时切音速到哄睡语速", async () => {
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
-      voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
       voiceReconcile.resolveSleepSpd.mockResolvedValue(0.5);
 
       await service.enter(DEVICE_ID);
@@ -112,7 +112,7 @@ describe("SleepModeService", () => {
 
     it("无音色时不切音速（不抛错）", async () => {
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await expect(service.enter(DEVICE_ID)).resolves.toBeUndefined();
       expect(voiceReconcile.applySpd).not.toHaveBeenCalled();
@@ -131,7 +131,7 @@ describe("SleepModeService", () => {
         macAddress: null,
       });
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await service.enter(DEVICE_ID);
 
@@ -151,7 +151,7 @@ describe("SleepModeService", () => {
   describe("exit", () => {
     it("恢复快照音量", async () => {
       redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await service.exit(DEVICE_ID);
 
@@ -160,7 +160,7 @@ describe("SleepModeService", () => {
 
     it("快照音量为 null 时不恢复音量", async () => {
       redis.getValue.mockResolvedValue(JSON.stringify({ volume: null }));
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await service.exit(DEVICE_ID);
 
@@ -169,7 +169,7 @@ describe("SleepModeService", () => {
 
     it("无快照时不恢复音量（不抛错）", async () => {
       redis.getValue.mockResolvedValue(null);
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await expect(service.exit(DEVICE_ID)).resolves.toBeUndefined();
       expect(deviceLink.setVolume).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe("SleepModeService", () => {
 
     it("有音色时切回非哄睡语速", async () => {
       redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
-      voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
       voiceReconcile.resolveNormalSpd.mockResolvedValue(0.8);
 
       await service.exit(DEVICE_ID);
@@ -191,7 +191,7 @@ describe("SleepModeService", () => {
 
     it("无音色时不切音速，但仍删快照", async () => {
       redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await service.exit(DEVICE_ID);
 

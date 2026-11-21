@@ -53,8 +53,8 @@ const MUST_FORWARD = [
   "ADVENTURE_SIM_MAX_AWAIT_POINTS",
   "ADVENTURE_SIM_MAX_SESSION_SECONDS",
   // 百度智能体与设备端 TTS（v1.4 getvalue 的取值来源）。这组键只写在 env 文件里
-  // 不会进容器：CHARACTER_TIMBRE_JSON 缺失时 getvalue 一律 500，设备每轮对话都
-  // 创建失败，而容器侧不会有任何报错——正是「不报错的失效」最需要钉住。
+  // 不会进容器：TTS_DEFAULT_VOL 缺失会让 getvalue 500（vcn 自 2026-11-21 起改读
+  // character_timbre 表，CHARACTER_TIMBRE_JSON 仅为旧镜像回滚保留白名单）。
   "BAIDU_AGENT_ENABLED",
   "BAIDU_AGENT_TIMEOUT_MS",
   "CHARACTER_TIMBRE_JSON",

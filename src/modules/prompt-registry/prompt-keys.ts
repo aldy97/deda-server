@@ -29,6 +29,15 @@ export const PROMPT_KEYS = [
 
 export type PromptKey = (typeof PROMPT_KEYS)[number];
 
+/**
+ * 角色 → 人设 prompt key。音色管理新增的角色若不在本表，人设会回落 elly
+ * （prompt-registry 的既有防匿名行为），管理端必须把这一点显式告知操作者。
+ */
+export const PERSONA_KEY_BY_CHARACTER: Readonly<Record<string, PromptKey>> = {
+  elly: "persona_elly",
+  polly: "persona_polly",
+};
+
 export const PROMPT_CATEGORIES = [
   "small_model",
   "main_rules",

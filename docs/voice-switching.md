@@ -2,11 +2,11 @@
 
 版本：1.4（2026-11-18）。后端通过设备端协议 v1.4 与百度云「大模型实时互动」控制面 API 动态切换 TTS 音色/语速，能力分三条：
 
-1. **每轮创建前下发**（§2.5，v1.4 主通道）：固件每轮创建百度实例前调 `POST /client/bot/bot/getvalue` 拉取 `{vcn,vol,spd}`（我方额外附带 `lang`），且**不缓存**。这是平台配置到达设备的唯一常规通道，`vcn` 取自 `CHARACTER_TIMBRE_JSON`。
+1. **每轮创建前下发**（§2.5，v1.4 主通道）：固件每轮创建百度实例前调 `POST /client/bot/bot/getvalue` 拉取 `{vcn,vol,spd}`（我方额外附带 `lang`），且**不缓存**。这是平台配置到达设备的唯一常规通道，`vcn` 取自 DB 表 `character_timbre`。
 2. **同一轮内实时修正**（§2.1 / §2.3）：期望值落库 → 利用设备每轮上报的 BCE 签名调用百度控制面 API，对**当前实例**下发。设备在对话中即时生效，不在对话中则 deferred，下一轮 `bot/start` 后自动追平。v1.4 之后它的定位收窄为「同一轮内改口」——跨轮的权威值由 §2.5 承担。
-3. **角色查表**（§2.4）：`CHARACTER_TIMBRE_JSON` 提供 IP/角色 → timbreId 的权威映射，是上面两条通道的共同数据源，同时供冒险剧情内多 IP 同剧时按角色切换音色（**该消费方尚无调用方**，接入前需先答 Q16）。
+3. **角色查表**（§2.4）：DB 表 `character_timbre` 提供 IP/角色 → timbreId 的权威映射，是上面两条通道的共同数据源，同时供冒险剧情内多 IP 同剧时按角色切换音色（**该消费方尚无调用方**，接入前需先答 Q16）。
 
-**产品定义**（熊总 2026-11-17，2026-11-18 按设备端协议 v1.4 修订）：一个机芯对应一个 IP，一个 IP 只有一个专属音色，家长不在小程序端选择音色。**音色的权威来源是服务端配置 `CHARACTER_TIMBRE_JSON`**：v1.4 新增 `POST /client/bot/bot/getvalue`，固件在每轮创建智能体实例前调用它拉取 `{vcn,vol,spd}` 且**不缓存**，因此平台配置是唯一真相源；1.1 版「`loginMac` 响应体下发初始音色」的设想已被这个独立接口取代，该通道在 1.2 已整体移除。`loginMac` 响应体已按 v1.4 §3.2 收敛为 `{id,nickname}`，`lang` 移到 getvalue 响应体（属我方扩展字段，见 Q22）。`/device-configs/:deviceId/voice` 端点保留为运维与联调的可观测入口（`applied`/`reason` 归因），不作为家长端功能。
+**产品定义**（熊总 2026-11-17，2026-11-18 按设备端协议 v1.4 修订）：一个机芯对应一个 IP，一个 IP 只有一个专属音色，家长不在小程序端选择音色。**音色的权威来源是 DB 表 `character_timbre`**（管理端 `/analytics/voice-timbres`；2026-11-21 前为 env `CHARACTER_TIMBRE_JSON`）：v1.4 新增 `POST /client/bot/bot/getvalue`，固件在每轮创建智能体实例前调用它拉取 `{vcn,vol,spd}` 且**不缓存**，因此平台配置是唯一真相源；1.1 版「`loginMac` 响应体下发初始音色」的设想已被这个独立接口取代，该通道在 1.2 已整体移除。`loginMac` 响应体已按 v1.4 §3.2 收敛为 `{id,nickname}`，`lang` 移到 getvalue 响应体（属我方扩展字段，见 Q22）。`/device-configs/:deviceId/voice` 端点保留为运维与联调的可观测入口（`applied`/`reason` 归因），不作为家长端功能。
 
 契约唯一口径：`src/modules/baidu-agent/baidu-agent.types.ts`。
 
@@ -75,7 +75,7 @@ BCE v1 签名格式：`bce-auth-v1/{accessKeyId}/{timestamp}/{expirationPeriodIn
 ### 2.4 角色 → timbreId 查表（v1.4 getvalue 与剧情内切音色共用的数据源）
 
 ```
-CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
+character_timbre（IP/角色 → timbreId 权威映射，DB 表）
   → VoiceReconcileService.getTimbreForCharacter(characterKey)
     → 查表；未配置 / 未命中 / 值为空 → null（由调用方决定降级）
 
@@ -100,7 +100,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 | 场景                                       | 生效通道                | 说明                                                     |
 | ------------------------------------------ | ----------------------- | -------------------------------------------------------- |
-| 样机每轮对话的音色/语速/音量（v1.4 主通道） | §2.5 getvalue 下发      | 固件每轮创建实例前拉取、不缓存；vcn 取 `CHARACTER_TIMBRE_JSON`，spd 取语速期望值，vol 取 `TTS_DEFAULT_VOL` |
+| 样机每轮对话的音色/语速/音量（v1.4 主通道） | §2.5 getvalue 下发      | 固件每轮创建实例前拉取、不缓存；vcn 取 `character_timbre`，spd 取 `voice_speed_config`，vol 取 `TTS_DEFAULT_VOL` |
 | 运维/联调改**语速**，设备在对话中          | §2.1 实时下发           | 立即对当前实例生效（受 1800 秒签名有效期限制）；下一轮起由 §2.5 承接同一期望值 |
 | 运维/联调改**语速**，设备未对话            | 落库 → §2.3 追平        | 下一轮 start 后追平；实际上 §2.5 在创建实例时已带上该值 |
 | 运维/联调改**音色**                        | §2.1 实时下发（仅当前实例） | **不改 §2.5 的结果**：getvalue 的 vcn 只认角色表，运维写入的 `desired.vcn` 刻意不采信（见 Q23） |
@@ -133,7 +133,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 **与 §2.3 的重叠（已知冗余，本版刻意不动）**：固件升级到 v1.4 后，「设备离线期间改了语速」这个场景在 getvalue 创建实例时就已覆盖，§2.3 的追平会退化成一次冗余的 `switchSceneRole` 调用；而该调用的 tts 串只带 `vcn`/`spd`、不带 `vol`（Q20），理论上可能把 getvalue 刚设好的音量重置掉。当前不改 §2.3 的理由：它只在设备存在期望值时才触发，默认状态是 `noop`，影响面为零；等 Q20 有答复后再决定是否把它收窄为「只处理同一轮内的变更」。
 
-**发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0；语速已迁入 DB（`voice_speed_config` 表：非哄睡 0.7 / 哄睡 0.5），未命中档位回落默认，两者都不阻塞发布。
+**发布闸口**：固件升级到 v1.4 之前，`character_timbre` 表里必须有该设备 `characterKey` 的行（2026-11-21 迁移已种子 elly/polly）。未命中 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0；语速在 DB（`voice_speed_config` 表：非哄睡 0.7 / 哄睡 0.5），未命中档位回落默认，两者都不阻塞发布。
 
 **取值已定（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`，即 `{"elly":"1000957","polly":"1000957"}`；日后拿到各 IP 的专属音色，只改这个映射里对应的一行即可切换（查表发生在每轮 getvalue、固件不缓存，代码零改动）。音色目录 `VOICE_CATALOG_JSON` 不做权威覆盖（staging 现含两条**占位**条目，`status:"TRAINED"` 是我方自述而非百度真值，见 §6「env 填写状态」）。**staging 已于 2026-11-19 12:14 填入并重启生效；prod 仍未填。**
 
@@ -188,9 +188,22 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 | `BAIDU_AGENT_TIMEOUT_MS` | `5000`  | 百度云出站请求超时（毫秒）                                   |
 | `VOICE_CATALOG_JSON`     | `[]`    | 音色目录 JSON 数组。权威来源百度 `GET /api/v1/timbres`，我方无 AK/SK 无法自动同步，需机芯公司导出后填入 |
 | `TTS_DEFAULT_VOL`        | `1.0`   | §2.5 getvalue 响应体 `vol` 的唯一来源，全局配置、不做每设备可调。合法范围 `[0.5, 2.0]`（v1.4 §4.2，与 spd 同区间）。非法或越界 → getvalue 一律 500 → 设备每轮对话都创建失败，因此改这个值等于改全量设备可用性 |
-| `CHARACTER_TIMBRE_JSON`  | `{}`    | IP/角色（`Device.characterKey`）→ timbreId 权威映射，例 `{"elly":"1000063","polly":"1000064"}`（示例值非真实音色 id）。v1.4 起是设备每轮音色的**唯一数据源**（§2.5 getvalue），同时供剧情内按角色切音色查表（§2.4）。与人设注入同源（`prompt-registry` 也按 characterKey 取人设）。**取值已定（熊总 2026-11-19）：staging 已填、prod 未填**（见本节「env 填写状态」）：两个 IP 暂统一用 `1000957`，日后按 IP 各填各的即可切换；**未填的环境** getvalue 一律 500，是固件升级到 v1.4 的发布闸口（Q1） |
+| `CHARACTER_TIMBRE_JSON`  | `{}`    | **[DEPRECATED 2026-11-21]** 已不再被读取：音色映射迁入 DB 表 `character_timbre`（见下行）。仅保留在 compose 白名单中供旧镜像回滚，下次发布删除 |
 
-**env 填写状态（截至 2026-11-19 12:14）**：
+**音色映射（DB 表 `character_timbre`，2026-11-21 起为唯一数据源）**
+
+| 列 | 说明 |
+| --- | --- |
+| `characterKey` | 主键，`Device.characterKey`，小写（`elly` / `polly` / 未来角色） |
+| `timbreId` | 百度 timbreId（Long，存十进制字符串） |
+| `updatedAt` | 最后修改时间 |
+
+- 种子：`elly=1000957`、`polly=1001022`（产品决策 2026-11-21；Polly 由 staging 原值 `1000957` 调整为 `1001022`，属**有意变更**）。
+- 管理端：`GET/POST/PUT/DELETE /analytics/voice-timbres`（prod 可写）。写后缓存立即失效，下一轮 getvalue 生效，无需重启。
+- 读路径：启动预加载 + 60s TTL；DB 故障时返回上次成功值；从未加载成功才返回 null（getvalue 500）。
+- `personaConfigured`：该角色是否有 `persona_<key>` 人设；没有则对话回落 elly。
+
+**env 填写状态（历史存档，截至 2026-11-19 12:14；音色自 2026-11-21 起不再读 env）**：
 
 | 环境    | `CHARACTER_TIMBRE_JSON`                | `VOICE_CATALOG_JSON`                                                                     | `BAIDU_AGENT_ENABLED` | `TTS_DEFAULT_VOL` / `BAIDU_AGENT_TIMEOUT_MS` |
 | ------- | -------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------- |
@@ -199,11 +212,34 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 表内 timbreId、语速倍数、目录条目名都不是凭据，可以入库；env 文件本身权限保持 600，值不进仓库。目录条目的 `name` 是中性占位名，`status:"TRAINED"` 是我方自述而非百度真值，两者都等 Q7（只读 AK/SK）/ Q8（试听 url 刷新）有答复后按百度导出结果替换。**L0（两个 id 在线是否真可用 + 听感）服务端测不了**，仍需机芯公司或百度控制台确认，或用 L2 的 `applied` 归因反推（`live` = 可用，`upstream_error` = 该 id 在线不可用）。
 
-**§2.5 的发布闸口在 staging 已解除、在 prod 仍然适用**：prod 的 `CHARACTER_TIMBRE_JSON` 填好之前，固件不能在 prod 升级到 v1.4，否则每轮 getvalue 都 500。
+**§2.5 的发布闸口（2026-11-21 起）**：设备 `characterKey` 在 `character_timbre` 表里必须有一行，否则 getvalue 500。迁移已种子 `elly` / `polly`，因此 staging/prod 都不再需要人工填 env；未注册的新角色由管理端「语速与音色」新增，下一轮即生效。
 
 **默认关闭**：`BAIDU_AGENT_ENABLED=false` + `VOICE_CATALOG_JSON=[]` 时，§2.1/§2.3 全链路 fail-closed（`applied:"deferred"`），不出网、不改设备行为。
 
-**§2.5 不受该开关约束**（刻意决定，理由见 §2.5）：getvalue 不出网、不碰百度，失败会让设备整轮无法对话。但它有自己的闸口——`CHARACTER_TIMBRE_JSON` 未填时一律 500。
+**§2.5 不受该开关约束**（刻意决定，理由见 §2.5）：getvalue 不出网、不碰百度，失败会让设备整轮无法对话。但它有自己的闸口——`character_timbre` 查不到该角色时一律 500。
+
+### 6.1 新增角色 runbook
+
+**只配一个角色的音色（0 代码、0 发版）**：
+
+1. dashboard →「语速与音色」→ 音色管理 → 新增角色；
+2. 填 `characterKey`（小写，`a-z0-9_-`，2–32 位）与 `timbreId`（百度 timbreId）；
+3. 保存后写库并失效缓存，下一轮 getvalue 生效；
+4. 「人设」列显示未配置时，该角色的对话会回落 elly 人设——音色数据已就绪，但不是完整 IP。
+
+**真正上线一个新 IP（需发版/运维）**：
+
+| 步骤 | 位置 | 内容 |
+| --- | --- | --- |
+| 1 | `adventure-content.types.ts` `ADVENTURE_CHARACTER_KEYS` | 加新 key（冒险内容校验、capabilities、docx 主角白名单） |
+| 2 | `prompt-keys.ts` / `prompt-defaults.ts` / `PERSONA_KEY_BY_CHARACTER` | 新增 `persona_<key>` 契约与默认人设 |
+| 3 | `adventure.service.ts` `CHARACTER_PERSONAS` | 剧情内角色语气/人设 |
+| 4 | `llm-adapter.service.ts` `UPSTREAM_FALLBACK_TEXTS` | 上游失败时的角色文案（或显式回落 elly） |
+| 5 | `adventure-script-import.service.ts` | docx 主角识别白名单与中文名 |
+| 6 | dashboard `types/adventureAdmin.ts` / `AdventureStudio/labels.ts` | 类型联合与中文名映射 |
+| 7 | 设备 | `Device.characterKey` 目前无管理接口（建建设备默认 `elly`），需运维 SQL 或另立「设备 IP 归属」接口 |
+| 8 | 管理端 | 按上面的自助流程新增音色行 |
+| 9 | staging 验证 | 新 key 设备 getvalue 返回对应 timbreId；未知 key 仍 500 |
 
 `loginMac` 响应体已按 v1.4 §3.2 收敛为 `{id,nickname}`，无任何我方新增字段。**这是本版唯一对现网固件有影响的行为变更**：仍在读 `lang` 的老固件会拿到 undefined，需罗工确认在网样机不依赖它。
 
