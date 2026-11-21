@@ -2,13 +2,16 @@ import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PROMPT_DEFAULTS } from "./prompt-defaults";
 import {
+  characterKeyFromPersonaKey,
   PERSONA_KEY_BY_CHARACTER,
+  personaKeyFor,
   PROMPT_KEYS,
   type PromptKey,
 } from "./prompt-keys";
 import { PromptRenderError, renderPrompt } from "./prompt-render.util";
 
-export type PromptSource = "db" | "default";
+/** none = 动态角色人设尚无已发布版本（没有代码默认值可回落） */
+export type PromptSource = "db" | "default" | "none";
 
 export interface ResolvedPrompt {
   /** 模板正文（未渲染） */
@@ -61,7 +64,7 @@ const STORY_PROMPT_KEY_BY_INTENT: Record<string, PromptKey> = {
 export class PromptRegistryService implements OnModuleInit {
   private readonly logger = new Logger(PromptRegistryService.name);
   private readonly cache = new Map<
-    PromptKey,
+    string,
     { content: string; revision: number }
   >();
   private loadedAt = 0;
@@ -128,15 +131,43 @@ export class PromptRegistryService implements OnModuleInit {
   }
 
   /**
-   * 取角色人设。未知/缺省 characterKey 回落 elly，与既有
-   * CHARACTER_PERSONAS[key] ?? CHARACTER_PERSONAS.elly 行为一致。
+   * 取角色人设。
+   *
+   * 解析顺序：
+   * 1. elly / polly 等内置角色 → 静态 key（DB published → 代码默认值）；
+   * 2. 其他角色 → 动态 `persona_<key>` 的已发布内容；
+   * 3. 都没有 → elly 默认值（保持既有防匿名行为，绝不返回空串）。
    */
   getPersona(characterKey?: string | null): string {
-    const key =
-      (characterKey != null
-        ? PERSONA_KEY_BY_CHARACTER[characterKey]
-        : undefined) ?? DEFAULT_PERSONA_KEY;
-    return this.getTemplate(key);
+    const key = typeof characterKey === "string" ? characterKey.trim() : "";
+    if (key.length > 0) {
+      const builtin = PERSONA_KEY_BY_CHARACTER[key];
+      if (builtin) return this.getTemplate(builtin);
+
+      const dynamic = this.getDynamicPersona(key);
+      if (dynamic) return dynamic.content;
+    }
+    return this.getTemplate(DEFAULT_PERSONA_KEY);
+  }
+
+  /**
+   * 动态角色人设的已发布内容；没有已发布版本返回 null。
+   * 与 getPersona 分开是为了让管理端能区分「未配置」与「回落 Elly」。
+   */
+  getDynamicPersona(
+    characterKey: string,
+  ): { content: string; revision: number } | null {
+    this.refreshIfStale();
+    const cached = this.cache.get(personaKeyFor(characterKey));
+    return cached ? { ...cached } : null;
+  }
+
+  /** 该角色是否有人设：内置角色恒 true；动态角色以「已发布」为准 */
+  hasPersona(characterKey: string): boolean {
+    const key = characterKey.trim();
+    if (key.length === 0) return false;
+    if (PERSONA_KEY_BY_CHARACTER[key]) return true;
+    return this.getDynamicPersona(key) !== null;
   }
 
   /**
@@ -176,8 +207,8 @@ export class PromptRegistryService implements OnModuleInit {
     try {
       const templates = await this.prisma.promptTemplate.findMany({
         where: {
-          key: { in: [...PROMPT_KEYS] },
           publishedRevision: { not: null },
+          OR: [{ key: { in: [...PROMPT_KEYS] } }, { category: "persona" }],
         },
         select: { id: true, key: true, publishedRevision: true },
       });
@@ -188,7 +219,7 @@ export class PromptRegistryService implements OnModuleInit {
           : [{ templateId: template.id, revision: template.publishedRevision }],
       );
 
-      const next = new Map<PromptKey, { content: string; revision: number }>();
+      const next = new Map<string, { content: string; revision: number }>();
       if (pairs.length > 0) {
         const versions = await this.prisma.promptTemplateVersion.findMany({
           where: { OR: pairs },
@@ -198,12 +229,18 @@ export class PromptRegistryService implements OnModuleInit {
           templates.map((template) => [template.id, template.key]),
         );
         for (const version of versions) {
-          const key = keyByTemplateId.get(version.templateId) as
-            PromptKey | undefined;
+          const key = keyByTemplateId.get(version.templateId);
           if (!key) continue;
+          // 只接受内置 key 或合法 persona_<characterKey>，防止脏行进缓存
+          if (
+            !(PROMPT_KEYS as readonly string[]).includes(key) &&
+            characterKeyFromPersonaKey(key) === null
+          ) {
+            continue;
+          }
           if (
             typeof version.content !== "string" ||
-            version.content.length === 0
+            version.content.trim().length === 0
           ) {
             this.logger.warn(
               `Prompt "${key}" revision ${version.revision} has empty content in DB; using code default`,

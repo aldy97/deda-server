@@ -232,7 +232,7 @@ character_timbre（IP/角色 → timbreId 权威映射，DB 表）
 | 步骤 | 位置 | 内容 |
 | --- | --- | --- |
 | 1 | `adventure-content.types.ts` `ADVENTURE_CHARACTER_KEYS` | 加新 key（冒险内容校验、capabilities、docx 主角白名单） |
-| 2 | `prompt-keys.ts` / `prompt-defaults.ts` / `PERSONA_KEY_BY_CHARACTER` | 新增 `persona_<key>` 契约与默认人设 |
+| 2 | Prompt 管理 →「角色人设：xxx」 | 直接创建/发布动态人设（2026-11-21 起无需改 `PROMPT_KEYS`）；未发布时对话回落 Elly |
 | 3 | `adventure.service.ts` `CHARACTER_PERSONAS` | 剧情内角色语气/人设 |
 | 4 | `llm-adapter.service.ts` `UPSTREAM_FALLBACK_TEXTS` | 上游失败时的角色文案（或显式回落 elly） |
 | 5 | `adventure-script-import.service.ts` | docx 主角识别白名单与中文名 |

@@ -51,6 +51,7 @@ interface VersionRow {
 function makePrismaFake() {
   const templates: TemplateRow[] = [];
   const versions: VersionRow[] = [];
+  const characters = new Set<string>();
   let seq = 0;
   const nextId = (): string => `id-${++seq}`;
   const now = (): Date => new Date("2026-11-13T00:00:00.000Z");
@@ -63,12 +64,25 @@ function makePrismaFake() {
   };
 
   const tx = {
+    characterTimbre: {
+      findMany: async () =>
+        [...characters].sort().map((characterKey) => ({ characterKey })),
+      findUnique: async (args: { where: { characterKey: string } }) =>
+        characters.has(args.where.characterKey)
+          ? { characterKey: args.where.characterKey }
+          : null,
+    },
     promptTemplate: {
-      findMany: async (args: { where?: { key?: { in?: string[] } } }) => {
+      findMany: async (args: {
+        where?: { key?: { in?: string[] }; OR?: unknown[]; category?: string };
+      }) => {
         const wanted = args?.where?.key?.in;
-        return wanted
-          ? templates.filter((t) => wanted.includes(t.key))
-          : [...templates];
+        if (wanted) return templates.filter((t) => wanted.includes(t.key));
+        if (args?.where?.OR?.length) return [...templates];
+        if (args?.where?.category) {
+          return templates.filter((t) => t.category === args.where!.category);
+        }
+        return [...templates];
       },
       findUnique: async (args: { where: { key?: string; id?: string } }) => {
         const { key, id } = args.where;
@@ -183,6 +197,10 @@ function makePrismaFake() {
     ...tx,
     templates,
     versions,
+    characters,
+    addCharacter(characterKey: string): void {
+      characters.add(characterKey);
+    },
     $transaction: async <T>(fn: (t: typeof tx) => Promise<T>): Promise<T> =>
       fn(tx),
     /**
@@ -232,10 +250,29 @@ function makeRegistryFake(prisma: PrismaFake) {
       source: "default" as const,
     };
   };
+  const dynamicPersona = (characterKey: string) => {
+    const key = `persona_${characterKey}`;
+    const template = prisma.templates.find((t) => t.key === key);
+    if (template?.publishedRevision != null) {
+      const version = prisma.versions.find(
+        (v) =>
+          v.templateId === template.id &&
+          v.revision === template.publishedRevision,
+      );
+      if (version) {
+        return { content: version.content, revision: version.revision };
+      }
+    }
+    return null;
+  };
   return {
     reload,
     resolveTemplate,
     getTemplate: (key: PromptKey) => resolveTemplate(key).content,
+    getDynamicPersona: dynamicPersona,
+    hasPersona: (characterKey: string) =>
+      ["elly", "polly"].includes(characterKey) ||
+      dynamicPersona(characterKey) !== null,
   } as unknown as PromptRegistryService & { reload: jest.Mock };
 }
 
@@ -354,6 +391,90 @@ describe("PromptAdminService", () => {
     it("get 未知 key → 404（不静默建出一个代码不认的模板）", async () => {
       const { service } = makeService();
       await expect(service.get("not_a_key" as PromptKey)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it("音色管理里注册的角色会自动出现在 catalog（人设为空，source=none）", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("nemo");
+
+      const item = (await service.list()).find((i) => i.key === "persona_nemo");
+
+      expect(item).toMatchObject({
+        key: "persona_nemo",
+        name: "角色人设：nemo",
+        category: "persona",
+        isDynamic: true,
+        characterKey: "nemo",
+        characterRegistered: true,
+        defaultContent: null,
+        effectiveContent: "",
+        source: "none",
+      });
+    });
+
+    it("内置角色（elly/polly）不会重复出现在动态行", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("elly");
+      prisma.addCharacter("polly");
+
+      const items = await service.list();
+      expect(items).toHaveLength(PROMPT_KEYS.length);
+      expect(items.filter((i) => i.key === "persona_elly")).toHaveLength(1);
+    });
+
+    it("动态人设首次保存即建行，发布后 catalog 生效", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("nemo");
+
+      await service.saveDraft(
+        "persona_nemo",
+        { content: "Nemo 人设", expectedRevision: 0 },
+        AUTHOR,
+      );
+      expect(prisma.templates[0]).toMatchObject({
+        key: "persona_nemo",
+        category: "persona",
+        scene: null,
+        name: "角色人设：nemo",
+        draftRevision: 1,
+      });
+
+      await service.publish(
+        "persona_nemo",
+        { revision: 1, changeNote: "首版", confirmCode: "DEDA2025" },
+        AUTHOR,
+      );
+      const item = (await service.list()).find((i) => i.key === "persona_nemo");
+      expect(item).toMatchObject({
+        source: "db",
+        effectiveContent: "Nemo 人设",
+        publishedRevision: 1,
+        defaultContent: null,
+      });
+    });
+
+    it("角色被删除但人设行仍在：catalog 保留并标记未注册", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("nemo");
+      await service.saveDraft(
+        "persona_nemo",
+        { content: "Nemo 人设", expectedRevision: 0 },
+        AUTHOR,
+      );
+      prisma.characters.delete("nemo");
+
+      const item = (await service.list()).find((i) => i.key === "persona_nemo");
+      expect(item).toMatchObject({
+        characterRegistered: false,
+        isDynamic: true,
+      });
+    });
+
+    it("未注册角色的动态 key 仍 404（防止拼错角色名造孤儿模板）", async () => {
+      const { service } = makeService();
+      await expect(service.get("persona_ghost")).rejects.toBeInstanceOf(
         NotFoundException,
       );
     });
@@ -738,6 +859,19 @@ describe("PromptAdminService", () => {
         service.resetToDefault(
           "safety_l2_system",
           { changeNote: "x", confirmCode: "wrong" },
+          AUTHOR,
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("动态角色人设没有代码默认值 → 400", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("nemo");
+
+      await expect(
+        service.resetToDefault(
+          "persona_nemo",
+          { changeNote: "x", confirmCode: "DEDA2025" },
           AUTHOR,
         ),
       ).rejects.toThrow(BadRequestException);
