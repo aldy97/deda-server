@@ -79,14 +79,64 @@ describe("MqttService", () => {
       );
     });
 
-    it("should warn when client is not connected", () => {
+    it("should queue the subscription and flush it on connect when client is not created yet", () => {
       const loggerWarnSpy = jest
         .spyOn((service as any).logger, "warn")
         .mockImplementation();
-      service.subscribe("device/+/status");
+      // 模拟模块初始化时序：DeviceLinkService.onModuleInit 先于 MqttService.onModuleInit
+      service.subscribe("device/up/+");
+      service.subscribe("loginMac");
 
       expect(mockClient.subscribe).not.toHaveBeenCalled();
       expect(loggerWarnSpy).toHaveBeenCalled();
+
+      service.connect("mqtt://localhost:1883");
+      const connectHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === "connect",
+      )[1];
+      connectHandler();
+
+      expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
+      expect(mockClient.subscribe).toHaveBeenCalledWith(
+        "device/up/+",
+        { qos: 1 },
+        expect.any(Function),
+      );
+      expect(mockClient.subscribe).toHaveBeenCalledWith(
+        "loginMac",
+        { qos: 1 },
+        expect.any(Function),
+      );
+    });
+
+    it("should dedupe queued subscriptions to the same topic", () => {
+      jest.spyOn((service as any).logger, "warn").mockImplementation();
+      service.subscribe("device/up/+");
+      service.subscribe("device/up/+");
+
+      service.connect("mqtt://localhost:1883");
+      const connectHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === "connect",
+      )[1];
+      connectHandler();
+
+      expect(mockClient.subscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it("should flush queued subscriptions only once across reconnects", () => {
+      jest.spyOn((service as any).logger, "warn").mockImplementation();
+      service.subscribe("device/up/+");
+
+      service.connect("mqtt://localhost:1883");
+      const connectHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === "connect",
+      )[1];
+      connectHandler();
+      expect(mockClient.subscribe).toHaveBeenCalledTimes(1);
+
+      // 断线重连由 mqtt.js 内置 resubscribe 负责，pending 队列不得重复补订
+      connectHandler();
+      expect(mockClient.subscribe).toHaveBeenCalledTimes(1);
     });
   });
 
