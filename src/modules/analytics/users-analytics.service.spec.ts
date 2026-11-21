@@ -175,4 +175,86 @@ describe("UsersAnalyticsService.getDemographics", () => {
     expect(byCount.get("1")).toBe(2); // d1、d3
     expect(byCount.get("3+")).toBe(1); // d2 三个绑定
   });
+
+  it("getDemographics female 与绑定数=2", async () => {
+    const prisma = buildPrisma({
+      users: [],
+      bindings: [
+        { userId: "u1", deviceId: "d1" },
+        { userId: "u2", deviceId: "d1" },
+      ],
+      childProfiles: [
+        {
+          userId: "u1",
+          deviceId: "d1",
+          birthday: "2020-01-01",
+          gender: "female",
+        },
+        { userId: "u2", deviceId: "d1", birthday: "2025-01-01", gender: null },
+      ],
+      devices: [{ id: "d1", characterKey: "elly" }],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getDemographics();
+    expect(result.genderSplit.female).toBe(1);
+    const byCount = new Map(
+      result.bindingsPerDevice.map((b) => [String(b.count), b.devices]),
+    );
+    expect(byCount.get("2")).toBe(1);
+  });
+
+  it("getDemographics 非法生日 → unknown", async () => {
+    const prisma = buildPrisma({
+      users: [],
+      bindings: [{ userId: "u1", deviceId: "d1" }],
+      childProfiles: [
+        { userId: "u1", deviceId: "d1", birthday: "not-a-date", gender: null },
+      ],
+      devices: [{ id: "d1", characterKey: "elly" }],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getDemographics();
+    const byRange = new Map(
+      result.ageDistribution.map((a) => [a.range, a.devices]),
+    );
+    expect(byRange.get("unknown")).toBe(1);
+  });
+});
+
+describe("边界补测", () => {
+  it("getSummary 无绑定设备 → avgDevicesPerUser 0", async () => {
+    const prisma = buildPrisma({
+      users: [],
+      bindings: [],
+      childProfiles: [],
+      devices: [],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getSummary({});
+    expect(result.usersWithBoundDevice).toBe(0);
+    expect(result.avgDevicesPerUser).toBe(0);
+  });
+
+  it("未来生日 → unknown（年龄为负）", async () => {
+    const futureYear = new Date().getFullYear() + 1;
+    const prisma = buildPrisma({
+      users: [],
+      bindings: [{ userId: "u1", deviceId: "d1" }],
+      childProfiles: [
+        {
+          userId: "u1",
+          deviceId: "d1",
+          birthday: `${futureYear}-01-01`,
+          gender: null,
+        },
+      ],
+      devices: [{ id: "d1", characterKey: "elly" }],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getDemographics();
+    const byRange = new Map(
+      result.ageDistribution.map((a) => [a.range, a.devices]),
+    );
+    expect(byRange.get("unknown")).toBe(1);
+  });
 });

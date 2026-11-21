@@ -405,4 +405,22 @@ describe("BillingSyncService", () => {
     await service.syncDay("2026-10-10", new Date("2026-12-01T00:00:00Z"));
     expect([...prisma.table.values()][0].settled).toBe(true);
   });
+
+  it("syncDay 抛 AliyunBillUnavailableError → 状态 unconfigured 不写库", async () => {
+    const { service, prisma } = await buildService({}, [billRow()]);
+    (service as unknown as { billClient: AliyunBillClient }).billClient = {
+      fetchBillingItems: jest.fn(async () => {
+        throw new AliyunBillUnavailableError("未配置凭证");
+      }),
+      isConfigured: () => true,
+    } as unknown as AliyunBillClient;
+    const result = await service.syncDay("2026-11-10");
+    expect(result.status).toBe("unconfigured");
+    expect(prisma.table.size).toBe(0);
+  });
+
+  it("isSettled 非法日期格式 → false", () => {
+    expect(isSettled("not-a-date")).toBe(false);
+    expect(isSettled("")).toBe(false);
+  });
 });

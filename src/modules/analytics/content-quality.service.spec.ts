@@ -1501,4 +1501,70 @@ describe("QualityService", () => {
     expect(result.series[0].totalTurns).toBe(2);
     expect(result.series[1].date).toBe("2026-11-09");
   });
+
+  it("month 粒度按 YYYY-MM 聚合", async () => {
+    const { quality } = await buildServices(
+      buildPrisma({
+        messages: [
+          {
+            role: "user",
+            status: "completed",
+            spokeAt: spokeAtOn("2026-11-05"),
+            rawPayload: null,
+          },
+          {
+            role: "user",
+            status: "completed",
+            spokeAt: spokeAtOn("2026-12-05"),
+            rawPayload: null,
+          },
+        ],
+      }),
+    );
+    const result = await quality.getConversationQuality({
+      startDate: "2026-11-01",
+      endDate: "2026-12-31",
+      granularity: "month",
+    });
+    expect(result.series).toHaveLength(2);
+    expect(result.series[0].date).toBe("2026-11");
+  });
+
+  it("非法日期 / 倒置区间 → 400", async () => {
+    const { quality } = await buildServices(buildPrisma({}));
+    await expect(
+      quality.getConversationQuality({
+        startDate: "bad",
+        endDate: "2026-11-05",
+      }),
+    ).rejects.toThrow(BadRequestException);
+    await expect(
+      quality.getConversationQuality({
+        startDate: "2026-11-05",
+        endDate: "2026-11-01",
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it("仅 assistant 非失败消息 → totalTurns 0，rate 为 null", async () => {
+    const { quality } = await buildServices(
+      buildPrisma({
+        messages: [
+          {
+            role: "assistant",
+            status: "completed",
+            spokeAt: spokeAtOn("2026-11-05"),
+            rawPayload: null,
+          },
+        ],
+      }),
+    );
+    const result = await quality.getConversationQuality({
+      startDate: "2026-11-01",
+      endDate: "2026-11-05",
+    });
+    expect(result.series[0].totalTurns).toBe(0);
+    expect(result.series[0].failureRate).toBeNull();
+    expect(result.series[0].safetyRate).toBeNull();
+  });
 });

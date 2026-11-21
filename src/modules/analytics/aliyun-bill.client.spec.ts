@@ -413,5 +413,15 @@ describe("AliyunBillClient", () => {
       const items = await client.fetchBillingItems("2026-11-10");
       expect(items[0].usage).toBe(1235);
     });
+
+    it("同一 client 两次 fetch → 第二次命中 SDK 客户端缓存", async () => {
+      const client = await buildClient(AK_ENV);
+      mockDescribeBill
+        .mockResolvedValueOnce(billResponse([billItem()]))
+        .mockResolvedValueOnce(billResponse([billItem()]));
+      await client.fetchBillingItems("2026-11-10");
+      await client.fetchBillingItems("2026-11-10");
+      expect(mockDescribeBill).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -468,4 +468,39 @@ describe("OverviewService.getTrend", () => {
       service.getTrend({ startDate: "2026-11-06", endDate: "2026-11-04" }),
     ).rejects.toThrow(BadRequestException);
   });
+
+  it("getTrend month 粒度 + characterKey 过滤 + newUsers metric", async () => {
+    const prisma = buildPrisma({
+      devices: [
+        { id: "d1", characterKey: "elly" },
+        { id: "d2", characterKey: "polly" },
+      ],
+      users: [{ createdAt: spokeAtOn("2026-11-02") }],
+      bindings: [{ deviceId: "d1", createdAt: spokeAtOn("2026-11-03") }],
+      messages: [
+        { deviceId: "d1", role: "user", spokeAt: spokeAtOn("2026-11-04") },
+      ],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getTrend({
+      startDate: "2026-11-01",
+      endDate: "2026-12-31",
+      granularity: "month",
+      characterKey: "elly",
+      metrics: "dau,newUsers",
+    });
+    expect(result.granularity).toBe("month");
+    expect(result.series).toHaveLength(2);
+    expect(result.series[0].newUsers).toBe(1);
+    expect(result.series[0].dau).toBe(1);
+  });
+
+  it("getTrend 非法日期格式返回 400", async () => {
+    const service = await buildService(
+      buildPrisma({ devices: [], users: [], bindings: [], messages: [] }),
+    );
+    await expect(
+      service.getTrend({ startDate: "bad", endDate: "2026-11-04" }),
+    ).rejects.toThrow(BadRequestException);
+  });
 });

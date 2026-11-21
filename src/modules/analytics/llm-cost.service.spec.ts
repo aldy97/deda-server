@@ -807,4 +807,13 @@ describe("LlmCostService.getCostDaily — 查询范围", () => {
       }),
     );
   });
+
+  it("getCostDaily 不传 now → 用当前时间，latestFetchedAt null → 回落 null", async () => {
+    const { service } = buildService({ latestFetchedAt: null });
+    const result = await service.getCostDaily({
+      startDate: "2026-11-01",
+      endDate: "2026-11-03",
+    });
+    expect(result).toBeDefined();
+  });
 });

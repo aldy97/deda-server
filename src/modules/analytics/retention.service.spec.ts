@@ -202,3 +202,113 @@ describe("RetentionService.getLatestRetention", () => {
     });
   });
 });
+
+describe("边界补测", () => {
+  it("getCohorts day 粒度（periodDays=1）", async () => {
+    const cohortDate = shiftReportDate(TODAY, -5);
+    const prisma = buildPrisma({
+      bindings: [{ deviceId: "d1", createdAt: spokeAtOn(cohortDate) }],
+      messages: [
+        { deviceId: "d1", role: "user", spokeAt: spokeAtOn(cohortDate) },
+      ],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getCohorts({
+      granularity: "day",
+      startDate: shiftReportDate(TODAY, -10),
+      endDate: TODAY,
+    });
+    expect(result.granularity).toBe("day");
+    expect(result.cohorts).toHaveLength(1);
+    expect(result.cohorts[0].cohort).toBe(cohortDate);
+  });
+
+  it("getCohorts startDate > endDate 抛错", async () => {
+    const prisma = buildPrisma({ bindings: [], messages: [] });
+    const service = await buildService(prisma);
+    await expect(
+      service.getCohorts({ startDate: "2026-11-05", endDate: "2026-11-01" }),
+    ).rejects.toThrow("startDate must be <= endDate");
+  });
+
+  it("getCohorts 同设备多个 binding 取最早 cohortDate", async () => {
+    const early = shiftReportDate(TODAY, -20);
+    const late = shiftReportDate(TODAY, -5);
+    const prisma = buildPrisma({
+      bindings: [
+        { deviceId: "d1", createdAt: spokeAtOn(late) },
+        { deviceId: "d1", createdAt: spokeAtOn(early) },
+      ],
+      messages: [{ deviceId: "d1", role: "user", spokeAt: spokeAtOn(early) }],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getCohorts({
+      granularity: "day",
+      startDate: shiftReportDate(TODAY, -30),
+      endDate: TODAY,
+    });
+    expect(result.cohorts).toHaveLength(1);
+    expect(result.cohorts[0].cohort).toBe(early);
+  });
+
+  it("getCohorts cohort 设备无活跃消息 → 留存为 0", async () => {
+    const cohortDate = shiftReportDate(TODAY, -5);
+    const prisma = buildPrisma({
+      bindings: [{ deviceId: "d1", createdAt: spokeAtOn(cohortDate) }],
+      messages: [], // d1 绑定了但从未发消息
+    });
+    const service = await buildService(prisma);
+    const result = await service.getCohorts({
+      granularity: "day",
+      startDate: shiftReportDate(TODAY, -10),
+      endDate: TODAY,
+    });
+    expect(result.cohorts[0].retention.find((p) => p.n === 1)?.rate).toBe(0);
+  });
+
+  it("getCurve 非法 cohort 日期抛错", async () => {
+    const prisma = buildPrisma({ bindings: [], messages: [] });
+    const service = await buildService(prisma);
+    await expect(service.getCurve({ cohortStartDate: "bad" })).rejects.toThrow(
+      BadRequestException,
+    );
+    await expect(service.getCurve({ cohortEndDate: "bad" })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it("getCurve 带 cohort 边界过滤", async () => {
+    const cohortDate = shiftReportDate(TODAY, -40);
+    const prisma = buildPrisma({
+      bindings: [{ deviceId: "d1", createdAt: spokeAtOn(cohortDate) }],
+      messages: [
+        { deviceId: "d1", role: "user", spokeAt: spokeAtOn(cohortDate) },
+      ],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getCurve({
+      cohortStartDate: shiftReportDate(TODAY, -60),
+      cohortEndDate: TODAY,
+    });
+    expect(result.cohortSize).toBe(1);
+  });
+
+  it("getCohortDates 第二个 binding 更晚 → 保留最早", async () => {
+    const early = shiftReportDate(TODAY, -20);
+    const late = shiftReportDate(TODAY, -5);
+    const prisma = buildPrisma({
+      bindings: [
+        { deviceId: "d1", createdAt: spokeAtOn(early) },
+        { deviceId: "d1", createdAt: spokeAtOn(late) },
+      ],
+      messages: [{ deviceId: "d1", role: "user", spokeAt: spokeAtOn(early) }],
+    });
+    const service = await buildService(prisma);
+    const result = await service.getCohorts({
+      granularity: "day",
+      startDate: shiftReportDate(TODAY, -30),
+      endDate: TODAY,
+    });
+    expect(result.cohorts[0].cohort).toBe(early);
+  });
+});

@@ -429,5 +429,15 @@ describe("EngagementService", () => {
       const result = await service.getDurationDistribution({});
       expect(result.date).toBeTruthy();
     });
+
+    it("非法日期格式返回 400", async () => {
+      const service = await buildService(buildPrisma(empty()));
+      await expect(
+        service.getSummary({ startDate: "bad", endDate: "2026-11-05" }),
+      ).rejects.toThrow(BadRequestException);
+      await expect(
+        service.getDurationDistribution({ date: "bad" }),
+      ).rejects.toThrow(BadRequestException);
+    });
   });
 });

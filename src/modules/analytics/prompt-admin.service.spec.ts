@@ -842,4 +842,17 @@ describe("PromptAdminService", () => {
       prisma.promptTemplate.create = original;
     });
   });
+
+  describe("边界补测", () => {
+    it("author.displayName / changeNote 为 null → 落库为 null", async () => {
+      const { service, prisma } = makeService();
+      await service.saveDraft(
+        "adventure_interaction_system",
+        { content: "x", expectedRevision: 0, changeNote: null },
+        { username: "admin", displayName: null },
+      );
+      expect(prisma.versions[0].authorDisplayName).toBeNull();
+      expect(prisma.versions[0].changeNote).toBeNull();
+    });
+  });
 });
