@@ -664,6 +664,27 @@ describe("LlmService", () => {
       );
     });
 
+    it("should disable thinking via enable_thinking for the small model", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        service.completeStream({
+          scene: "filler",
+          messages: [{ role: "user", content: "我喜欢上海的天气" }],
+          model: "qwen-flash",
+        }),
+      );
+
+      const body = mockedAxios.post.mock.calls[0][1] as Record<string, unknown>;
+      expect(body.enable_thinking).toBe(false);
+      expect(body).not.toHaveProperty("thinking");
+    });
+
     it("should use small-model credentials for non-streaming adventure bridges", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -710,6 +731,22 @@ describe("LlmService", () => {
           }),
         }),
       );
+    });
+
+    it("should disable thinking via enable_thinking for the small model (non-streaming)", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "我们继续冒险吧！" } }] },
+      } as any);
+
+      await service.complete({
+        scene: "adventure_interaction",
+        messages: [{ role: "user", content: "我想吃冰淇淋" }],
+        model: "qwen-flash",
+      });
+
+      const body = mockedAxios.post.mock.calls[0][1] as Record<string, unknown>;
+      expect(body.enable_thinking).toBe(false);
+      expect(body).not.toHaveProperty("thinking");
     });
 
     it("should fall back to primary credentials when small-model env is not set", async () => {
