@@ -297,4 +297,50 @@ describe("DeviceStatusService", () => {
       );
     });
   });
+
+  describe("边界补测", () => {
+    it("messageId 缺失 → 忽略", () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          messageType: MessageType.DEVICE_STATUS,
+          deviceId: "d1",
+          data: {},
+        }),
+      );
+      service.handleMessage("zhianxin/event/report", payload);
+      expect(redisService.setValue).not.toHaveBeenCalled();
+    });
+
+    it("DEVICE_STATUS deviceId 缺失 → 忽略", async () => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          messageId: "m1",
+          messageType: MessageType.DEVICE_STATUS,
+          data: {},
+        }),
+      );
+      service.handleMessage("zhianxin/event/report", payload);
+      await new Promise((r) => setImmediate(r));
+      expect(redisService.setValue).not.toHaveBeenCalled();
+    });
+
+    it("occurredAt 缺省 → 用 Date.now()，battery 无 reportedAt 时直接采纳", async () => {
+      redisService.getValue.mockResolvedValue(null);
+      const payload = Buffer.from(
+        JSON.stringify({
+          messageId: "m2",
+          messageType: MessageType.DEVICE_STATUS,
+          deviceId: "d2",
+          data: {
+            battery: { percent: 50, reportedAt: 123456 },
+          },
+        }),
+      );
+      service.handleMessage("zhianxin/event/report", payload);
+      await new Promise((r) => setImmediate(r));
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.updatedAt).toBeDefined();
+      expect(cached.battery.percent).toBe(50);
+    });
+  });
 });
