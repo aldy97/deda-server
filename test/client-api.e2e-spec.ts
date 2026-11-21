@@ -20,6 +20,8 @@ const E2E_LLM_API_KEY = "e2e-llm-api-key";
 // 必须在 AppModule 编译前就位：ClientApiService 构造时读取
 process.env.DEVICE_LOGIN_MAC_KEY = E2E_MAC_KEY;
 process.env.LLM_ADAPTER_API_KEY = E2E_LLM_API_KEY;
+// getvalue（v1.4）契约用例的数据源：Device.characterKey 默认 elly
+process.env.CHARACTER_TIMBRE_JSON = JSON.stringify({ elly: "1000957" });
 
 /** 与协议 3.1 节一致：md5_ascii(md5_utf8(macKey + mac).hexdigest()).hexdigest() */
 const loginPassword = (mac: string): string =>
@@ -103,6 +105,15 @@ describe("client-api + provision claim (e2e)", () => {
       .post("/client/bot/bot/stop")
       .send({ mac: overMac, instanceid });
 
+  const botGetValue = (
+    id = mac,
+    nickname = `设备 ${mac.slice(-6)}`,
+    extra: Record<string, unknown> = {},
+  ) =>
+    request(app.getHttpServer())
+      .post("/client/bot/bot/getvalue")
+      .send({ id, nickname, ...extra });
+
   const candidates = (authToken = token) =>
     request(app.getHttpServer())
       .get("/devices/provision-candidates")
@@ -114,7 +125,8 @@ describe("client-api + provision claim (e2e)", () => {
     expect(response.headers.authorization).toBe(E2E_LLM_API_KEY);
     expect(response.body).toEqual({
       code: 200,
-      data: { id: mac, nickname: `设备 ${mac.slice(-6)}`, lang: "zh" },
+      // v1.4 §3.2：loginMac 只作登录用，lang 移到 getvalue 响应体
+      data: { id: mac, nickname: `设备 ${mac.slice(-6)}` },
       msg: "success",
     });
     const device = await prisma.device.findUnique({
@@ -241,5 +253,53 @@ describe("client-api + provision claim (e2e)", () => {
         (d: { deviceId: string }) => d.deviceId === mac,
       ),
     ).toBeUndefined();
+  });
+
+  describe("bot/getvalue (v1.4)", () => {
+    it("returns the four contract fields for a logged-in device", async () => {
+      const login = await loginMac().expect(200);
+
+      const response = await botGetValue(
+        login.body.data.id,
+        login.body.data.nickname,
+      ).expect(200);
+
+      // 严格 toEqual：多一个或少一个字段都算契约漂移
+      expect(response.body).toEqual({
+        code: 200,
+        data: { vcn: "1000957", vol: 1, spd: 0.7, lang: "zh" },
+        msg: "success",
+      });
+    });
+
+    it("tolerates an id written with separators and uppercase", async () => {
+      await loginMac().expect(200);
+      const withSeparators =
+        `${mac.slice(0, 2)}:${mac.slice(2, 4)}:${mac.slice(4, 6)}:${mac.slice(6, 8)}:${mac.slice(8, 10)}:${mac.slice(10, 12)}`.toUpperCase();
+
+      const response = await botGetValue(withSeparators).expect(200);
+      expect(response.body.data.vcn).toBe("1000957");
+    });
+
+    it("returns a non-200 for an id that never logged in", async () => {
+      await botGetValue().expect(401);
+    });
+
+    it("rejects undeclared fields", async () => {
+      await loginMac().expect(200);
+      await botGetValue(mac, `设备 ${mac.slice(-6)}`, { vcn: "1" }).expect(400);
+    });
+
+    it("rejects a missing nickname", async () => {
+      await loginMac().expect(200);
+      await request(app.getHttpServer())
+        .post("/client/bot/bot/getvalue")
+        .send({ id: mac })
+        .expect(400);
+    });
+
+    it("rejects a malformed id", async () => {
+      await botGetValue("platform-returned-id").expect(400);
+    });
   });
 });

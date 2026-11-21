@@ -66,6 +66,12 @@ export const TTS_TYPE_DEFAULT = "DEFAULT";
 export const TTS_SPD_MIN = 0.5;
 export const TTS_SPD_MAX = 2;
 
+/** 全局语速默认值（产品决策）：非哄睡 0.7 / 哄睡 0.5。DB 无行或越界时回落。 */
+export const DEFAULT_NORMAL_SPD = 0.7;
+export const DEFAULT_SLEEP_SPD = 0.5;
+/** voice_speed_config 单行表的固定主键 */
+export const VOICE_SPEED_CONFIG_ID = "default";
+
 /**
  * 百度 ai_agent_instance_id 是 Long，请求体里必须是裸数字。
  * 我方按机芯厂协议 4.1 以十进制字符串保存（避免 JS Number 精度丢失），
@@ -109,8 +115,6 @@ export type VoiceApplyBlockReason =
   | "empty_catalog"
   /** 期望音色不在目录内，或与实例语种不匹配 */
   | "voice_not_in_catalog"
-  /** 语速档位 → spd 倍数的映射未配置 */
-  | "speech_rate_map_missing"
   /** 只有音色或只有语速，不足以组装完整 tts 串 */
   | "incomplete_tts_target"
   /** 百度返回非 2xx */
@@ -229,13 +233,39 @@ export interface VoiceReconcilePort {
    * 设备 start 登记成功后的追平入口；永不抛错。
    * 协议 4.2 要求 start 幂等返回 {"code":200}，追平失败绝不能影响该响应，
    * 否则设备会按协议 6.2 做无意义重试。
+   *
+   * @param deviceInternalId 可选。调用方（bot/start）已经查过 Device，
+   *   传入即免去本方法内的重复查询；不传则自行按 mac 查。
    */
   onInstanceRegistered(
     mac: string,
     instanceId: string,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
-  /** 语速档位 → spd 倍数；映射未配置时返回 null */
-  resolveSpd(speechRate: string | null): number | null;
+  /**
+   * IP/角色 → timbreId 权威映射查表；纯读配置，不出网、不查库、永不抛错。
+   *
+   * 用途是让服务端知道「某个 IP 对应哪个音色」，两个消费方：
+   * 1. 设备端协议 v1.4（2026-11-18）新增的 POST /client/bot/bot/getvalue——固件每轮
+   *    创建百度实例前拉取 vcn/vol/spd 且不缓存，vcn 即取自本映射
+   *    （实现见 ClientApiService.botGetValue；返回 null 时该接口按 v1.4 §4.3 抛 500）；
+   * 2. 剧情内按角色切换音色：冒险故事里非本机芯 IP 的角色说话时用该角色
+   *    自己的音色，故事结束后再切回本 IP 的音色。
+   *
+   * @param characterKey Device.characterKey（elly / polly）；null 或空串返回 null
+   * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
+   */
+  getTimbreForCharacter(characterKey: string | null): string | null;
+  /** 非哄睡语速倍数；DB 无行或越界时回落 DEFAULT_NORMAL_SPD */
+  resolveNormalSpd(): Promise<number>;
+  /** 哄睡语速倍数；DB 无行或越界时回落 DEFAULT_SLEEP_SPD */
+  resolveSleepSpd(): Promise<number>;
+  /**
+   * 对设备当前活跃实例实时下发指定语速倍数 spd（不改变音色，vcn 沿用权威映射）。
+   * 用于哄睡模式这类「临时降速、退出恢复」的场景：直接给倍数，不走语速档位映射。
+   * 永不抛错；无活跃实例 / client 未启用时返回 deferred，由 getvalue 兜底。
+   */
+  applySpd(mac: string, vcn: string, spd: number): Promise<VoiceApplyOutcome>;
 }
 
 /**
@@ -246,13 +276,22 @@ export const SPEECH_RATES = ["slow", "normal", "fast"] as const;
 export type SpeechRate = (typeof SPEECH_RATES)[number];
 
 /**
+ * 设备默认语种。
+ *
+ * 机芯厂 2026-11-17 书面确认：固件 bot/start 上报的 lang 取值就是 `zh`，
+ * 与《设备端接口文档》4.1 节「默认 zh」一致。loginMac 响应体的 lang 与
+ * bot/start 缺省回填两处共用此常量，避免口径漂移。
+ */
+export const DEVICE_DEFAULT_LANG = "zh";
+
+/**
  * 实例语种（机芯厂文档 4.1 的 lang，如 zh）→ 音色 language（timbres 接口枚举）。
  *
  * 依据：timbres 响应参数 language 取值为 chinese/english/japanese，
  * 且 switchSceneRole 明确「不可跨语言互切角色」，因此必须按语种过滤音色。
+ * `zh` 一侧已由机芯厂 2026-11-17 确认；`en`/`ja` 仍是由两页文档取值域推得。
  *
- * TODO(Q1): 该映射由两页文档的取值域推得，未经机芯厂/百度确认；
- * 未确认前保持严格策略——映射不到的语种一律返回空目录（fail-closed）。
+ * TODO(Q1): en/ja 映射未经确认；映射不到的语种一律返回空目录（fail-closed）。
  */
 export const TIMBRE_LANGUAGE_BY_LANG: Readonly<Record<string, string>> = {
   zh: "chinese",

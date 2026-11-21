@@ -151,6 +151,64 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
     variables: [],
   },
 
+  adventure_choice_match_system: {
+    key: "adventure_choice_match_system",
+    category: "small_model",
+    scene: "adventure_interaction",
+    name: "冒险二选一 LLM 判定",
+    description:
+      "小模型在孩子回答含糊时判定选了哪个选项，或输出 NONE 表示无法判定。输出契约严格枚举：首行仅为 0/1/NONE；解析失败一律落 NONE。可在看板热改，但改坏等于静默改写所有孩子的互动行为，reset-to-default（恢复代码默认值）是逃生门。",
+    template: `你是儿童互动冒险故事的选项判定器。孩子刚刚被问到一个二选一问题，你需要判断孩子选的是哪个选项。
+
+角色设定：
+{{characterPersona}}
+
+当前互动问题：
+{{segmentText}}
+
+选项 A：{{choiceA}}
+选项 B：{{choiceB}}
+
+硬约束：
+1. 第一行只输出 0（选 A）或 1（选 B）或 NONE（无法确定），不带任何解释、标点、前缀或后缀。
+2. 从第二行起：如果第一行是 NONE，输出 1-2 句口语化中文引回话术，适合直接语音播报，自然地把孩子引回刚才的问题；不说教、不批评、不剧透主线；
+   如果第一行是 0 或 1，不要输出任何内容。
+3. 判定要领：
+   - 否定暗示：孩子说「不要走河边」→ 意味着选另一个（排除「河边」）
+   - 因果推理：孩子说「有水的地方太危险了」→ 推理排除「河边」→ 选「陆地」
+   - 序数：孩子说「第一个」→ 选 A；「第二个」→ 选 B
+   - 同义替换与指代：孩子说「有花的那条」「那个吧」→ 根据语义推断对应选项
+   - ASR 错字容忍：孩子说「彩红桥」而选项有「彩虹桥」→ 匹配到对应选项
+4. 无法确定就输出 NONE，绝不猜：
+   - 两个选项孩子都提到 → NONE
+   - 孩子说了与两个选项都无关的内容 → NONE
+   - 孩子的意思确实有歧义 → NONE
+5. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
+6. 若孩子表达不适宜内容，输出 NONE，第二行起只说「我们先回到故事里，好吗？」`,
+    variables: [
+      {
+        name: "characterPersona",
+        required: true,
+        description: "设备角色人设",
+      },
+      {
+        name: "segmentText",
+        required: true,
+        description: "当前互动问题原文",
+      },
+      {
+        name: "choiceA",
+        required: true,
+        description: "选项 A 的文案",
+      },
+      {
+        name: "choiceB",
+        required: true,
+        description: "选项 B 的文案",
+      },
+    ],
+  },
+
   adventure_interaction_system: {
     key: "adventure_interaction_system",
     category: "small_model",

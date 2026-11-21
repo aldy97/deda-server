@@ -15,6 +15,7 @@ import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
@@ -25,6 +26,7 @@ describe("VendorService", () => {
   let configService: jest.Mocked<ConfigService>;
   let adventureService: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordPresented: jest.Mock;
@@ -43,6 +45,7 @@ describe("VendorService", () => {
     getByDeviceId: jest.Mock;
   };
   let sleepVoiceConfigService: { handle: jest.Mock };
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
 
   async function* streamOf(
     deltas: string[],
@@ -81,6 +84,7 @@ describe("VendorService", () => {
     );
 
   beforeEach(async () => {
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PROMPT_REGISTRY_PROVIDER,
@@ -151,6 +155,7 @@ describe("VendorService", () => {
           provide: AdventureService,
           useValue: {
             handleChildReply: jest.fn().mockResolvedValue(null),
+            tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
             startToday: jest.fn().mockResolvedValue(null),
             isCompletedToday: jest.fn().mockResolvedValue(false),
             recordPresented: jest.fn().mockResolvedValue(undefined),
@@ -180,6 +185,7 @@ describe("VendorService", () => {
             handle: jest.fn(),
           },
         },
+        { provide: SleepModeService, useValue: sleepMode },
       ],
     }).compile();
 
@@ -937,6 +943,7 @@ describe("VendorService", () => {
       const promptOptions = llmService.buildEnglishTutorPrompt.mock.calls[0][2];
       expect(promptOptions?.promptTemplate).toContain("不要提问");
       expect(promptOptions?.promptTemplate).toContain("不要邀请互动");
+      expect(sleepMode.enter).toHaveBeenCalledWith("uuid-s1");
     });
 
     describe("sleep story voice config", () => {
@@ -1569,8 +1576,50 @@ describe("VendorService", () => {
           filler: null,
           answer: "好呀，我们去森林！\n森林里有一只小松鼠。",
           interactionResult: null,
+          matchedChoice: null,
         },
       });
+    });
+
+    it("should include matchedChoice in assistant rawPayload and pass userMessageId to recordPresented", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h2",
+        deviceId: "dev-h2",
+      });
+      prisma.message.create.mockResolvedValue({ id: "msg-abc" });
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["好呀，我们去森林！"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: {
+          index: 0,
+          source: "llm",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
+      });
+
+      await service.handleTextIn({
+        deviceId: "dev-h2",
+        asrText: "森林",
+      });
+
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall![0].data.rawPayload).toMatchObject({
+        matchedChoice: { index: 0, source: "llm" },
+      });
+
+      expect(adventureService.recordPresented).toHaveBeenCalledWith(
+        "uuid-h2",
+        expect.any(String),
+        expect.objectContaining({
+          matchedChoice: expect.objectContaining({ index: 0, source: "llm" }),
+        }),
+        "msg-abc",
+      );
     });
 
     it("should start today's adventure before entering the free-chat pipeline", async () => {

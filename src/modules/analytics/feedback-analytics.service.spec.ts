@@ -331,4 +331,32 @@ describe("FeedbackAnalyticsService", () => {
       expect(prisma.feedback.findMany).not.toHaveBeenCalled();
     });
   });
+
+  describe("边界补测", () => {
+    it("listParentReportFeedbacks 只传 startDate / 只传 endDate", async () => {
+      const prisma = buildPrisma({});
+      const service = await buildService(prisma);
+
+      await service.listParentReportFeedbacks({ startDate: "2026-11-01" });
+      let args = prisma.parentReportFeedback.count.mock.calls[0][0];
+      expect(args.where.reportDate).toEqual({ gte: "2026-11-01" });
+
+      await service.listParentReportFeedbacks({ endDate: "2026-11-05" });
+      args = prisma.parentReportFeedback.count.mock.lastCall[0];
+      expect(args.where.reportDate).toEqual({ lte: "2026-11-05" });
+    });
+
+    it("listUserFeedbacks 只传 startDate / 只传 endDate", async () => {
+      const prisma = buildPrisma({});
+      const service = await buildService(prisma);
+
+      await service.listUserFeedbacks({ startDate: "2026-11-01" });
+      let args = prisma.feedback.count.mock.calls[0][0];
+      expect(args.where.createdAt.gte).toEqual(new Date("2026-11-01T00:00:00"));
+
+      await service.listUserFeedbacks({ endDate: "2026-11-05" });
+      args = prisma.feedback.count.mock.lastCall[0];
+      expect(args.where.createdAt.lt).toBeInstanceOf(Date);
+    });
+  });
 });

@@ -35,6 +35,12 @@ export class ContentController {
     return this.contentService.getAdventure(query);
   }
 
+  @Get("adventure-choices")
+  @ApiOperation({ summary: "冒险故事二选一聚合（命中率/LLM占比/fallback率）" })
+  getAdventureChoices(@Query() query: AdventureQueryDto) {
+    return this.contentService.getAdventureChoices(query);
+  }
+
   @Get("learning")
   @ApiOperation({ summary: "学习内容（新词/开口/习惯计划）" })
   getLearning(@Query() query: AnalyticsDateRangeQueryDto) {

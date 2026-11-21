@@ -309,3 +309,35 @@ describe("resolveAnalyticsTokenTtl", () => {
     expect(resolveAnalyticsTokenTtl("30d")).toBe("30d");
   });
 });
+
+describe("parseAccounts 边界", () => {
+  const jwtService = new JwtService({ secret: SECRET });
+
+  it("ANALYTICS_ADMIN_USERS 未配置 → 空账号列表，登录 401", async () => {
+    const module = await Test.createTestingModule({
+      providers: [
+        AnalyticsAuthService,
+        { provide: ConfigService, useValue: buildConfig(undefined) },
+        { provide: ANALYTICS_JWT_SERVICE, useValue: jwtService },
+      ],
+    }).compile();
+    const svc = module.get(AnalyticsAuthService);
+    await expect(svc.login("admin", PASSWORD)).rejects.toThrow(
+      UnauthorizedException,
+    );
+  });
+
+  it("ANALYTICS_ADMIN_USERS 非数组 JSON → 抛错", async () => {
+    const module = await Test.createTestingModule({
+      providers: [
+        AnalyticsAuthService,
+        { provide: ConfigService, useValue: buildConfig('{"not":"array"}') },
+        { provide: ANALYTICS_JWT_SERVICE, useValue: jwtService },
+      ],
+    }).compile();
+    const svc = module.get(AnalyticsAuthService);
+    await expect(svc.login("admin", PASSWORD)).rejects.toThrow(
+      "must be a JSON array",
+    );
+  });
+});

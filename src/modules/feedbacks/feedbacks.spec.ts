@@ -303,4 +303,15 @@ describe("Feedbacks", () => {
     expect(expire).not.toHaveBeenCalled();
     expect(prismaCreate).not.toHaveBeenCalled();
   });
+
+  it("controller.create：req.ip 缺失 → 回落 unknown 作为限流键", async () => {
+    const controller = new FeedbacksController(service);
+    const spy = jest.spyOn(service, "create");
+    await controller.create(
+      { content: "有效反馈" } as never,
+      { user: { userId: "user-001" }, headers: {}, ip: undefined } as never,
+    );
+    expect(spy).toHaveBeenCalledWith("user-001", "unknown", expect.anything());
+    spy.mockRestore();
+  });
 });

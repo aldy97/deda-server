@@ -473,4 +473,17 @@ describe("ChildMemoriesService", () => {
       },
     });
   });
+
+  it("markInjected 空数组不碰 prisma", async () => {
+    await service.markInjected([]);
+    expect(prisma.childMemory.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("buildPromptBlock 默认 recentAssistantTexts 参数", async () => {
+    prisma.childMemory.findMany.mockResolvedValue([
+      { id: "m1", key: "favorite_color", valueText: "蓝色" },
+    ]);
+    const result = await service.buildPromptBlock("device-1");
+    expect(result.memoryIds).toEqual(["m1"]);
+  });
 });

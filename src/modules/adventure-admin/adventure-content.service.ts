@@ -47,10 +47,17 @@ export const MIN_REASON_CHARS = 8;
 export const MAX_REASON_CHARS = 300;
 
 /**
- * 身份级错误：连草稿都不许落库。
- * 这些不是「没写完」，是「这一行写坏了」——落库会污染
- * @@unique([characterKey, season, episodeNumber])，或指向根本不存在的 IP / 季。
- * 其余（缺文本、段号断档、选项不全、禁用词……）都属于内容级，允许存草稿，只拦发布：
+ * 草稿保存时的阻断清单。
+ *
+ * CHOICES_COUNT_INVALID 只对选项数超过 2 产出——那不是「没写完」而是「写坏了」：
+ * 引擎只在两个选项里判定，第 3 个及以后的选项是静默失效的死分支，作者在界面上
+ * 看不出它失效了，所以草稿也拦。
+ *
+ * 选项数不足 2 个（0 或 1）属于「写到一半」，lint 用 CHOICES_REQUIRED 报错但
+ * 刻意未进本清单：草稿就是让作者存中间态的（呼应 lossless-draft 与
+ * assertNoSegmentLoss 的不变量：空段、未写全的选项都允许落库，发布时才重新校验）。
+ *
+ * 其余（缺文本、段号断档、禁用词……）都属于内容级，允许存草稿，只拦发布：
  * 草稿对孩子不可见，而发布时会按发布标准重新校验一次。
  */
 export const DRAFT_BLOCKING_CODES = [
@@ -58,10 +65,11 @@ export const DRAFT_BLOCKING_CODES = [
   "UNKNOWN_CHARACTER_KEY",
   "INVALID_EPISODE_NUMBER",
   "BUSINESS_KEY_TAKEN",
+  "CHOICES_COUNT_INVALID",
 ];
 
 /**
- * 跨环境导入比「存草稿」严一档：禁用词同样拦下。
+ * 跨环境导入比「存草稿」严一档：禁用词与选项数不合规同样拦下。
  * 导入校验走的是草稿标准（禁用词在那个标准下已降级为 warning），若按 severity 判
  * 就会开出一条泄漏通道——staging 的禁用词草稿能被整包搬进 prod。所以这里按 code 判。
  */
@@ -1002,9 +1010,11 @@ function assertConfirmText(
 }
 
 /**
- * 草稿入库门槛：身份级错误直接拒绝，规范化会丢段也直接拒绝。
- * 内容级问题（含禁用词）一律放行——草稿对孩子不可见，发布才是唯一的闸口，
- * 而发布必定按发布标准重新校验一次（见 publish / revert 里的 assertPublishable）。
+ * 草稿入库门槛：身份级错误与选项过多（>2）直接拒绝，规范化会丢段也直接拒绝。
+ * 选项不足（<2）属于「写到一半」，由 CHOICES_REQUIRED 报错但刻意不进阻断清单，
+ * 允许存草稿。其他内容级问题（含禁用词）一律放行——草稿对孩子不可见，
+ * 发布才是唯一的闸口，而发布必定按发布标准重新校验一次
+ * （见 publish / revert 里的 assertPublishable）。
  */
 export function assertDraftSavable(
   identity: EpisodeIdentity,
@@ -1138,7 +1148,6 @@ function toSegmentRows(episodeId: string, content: EpisodeContentDraft) {
     interactionType: segment.interactionType ?? null,
     options: jsonOf(segment.options ?? null),
     fallbackText: segment.fallbackText ?? null,
-    exitText: segment.exitText ?? null,
     rewardStar: segment.rewardStar === true,
   }));
 }

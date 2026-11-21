@@ -13,6 +13,7 @@ import { ChildMemoriesService } from "@/modules/child-memories/child-memories.se
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
@@ -59,8 +60,10 @@ describe("LlmAdapterModule", () => {
   let turnDecisions: { record: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
   let adventure: {
     handleChildReply: jest.Mock;
+    tryTestStoryTrigger: jest.Mock;
     startToday: jest.Mock;
     isCompletedToday: jest.Mock;
     recordEntryBlocked: jest.Mock;
@@ -156,8 +159,10 @@ describe("LlmAdapterModule", () => {
       applyVoiceUpdate: jest.fn().mockResolvedValue({}),
       getByDeviceId: jest.fn().mockResolvedValue({ contentType: "story" }),
     };
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     adventure = {
       handleChildReply: jest.fn().mockResolvedValue(null),
+      tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
       startToday: jest.fn().mockResolvedValue(null),
       isCompletedToday: jest.fn().mockResolvedValue(false),
       recordEntryBlocked: jest.fn().mockResolvedValue(undefined),
@@ -177,6 +182,7 @@ describe("LlmAdapterModule", () => {
         { provide: ConversationSessionService, useValue: session },
         { provide: SleepVoiceConfigService, useValue: sleepVoice },
         { provide: SleepConfigsService, useValue: sleepConfigs },
+        { provide: SleepModeService, useValue: sleepMode },
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
@@ -322,6 +328,7 @@ describe("LlmAdapterModule", () => {
           promptTemplate: expect.stringContaining("哄睡"),
         }),
       );
+      expect(sleepMode.enter).toHaveBeenCalledWith("dev-internal-1");
     });
 
     /**
@@ -560,10 +567,50 @@ describe("LlmAdapterModule", () => {
         "dev-internal-1",
         userCall.data.turnId,
         expect.objectContaining({ action: "await_reply" }),
+        undefined,
       );
       // 降级锁定：新链路无推送通道，绝不启用 10s 沉默超时机制
       expect(adventure.markPromptPlaybackComplete).not.toHaveBeenCalled();
       expect(adventure.registerTimeoutListener).not.toHaveBeenCalled();
+    });
+
+    it("includes matchedChoice in assistant rawPayload when handleChildReply returns a match", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["好呀，我们去森林！", "继续故事"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["好呀，我们去森林！", "继续故事"]);
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        matchedChoice: { index: 0, source: "deterministic" },
+      });
+    });
+
+    it("sets matchedChoice to null in assistant rawPayload when no match is returned", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["没关系，我们继续吧。"],
+        action: "await_reply",
+        result: "off_topic",
+      });
+      const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["没关系，我们继续吧。"]);
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        matchedChoice: null,
+      });
     });
 
     it("enters adventure on adventure_story intent when today is not completed", async () => {
@@ -1877,6 +1924,7 @@ describe("LlmAdapterModule", () => {
           { provide: ConversationSessionService, useValue: session },
           { provide: SleepVoiceConfigService, useValue: sleepVoice },
           { provide: SleepConfigsService, useValue: sleepConfigs },
+          { provide: SleepModeService, useValue: sleepMode },
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
@@ -2591,6 +2639,35 @@ describe("LlmAdapterModule", () => {
         await callController({ messages: [] }, res);
 
         expect(res.statusCode).toBe(400);
+      });
+
+      it("匿名（无 user）非流式抛非 Error 时也能兜底", async () => {
+        jest.spyOn(service, "completeReply").mockRejectedValue("pipeline down");
+        const res = makeRes();
+        await callController(
+          { ...boundRequest, user: undefined, stream: false },
+          res,
+        );
+        expect(res.statusCode).toBe(200);
+        expect(res.jsonBody).toMatchObject({
+          choices: [
+            {
+              message: { content: ADVENTURE_DEGRADED_REPLIES.lastResort },
+            },
+          ],
+        });
+      });
+
+      it("匿名（无 user）流式抛非 Error 时也能兜底", async () => {
+        jest.spyOn(service, "streamReply").mockImplementation(() =>
+          (async function* () {
+            throw "pipeline down";
+          })(),
+        );
+        const res = makeRes();
+        await callController({ ...boundRequest, user: undefined }, res);
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toContain(ADVENTURE_DEGRADED_REPLIES.lastResort);
       });
     });
   });

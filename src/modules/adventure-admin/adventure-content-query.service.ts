@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   AdventureEpisode,
@@ -40,6 +44,10 @@ import {
   SimulationThresholds,
   simulateEpisode,
 } from "./adventure-simulator";
+import {
+  ADVENTURE_EXIT_TEXT,
+  ADVENTURE_TEST_ENV,
+} from "@/modules/adventure/adventure.constants";
 
 /**
  * 冒险内容读侧。
@@ -70,9 +78,16 @@ export interface ContentAdminProfileCapabilities {
   segmentKinds: string[];
   lintThresholds: LintThresholds;
   simulationThresholds: SimulationThresholds;
+  /**
+   * 全局唯一的退出话术，供看板只读展示（原逐段 `exitText` 字段已下线）。
+   * 前端不得内联这句话：单一真相源是 adventure.constants 的 ADVENTURE_EXIT_TEXT。
+   */
+  fixedExitText: string;
   /** authoring / readonly，来自 CONTENT_ADMIN_PROFILE；缺省按 readonly 处理（fail-safe） */
   profile: ContentAdminProfile;
   authoring: boolean;
+  /** 测试冒险故事下发是否可用（ADVENTURE_TEST_MODE_ENABLED=true，仅 staging） */
+  testStoryEnabled: boolean;
 }
 
 export interface EpisodeListFilter {
@@ -178,6 +193,62 @@ export interface VersionDiffResult {
   segmentDiffs: SegmentDiff[];
 }
 
+export interface ChoiceStatsChoice {
+  index: number;
+  key: string;
+  text: string | null;
+  hits: number;
+  deterministicHits: number;
+  llmHits: number;
+  share: number | null;
+}
+
+export interface ChoiceStatsSegment {
+  segmentOrder: number | null;
+  promptText: string | null;
+  matchedTotal: number;
+  fallbackTotal: number;
+  fallbackRate: number | null;
+  neverChosen: boolean;
+  choices: ChoiceStatsChoice[];
+}
+
+export interface ChoiceStatsResult {
+  episodeId: string;
+  title: string;
+  contentNote: string;
+  totalInteractions: number;
+  matchedTotal: number;
+  segments: ChoiceStatsSegment[];
+}
+
+/** 自包含的日期校验与范围计算（语义与 parent-report-date.util 一致，不跨模块 import） */
+
+function isValidStatsDate(dateKey: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  return (
+    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === dateKey
+  );
+}
+
+function statsDayRange(dateKey: string): { start: Date; end: Date } {
+  const start = new Date(`${dateKey}T00:00:00+08:00`);
+  const end = new Date(
+    new Date(`${dateKey}T00:00:00+08:00`).getTime() + 86400000,
+  );
+  return { start, end };
+}
+
+function assertValidStatsRange(startDate: string, endDate: string) {
+  if (!isValidStatsDate(startDate) || !isValidStatsDate(endDate)) {
+    throw new BadRequestException("Invalid date");
+  }
+  if (startDate > endDate) {
+    throw new BadRequestException("startDate must be <= endDate");
+  }
+}
+
 export interface CheckContentIdentity extends EpisodeIdentity {
   forPublish?: boolean;
 }
@@ -210,10 +281,6 @@ export class AdventureContentQueryService {
       maxStarsPerEpisode: this.number(
         "ADVENTURE_LINT_MAX_STARS_PER_EPISODE",
         DEFAULT_LINT_THRESHOLDS.maxStarsPerEpisode,
-      ),
-      minChoiceKeyChars: this.number(
-        "ADVENTURE_LINT_MIN_CHOICE_KEY_CHARS",
-        DEFAULT_LINT_THRESHOLDS.minChoiceKeyChars,
       ),
       minChoiceTextChars: this.number(
         "ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS",
@@ -264,8 +331,11 @@ export class AdventureContentQueryService {
         ...DEFAULT_SIMULATION_THRESHOLDS,
         ...this.simulationOverrides,
       },
+      fixedExitText: ADVENTURE_EXIT_TEXT,
       profile: this.profile,
       authoring: this.profile === "authoring",
+      testStoryEnabled:
+        this.configService.get<string>(ADVENTURE_TEST_ENV.enabled) === "true",
     };
   }
 
@@ -458,22 +528,318 @@ export class AdventureContentQueryService {
     return this.impactFor(await this.loadEpisode(episodeId));
   }
 
-  /** 实时校验：编辑器每次改动后调用，不写库。 */
+  async choiceStats(
+    episodeId: string,
+    query: { startDate?: string; endDate?: string },
+  ): Promise<ChoiceStatsResult> {
+    const episode = await this.loadEpisode(episodeId);
+
+    // 日期校验
+    if (query.startDate && query.endDate) {
+      assertValidStatsRange(query.startDate, query.endDate);
+    }
+
+    // 事件查询（不含 exit）
+    const eventWhere: Prisma.AdventureEventWhereInput = {
+      episodeId,
+      eventType: {
+        in: ["choice_matched", "fallback", "timeout", "answered", "off_topic"],
+      },
+    };
+    if (query.startDate && query.endDate) {
+      const { start } = statsDayRange(query.startDate);
+      const { end } = statsDayRange(query.endDate);
+      eventWhere.createdAt = { gte: start, lt: end };
+    }
+
+    const events = await this.prisma.adventureEvent.findMany({
+      where: eventWhere,
+      select: { eventType: true, segmentOrder: true, payload: true },
+    });
+
+    // 汇总：totalInteractions = answered + fallback + timeout（two_choice 仅）
+    let totalInteractions = 0;
+    let matchedTotal = 0;
+
+    // 按 segment 聚合
+    type ChoiceAgg = {
+      index: number;
+      key: string;
+      hits: number;
+      deterministicHits: number;
+      llmHits: number;
+    };
+
+    type SegAgg = {
+      segmentOrder: number | null;
+      matchedTotal: number;
+      fallbackTotal: number;
+      choices: Map<string, ChoiceAgg>; // key → ChoiceAgg
+    };
+
+    const segMap = new Map<string, SegAgg>(); // key = `${segmentOrder ?? "null"}`
+    const ensureSeg = (segOrder: number | null): SegAgg => {
+      const k = `${segOrder ?? "null"}`;
+      let s = segMap.get(k);
+      if (!s) {
+        s = {
+          segmentOrder: segOrder,
+          matchedTotal: 0,
+          fallbackTotal: 0,
+          choices: new Map(),
+        };
+        segMap.set(k, s);
+      }
+      return s;
+    };
+
+    for (const event of events) {
+      const p = (event.payload ?? {}) as Record<string, unknown>;
+      const segOrder =
+        typeof event.segmentOrder === "number" ? event.segmentOrder : null;
+
+      if (event.eventType === "choice_matched") {
+        matchedTotal++;
+        const index = typeof p.index === "number" ? p.index : null;
+        const key = typeof p.key === "string" ? p.key : null;
+        const source = typeof p.source === "string" ? p.source : null;
+        const isDet = source === "deterministic";
+        const isLlm = source === "llm";
+        const choiceKey = key ?? `index:${index ?? 0}`;
+
+        const seg = ensureSeg(segOrder);
+        seg.matchedTotal++;
+
+        let c = seg.choices.get(choiceKey);
+        if (!c) {
+          c = {
+            index: index ?? 0,
+            key: key ?? "",
+            hits: 0,
+            deterministicHits: 0,
+            llmHits: 0,
+          };
+          seg.choices.set(choiceKey, c);
+        }
+        c.hits++;
+        if (isDet) c.deterministicHits++;
+        else if (isLlm) c.llmHits++;
+      } else if (event.eventType === "fallback") {
+        const interactionType =
+          typeof p.interactionType === "string" ? p.interactionType : null;
+        if (interactionType !== "two_choice") continue;
+        totalInteractions++;
+        const seg = ensureSeg(segOrder);
+        seg.fallbackTotal++;
+      } else if (
+        event.eventType === "answered" ||
+        event.eventType === "timeout"
+      ) {
+        const interactionType =
+          typeof p.interactionType === "string" ? p.interactionType : null;
+        if (interactionType !== "two_choice") continue;
+        totalInteractions++;
+      }
+      // off_topic / exit — 不计入任何统计
+    }
+
+    // 如果当前版本不存在，segments 为空但仍返回事件 stats
+    if (episode.currentVersionId === null) {
+      return {
+        episodeId: episode.id,
+        title: episode.title,
+        contentNote: "adventure-choice-stats",
+        totalInteractions,
+        matchedTotal,
+        segments: [],
+      };
+    }
+
+    // 加载版本 payload
+    const version = await this.prisma.adventureEpisodeVersion.findUnique({
+      where: { id: episode.currentVersionId },
+    });
+
+    type VersionSegment = {
+      order: number;
+      kind: string;
+      text?: string;
+      interactionType?: string;
+      options?: { choices?: Array<{ key: string; text: string }> };
+    };
+
+    const payload = (version?.payload ?? {}) as {
+      segments?: VersionSegment[];
+    };
+    const versionSegments: VersionSegment[] = Array.isArray(payload.segments)
+      ? payload.segments
+      : [];
+
+    // 从版本 payload 构建段 text map（仅 two_choice 段）
+    const versionTextMap = new Map<
+      number,
+      {
+        promptText: string | null;
+        choices: Array<{ index: number; key: string; text: string | null }>;
+      }
+    >();
+    for (const seg of versionSegments) {
+      if (seg.kind !== "interaction" || seg.interactionType !== "two_choice")
+        continue;
+      versionTextMap.set(seg.order, {
+        promptText: seg.text ?? null,
+        choices: Array.isArray(seg.options?.choices)
+          ? seg.options.choices.map((c, i) => ({
+              index: i,
+              key: c.key,
+              text: c.text ?? null,
+            }))
+          : [],
+      });
+    }
+
+    // 构建 segments 输出
+    const segments: ChoiceStatsSegment[] = [];
+
+    // 先构建有版本 payload 的段（按 order asc）
+    const orderedOrders = Array.from(versionTextMap.keys()).sort(
+      (a, b) => a - b,
+    );
+    for (const order of orderedOrders) {
+      const vInfo = versionTextMap.get(order)!;
+      const k = `${order}`;
+      const agg = segMap.get(k);
+
+      // 合并版本 choices 与事件聚合
+      const choiceList: ChoiceStatsChoice[] = vInfo.choices.map((vc) => {
+        const ck = vc.key;
+        const eventChoice = agg?.choices.get(ck);
+        const hits = eventChoice?.hits ?? 0;
+        const segMt = agg?.matchedTotal ?? 0;
+        return {
+          index: vc.index,
+          key: vc.key ?? null,
+          text: vc.text ?? null,
+          hits,
+          deterministicHits: eventChoice?.deterministicHits ?? 0,
+          llmHits: eventChoice?.llmHits ?? 0,
+          share: segMt > 0 ? Math.round((hits / segMt) * 10000) / 10000 : null,
+        };
+      });
+
+      // 追加孤儿选项（事件有但版本 payload 无的 key）
+      if (agg) {
+        const versionKeys = new Set(vInfo.choices.map((c) => c.key));
+        for (const [ck, ec] of agg.choices) {
+          if (versionKeys.has(ck)) continue;
+          const segMt = agg.matchedTotal;
+          choiceList.push({
+            index: ec.index,
+            key: ec.key,
+            text: null,
+            hits: ec.hits,
+            deterministicHits: ec.deterministicHits,
+            llmHits: ec.llmHits,
+            share:
+              segMt > 0 ? Math.round((ec.hits / segMt) * 10000) / 10000 : null,
+          });
+        }
+      }
+
+      const segMt = agg?.matchedTotal ?? 0;
+      const fbTotal = agg?.fallbackTotal ?? 0;
+      const denom = segMt + fbTotal;
+
+      segments.push({
+        segmentOrder: order,
+        promptText: vInfo.promptText,
+        matchedTotal: segMt,
+        fallbackTotal: fbTotal,
+        fallbackRate:
+          denom > 0 ? Math.round((fbTotal / denom) * 10000) / 10000 : null,
+        neverChosen: segMt === 0,
+        choices: choiceList,
+      });
+    }
+
+    // null segmentOrder 段追加到末尾
+    const nullAgg = segMap.get("null");
+    if (nullAgg && (nullAgg.matchedTotal > 0 || nullAgg.fallbackTotal > 0)) {
+      const nullMt = nullAgg.matchedTotal;
+      const nullFb = nullAgg.fallbackTotal;
+      const nullDenom = nullMt + nullFb;
+      const nullChoices: ChoiceStatsChoice[] = Array.from(
+        nullAgg.choices.values(),
+      ).map((c) => ({
+        index: c.index,
+        key: c.key,
+        text: null,
+        hits: c.hits,
+        deterministicHits: c.deterministicHits,
+        llmHits: c.llmHits,
+        share:
+          nullMt > 0 ? Math.round((c.hits / nullMt) * 10000) / 10000 : null,
+      }));
+
+      segments.push({
+        segmentOrder: null,
+        promptText: null,
+        matchedTotal: nullMt,
+        fallbackTotal: nullFb,
+        fallbackRate:
+          nullDenom > 0
+            ? Math.round((nullFb / nullDenom) * 10000) / 10000
+            : null,
+        neverChosen: nullMt === 0,
+        choices: nullChoices,
+      });
+    }
+
+    return {
+      episodeId: episode.id,
+      title: episode.title,
+      contentNote: "adventure-choice-stats",
+      totalInteractions,
+      matchedTotal,
+      segments,
+    };
+  }
+
+  /** 实时校验：编辑器点「校验」或「发布」时调用（打字不触发、无防抖），不写库。 */
   async checkContent(
     episodeId: string | null,
     content: EpisodeContentDraft,
     identity?: CheckContentIdentity,
+    forPublish?: boolean,
   ): Promise<LintReport> {
+    const publishStandard = forPublish ?? identity?.forPublish === true;
     let resolvedIdentity = identity;
     let ownBusinessKey: string | undefined;
     if (episodeId) {
       const episode = await this.loadEpisode(episodeId);
       ownBusinessKey = businessKey(episodeIdentity(episode));
       if (!resolvedIdentity) {
-        resolvedIdentity = episodeIdentity(episode);
+        resolvedIdentity = {
+          ...episodeIdentity(episode),
+          forPublish: publishStandard,
+        };
       }
     }
     if (!resolvedIdentity) {
+      if (publishStandard) {
+        const context = await this.lintContextFor(
+          "elly",
+          ADVENTURE_SEASON,
+          undefined,
+          true,
+        );
+        return lintEpisode(
+          { characterKey: "elly", season: ADVENTURE_SEASON, episodeNumber: 0 },
+          content,
+          context,
+          this.lintOverrides,
+        );
+      }
       return lintEpisode(
         { characterKey: "elly", season: ADVENTURE_SEASON, episodeNumber: 0 },
         content,
@@ -485,7 +851,7 @@ export class AdventureContentQueryService {
       resolvedIdentity.characterKey,
       resolvedIdentity.season,
       ownBusinessKey,
-      resolvedIdentity.forPublish === true,
+      publishStandard,
     );
     return lintEpisode(resolvedIdentity, content, context, this.lintOverrides);
   }

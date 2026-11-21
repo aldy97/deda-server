@@ -140,6 +140,18 @@ GET /analytics/content/parent-report?startDate=&endDate=
 GET /analytics/quality/conversation?startDate=&endDate=&granularity=day
 → { granularity, series: [{ date, totalTurns, failedTurns, failureRate, safetyBlockedTurns, safetyRate }] }
    // totalTurns=role=user 消息数；failedTurns=assistant status=failed；安全拦截=rawPayload 含 safetyCategory
+
+GET /analytics/content/adventure-choices?startDate=&endDate=
+→ { totalInteractions, outcomeCounts: { answered, off_topic, fallback, timeout },
+    fallbackRate, matchedTotal, sourceCounts: { deterministic, llm }, llmShare,
+    byEpisode: [{ episodeId, title, matchedTotal, fallbackRate,
+                  choices: [{ segmentOrder, index, key, text, hits }] }] }
+   // 二选一交互的命中统计；eventType=choice_matched/answered/fallback/timeout/off_topic 参与聚合
+   // totalInteractions = answered + fallback + timeout（仅 two_choice 交互），不含 off_topic
+   // llmShare = llm/matchedTotal；分母 0 → null
+   // fallbackRate = fallback/totalInteractions，分母 0 → null
+   // byEpisode 按 matchedTotal 降序、title 拼音升序；choices 在每集内
+   // text 从事件自己的 episodeVersionId 查版本 payload
 ```
 
 ## 反馈与日报（用户详情页）
@@ -591,6 +603,17 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 - 404 未知 prompt key / 回滚目标版本不存在
 - 409 乐观锁冲突 / 没有待发布的草稿 / `revision` 与当前草稿号不符
 
+## 语速配置（admin）
+
+全局语速两个倍数（非哄睡 `normalSpd` + 哄睡 `sleepSpd`），存 DB `voice_speed_config` 单行表（固定主键 `default`）。读路径（`getvalue` / 进入退出哄睡）每轮实时查库，改后无需重启。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/analytics/voice-speed` | 返回 `{ normalSpd, sleepSpd }`；DB 无行回落 0.7/0.5 |
+| PATCH | `/analytics/voice-speed` | body `{ normalSpd, sleepSpd }`（两者必填，`[0.5, 2.0]`）；返回更新后的 `{ normalSpd, sleepSpd }` |
+
+校验失败（非数字 / 越界 / 缺字段）→ 400。
+
 ## 冒险内容管理（Adventure Studio）
 
 > 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。
@@ -631,7 +654,9 @@ content = {
     text,
     interactionType?,           // open_question | two_choice | repeat_after_me | reward
     options?,                   // two_choice 用 choices[{key,text,reply}]；repeat_after_me 用 praise
-    fallbackText?, exitText?,   // 需要孩子开口的三种原语必须有兜底与退出话术
+    fallbackText?,              // 需要孩子开口的三种原语必须有兜底话术。
+                                // 退出话术**不是**内容字段：全局统一一句，见 capabilities.fixedExitText；
+                                // 传 exitText 会被忽略（bundle schema v2 起该键已从段落形状里删除）
     rewardStar?
   }]
 }
@@ -644,8 +669,11 @@ content = {
 ```
 GET /analytics/adventure-admin/capabilities
 → { season, characterKeys, interactionTypes, replyWaitingInteractionTypes, segmentKinds,
-    lintThresholds, simulationThresholds, profile, authoring }
+    lintThresholds, simulationThresholds, fixedExitText, profile, authoring, testStoryEnabled }
    // 编辑器启动时先拿这个：枚举、阈值、能不能写，全部由服务端说了算，前端不硬编码
+   // fixedExitText = 全局唯一的退出话术（孩子说「不想玩了」时念的那句）。
+   // 看板只读展示，不得在前端内联这句话——单一真相源在服务端 adventure.constants
+   // testStoryEnabled = 测试冒险故事下发是否可用（ADVENTURE_TEST_MODE_ENABLED=true，仅 staging）
 
 GET /analytics/adventure-admin/episodes?characterKey=&published=&includeRetired=&search=&page=&pageSize=
 → { items: [EpisodeSummary], total }
@@ -685,6 +713,22 @@ GET /analytics/adventure-admin/episodes/:episodeId/impact
     devicesPinnedToOlderVersions,  // 仍锁在旧快照上的在播设备：说明历史发布确实造成了并行版本
     totalDevicesEverStarted, publishedVersionCount }
 
+GET /analytics/adventure-admin/episodes/:episodeId/choice-stats?startDate=&endDate=
+→ { episodeId, title, contentNote, totalInteractions, matchedTotal,
+    segments: [{
+      segmentOrder, promptText, matchedTotal, fallbackTotal, fallbackRate, neverChosen,
+      choices: [{ index, key, text, hits, deterministicHits, llmHits, share }]
+    }] }
+   // 单集二选一统计：命中分布与 fallback 率，按当前发布版本 payload.segments 对齐
+   // segments 仅含 kind=interaction 且 interactionType=two_choice 的段，narration 段排除
+   // 当前版本 payload 查不到或无版本时返回 segments: []
+   // null segmentOrder 的事件追加为最后一段（segmentOrder: null, promptText: null）
+   // neverChosen: segment 的 matchedTotal=0 → true
+   // fallbackRate = fallbackTotal / (matchedTotal + fallbackTotal)，分母 0 → null
+   // share = hits / segment.matchedTotal，分母 0 → null
+   // totalInteractions = answered + fallback + timeout（仅 two_choice 交互），不含 off_topic/exit
+   // PII 红线：响应不含 asrText / messageId / deviceId
+
 GET /analytics/adventure-admin/audit?episodeId=&actorUsername=&action=&from=&to=&page=&pageSize=
 → { items: [{ id, action, entityType, episodeId, episodeVersionId, businessKey,
               actorUsername, actorDisplayName, profile, reason, detail,
@@ -718,6 +762,37 @@ body { identity, content }
 阈值全部可用环境变量覆盖（`ADVENTURE_LINT_*` / `ADVENTURE_SIM_*`，见 `.env.example`），
 `capabilities` 会把生效值回给前端。
 
+### docx 稿子转换（仅 staging）
+
+把带标注的 docx 故事稿转成「可预览的草稿」，**不落库**（落库仍走 `POST /episodes`）。
+转换端点不标 `@ContentReadOnly()`，所以它按写方法处理，只在 authoring（staging）开放——
+本特性**不面向 prod**（prod 是只读环境，内容只从 staging 搬运过去）。
+
+稿子标注约定（同时展示在 dashboard 上传卡片的提示里）：
+- 正文第一个非空行 = 这一集的标题（确定性取走，不交给 LLM）；
+- 未标注的普通段落 = 旁白（narration）；
+- 交互点用独立一行标记：【互动·二选一】/【互动·开放问答】/【互动·跟我念】/【互动·奖励】，
+  各自带「选项A/B｜接话」「兜底」「表扬」等字段（完整约定见服务端
+  `adventure-script-import.service.ts` 的 prompt 与 dashboard 上传提示）。
+
+```
+POST /analytics/adventure-admin/script/convert
+body { fileName?, contentBase64 }        // contentBase64 = docx 文件的 base64；原文上限 5MB
+→ { characterKey, characterDetected, season, episodeNumber, content, sourceText, lint }
+   // characterKey = LLM 通读全文识别的主角（elly|polly）；不在白名单 → 回落 elly 且
+   //   characterDetected=false，dashboard 据此提示作者「识别不到，请手动确认」。
+   // episodeNumber = 该 IP 下一集的自增集号（含已下架/已作废的集——业务键永久占用）。
+   // content = { title, recap, segments }，title 来自正文首行，segments 已归一化：
+   //   order 重排 0..n-1；two_choice 选项截断到 2 个；非法 kind/interactionType 降级而非丢段。
+   // lint = 按草稿标准预检一次（admin 一进抽屉就能看到「哪些还没写全」）。
+   // 错误码：SCRIPT_CONVERT_FAILED（LLM/JSON 失败）、DOCX_UNPARSEABLE（损坏/空/旧 .doc）、
+   //         DOCX_TOO_LARGE（超 5MB）。
+
+GET /analytics/adventure-admin/script/next-number?characterKey=elly
+→ { characterKey, season, episodeNumber }
+   // 手动新建（无稿子）时，抽屉预填的自增集号。同样含已下架/已作废的集。
+```
+
 ### 写接口
 
 所有写操作都要求 `reason`（**至少 8 个字**）：半年后别人（包括你自己）只能靠审计看懂当时为什么这么改。
@@ -745,7 +820,7 @@ body { content, reason, baseVersionId?, baseDraftUpdatedAt?, force? }
    //   否则会被自己刚存的那一次顶成 409（自己锁死自己）。
    // 入库门槛分两类，别混：
    //   身份级（SEASON_UNSUPPORTED / UNKNOWN_CHARACTER_KEY / INVALID_EPISODE_NUMBER /
-   //     BUSINESS_KEY_TAKEN）+ 规范化会丢段 → 400 CONTENT_REJECTED / SEGMENT_WOULD_BE_DROPPED。
+   //     BUSINESS_KEY_TAKEN / CHOICES_COUNT_INVALID）+ 规范化会丢段 → 400 CONTENT_REJECTED / SEGMENT_WOULD_BE_DROPPED。
    //     这些不是「没写完」，是「这一行写坏了」，落库会污染业务键唯一约束。
    //   内容级（缺文本、段号断档、选项不全、**禁用词**……）→ 放行。草稿对孩子不可见，
    //     发布必定按发布标准重新校验一次（PUBLISH_BLOCKED），那才是儿童内容的闸口。
@@ -799,6 +874,21 @@ body { reason, confirmText }
 → { episodeId, businessKey, discardedDraftCount, message }
    // 只能作废**从未发布过**的集；发布过的集请走 retire。
    // 实现为墓碑 + 草稿转 discarded，业务键**永久占用**，不能拿同一个集号重来。
+
+POST /analytics/adventure-admin/episodes/:episodeId/test-assign
+body { deviceId, reason }
+→ { ok, audited, assignment: { episodeId, title, episodeVersionId, versionStatus } }
+   // 仅 staging（ADVENTURE_TEST_MODE_ENABLED=true）。把当前集下发到设备，优先锁草稿快照，
+   // 否则锁当前发布版本。孩子说「测试冒险故事」即播放被下发的集，不限次数/顺序/阶段。
+
+POST /analytics/adventure-admin/episodes/:episodeId/test-clear
+body { deviceId, reason }
+→ { ok, audited }
+   // 清除设备当前下发；仅当它正是这一集（否则 409）。审计写失败只返回 audited=false。
+
+GET /analytics/adventure-admin/device-test/assignment/:deviceId
+→ { enabled, assignment: { device, episode, episodeVersion } | null }
+   // 读设备当前下发；prod（未启用）返回 { enabled: false, assignment: null }，不暴露明细。
 ```
 
 **本节没有任何 DELETE 路由**，服务层也没有 delete 方法（有结构性单测钉住这一点）。

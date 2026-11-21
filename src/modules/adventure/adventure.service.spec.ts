@@ -1,5 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
+import { ConfigService } from "@nestjs/config";
 import { AdventureService } from "./adventure.service";
+import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 
@@ -12,6 +14,7 @@ describe("AdventureService", () => {
   let service: AdventureService;
   let prisma: any;
   let llm: any;
+  let configService: { get: jest.Mock };
 
   const episode = {
     id: "ep1",
@@ -116,7 +119,11 @@ describe("AdventureService", () => {
           useValue: {
             $transaction: jest.fn((callback) => callback(prisma)),
             device: { findUnique: jest.fn() },
-            adventureEpisode: { findFirst: jest.fn(), findMany: jest.fn() },
+            adventureEpisode: {
+              findFirst: jest.fn(),
+              findMany: jest.fn(),
+              findUnique: jest.fn(),
+            },
             adventureSegment: { findMany: jest.fn() },
             adventureEpisodeVersion: {
               findUnique: jest.fn(),
@@ -150,10 +157,18 @@ describe("AdventureService", () => {
               { role: "system", content: JSON.stringify(params) },
               { role: "user", content: params.childReply },
             ]),
+            buildAdventureChoiceMatchPrompt: jest.fn((params) => [
+              { role: "system", content: JSON.stringify(params) },
+              { role: "user", content: params.childReply },
+            ]),
             get smallModelName() {
               return "small-llm";
             },
           },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn() },
         },
       ],
     }).compile();
@@ -161,10 +176,12 @@ describe("AdventureService", () => {
     service = module.get<AdventureService>(AdventureService);
     prisma = module.get(PrismaService);
     llm = module.get(LlmService);
+    configService = module.get(ConfigService);
 
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
     prisma.adventureEpisode.findMany.mockResolvedValue([episode]);
+    prisma.adventureEpisode.findUnique.mockResolvedValue(episode);
     prisma.adventureSegment.findMany.mockResolvedValue(segments);
     prisma.adventureDailyRecord.create.mockResolvedValue(baseDaily);
     prisma.adventureDailyRecord.update.mockImplementation((args) =>
@@ -326,6 +343,13 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我要去森林");
 
     expect(reply.texts[0]).toBe("好呀，我们去森林！");
+    expect(reply.matchedChoice).toEqual({
+      index: 0,
+      source: "deterministic",
+      key: "forest",
+      segmentOrder: 2,
+      episodeVersionId: null,
+    });
     expect(reply.texts).toContain(segments[3].text); // 回应后汇流续播
     expect(reply.action).toBe("await_reply"); // s3 播完到 s4 开放提问
     expect(llm.complete).not.toHaveBeenCalled(); // 二选一命中不调 LLM
@@ -334,6 +358,57 @@ describe("AdventureService", () => {
         data: expect.objectContaining({ stars: 1 }),
       }),
     );
+  });
+
+  // ── 归因字段回归测试 ──
+
+  it("should set key to null when the matched choice has no key field in runtime data", async () => {
+    // Simulate runtime data where a choice object is missing the key field
+    const segmentsNoKey = structuredClone(segments);
+    (
+      segmentsNoKey[2].options as unknown as {
+        choices: Array<{ text: string; reply: string }>;
+      }
+    ).choices[0] = {
+      text: "森林",
+      reply: "好呀，我们去森林！",
+    };
+    jest
+      .spyOn(
+        service as unknown as {
+          loadSegmentsForPlay: (progress: unknown) => Promise<unknown[]>;
+        },
+        "loadSegmentsForPlay",
+      )
+      .mockResolvedValue(segmentsNoKey);
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+    expect(reply.matchedChoice).toBeDefined();
+    expect(reply.matchedChoice!.key).toBeNull();
+    expect(reply.matchedChoice!.index).toBe(0);
+    expect(reply.matchedChoice!.segmentOrder).toBe(2);
+  });
+
+  it("should set episodeVersionId to null when progress has no episodeVersionId", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+    expect(reply.matchedChoice).toBeDefined();
+    expect(reply.matchedChoice!.episodeVersionId).toBeNull();
+    expect(reply.matchedChoice!.key).toBe("forest");
   });
 
   it("should gently redirect the first off-topic answer via the small model", async () => {
@@ -371,6 +446,325 @@ describe("AdventureService", () => {
     expect(llm.complete).not.toHaveBeenCalled();
     expect(reply.texts[0]).toBe(segments[2].fallbackText);
     expect(reply.texts).toContain(segments[3].text); // 兜底后推进主线
+  });
+
+  // ── LLM 混合判别（ADVENTURE_CHOICE_LLM_ENABLED=true）──
+
+  describe("LLM choice matching", () => {
+    beforeEach(() => {
+      // Enable LLM choice matching for these tests
+      configService.get.mockImplementation((key: string) => {
+        if (key === "ADVENTURE_CHOICE_LLM_ENABLED") return "true";
+        return undefined;
+      });
+    });
+
+    it("matches option A via LLM verdict and plays the pre-generated reply", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "0\n好呀，我们去森林吧！",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我要去大树那边",
+      );
+
+      expect(reply.texts[0]).toBe("好呀，我们去森林！"); // pre-generated reply
+      expect(reply.matchedChoice).toEqual({
+        index: 0,
+        source: "llm",
+        key: "forest",
+        segmentOrder: 2,
+        episodeVersionId: null,
+      });
+      expect(reply.texts).toContain(segments[3].text); // 汇流续播
+      expect(reply.result).toBe("answered");
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 3500,
+          maxTokens: 160,
+          scene: "adventure_interaction",
+          model: "small-llm",
+        }),
+      );
+    });
+
+    it("matches option B via LLM verdict when the child's phrase is vague", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "1\n走，我们去河边！",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我喜欢有水的地方",
+      );
+
+      expect(reply.texts[0]).toBe("走，我们去河边！");
+      expect(reply.matchedChoice).toEqual({
+        index: 1,
+        source: "llm",
+        key: "river",
+        segmentOrder: 2,
+        episodeVersionId: null,
+      });
+      expect(reply.result).toBe("answered");
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 3500,
+          maxTokens: 160,
+          scene: "adventure_interaction",
+          model: "small-llm",
+        }),
+      );
+    });
+
+    it("awards a star when the LLM-matched option has rewardStar", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0" });
+
+      await service.handleChildReply("dev-uuid-1", "去大树底下");
+
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ stars: 1 }),
+        }),
+      );
+    });
+
+    it("LLM补判命中 after negation guard rejected the deterministic match", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      // "不要走河边" → 否定守卫触发 → deterministic 返回 null
+      // LLM should still judge and match option B (陆地)
+      llm.complete.mockResolvedValueOnce({ text: "1\n好的我们走陆地" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "不要走河边，走陆地",
+      );
+
+      expect(reply.texts[0]).toBe("走，我们去河边！"); // 选项B的reply
+      expect(reply.result).toBe("answered");
+    });
+
+    it("falls through to off-topic redirect when LLM returns NONE (both wanted)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "NONE\n孩子两个都想要，分不清",
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "森林和河边都想去",
+      );
+
+      // NONE → 等同于没命中 → 走首次跑题路径
+      expect(reply.result).toBe("off_topic");
+      expect(reply.action).toBe("await_reply");
+      expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ offTopicCount: 1 }),
+        }),
+      );
+    });
+
+    it("falls through to off-topic when LLM returns garbage first line", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({
+        text: "哎呀这个问题有点难",
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "随便吧");
+
+      // garbage → parseChoiceVerdict returns null → 走跑题
+      expect(reply.result).toBe("off_topic");
+    });
+
+    it("degrades to off-topic redirect when the LLM call throws", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockRejectedValueOnce(new Error("timeout"));
+
+      const reply = await service.handleChildReply("dev-uuid-1", "想不出来");
+
+      // LLM 失败 → 降级到首次跑题路径
+      expect(reply.result).toBe("off_topic");
+      expect(reply.action).toBe("await_reply");
+    });
+
+    it("treats the second off-topic as answered when LLM gets a hit", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+        offTopicCount: 1,
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0\n去森林啦" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "去树多的那边",
+      );
+
+      // 第二次跑题但 LLM 成功命中 → 当作正常作答，推进主线
+      expect(reply.result).toBe("answered");
+      expect(reply.texts[0]).toBe("好呀，我们去森林！");
+      expect(reply.texts).toContain(segments[3].text);
+    });
+  });
+
+  describe("LLM choice matching disabled", () => {
+    it("keeps old behavior when the switch is off", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      // 默认：ConfigService.get returns undefined for ADVENTURE_CHOICE_LLM_ENABLED
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "去树多的那边",
+      );
+
+      // 开关关 → deterministic 返回 null → 走首次跑题路径（旧行为）
+      expect(reply.result).toBe("off_topic");
+      // LLM 只被 generateBridge（redirect）调用，不被 choice match 调用
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it("still applies negation guard with the switch off (no LLM补判)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "不要走河边，走陆地",
+      );
+
+      // 否定守卫触发 → 走跑题（旧行为）
+      expect(reply.result).toBe("off_topic");
+      // Only generateBridge was called, not judgeAndRedirect
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("should not match a negated two-choice option (negation guard)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply(
+      "dev-uuid-1",
+      "不要走河边，走陆地",
+    );
+
+    // 否定守卫触发 → 不命中 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
+  });
+
+  it("should not match when the child mentions both two-choice options (ambiguous)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply(
+      "dev-uuid-1",
+      "我想去森林也想去河边",
+    );
+
+    // 双命中 → 歧义 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
+  });
+
+  it("should not match on key alone (key excluded from recognition)", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    // "forest" is the key, not the text "森林" — should NOT match
+    const reply = await service.handleChildReply("dev-uuid-1", "forest");
+
+    // 零命中 → 走首次跑题路径
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(reply.result).toBe("off_topic");
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ offTopicCount: 1 }),
+      }),
+    );
   });
 
   it("should call the small model for an open question answer", async () => {
@@ -415,13 +809,103 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我不要听了");
 
     expect(reply.action).toBe("exit");
-    expect(reply.texts).toEqual([segments[2].exitText]);
+    expect(reply.result).toBe("exit");
+    // 段落 fixture 仍带历史 exitText（旧版本快照就是这个形状），引擎必须无视它
+    expect(reply.texts).toEqual([ADVENTURE_EXIT_TEXT]);
+    expect(reply.texts).not.toEqual([segments[2].exitText]);
     // 进度保留（不 completed、不推进），仅明确请求时续玩
     expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "exited" }),
       }),
     );
+  });
+
+  it("should exit with the global line when the child barges in during narration", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "in_progress",
+      nextSegmentOrder: 1,
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "我不想玩了");
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
+    // 旁白阶段退出同样保留当日续玩权：exited 而不是 completed/abandoned
+    expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "exited", waitingSince: null }),
+      }),
+    );
+  });
+
+  it("should repeat the global exit line without resuming when already exited", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "exited",
+      nextSegmentOrder: 3,
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "退出");
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
+    // 幂等：不写库、不 resume（否则孩子喊「不想玩」反而把故事又开起来）
+    expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+  });
+
+  it("should not take over terminal progress on a refusal", async () => {
+    prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "completed",
+      nextSegmentOrder: 6,
+      completedAt: new Date(),
+    });
+
+    expect(await service.handleChildReply("dev-uuid-1", "不想玩了")).toBeNull();
+    expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+  });
+
+  it("should not take over when there is no adventure today", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue(null);
+
+    expect(await service.handleChildReply("dev-uuid-1", "不想玩了")).toBeNull();
+  });
+
+  // 词表与会话层 isExplicitExit 共用一份常量：这里锁「会话层的词引擎也认」，
+  // conversation-session.service.spec.ts 锁反方向，两边任一漂移都会红。
+  it.each([
+    "退出",
+    "停止",
+    "结束吧",
+    "别讲了",
+    "STOP",
+    "quit",
+    "Exit",
+    "不要玩了",
+  ])("should exit on the shared keyword %s at an interaction", async (word) => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", word);
+
+    expect(reply).toMatchObject({
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    });
   });
 
   it("should resume the unanswered interaction after an explicit story request", async () => {
@@ -789,6 +1273,117 @@ describe("AdventureService", () => {
     );
   });
 
+  // ── result 事件的交互点归因 ──
+  // answered / off_topic / fallback / timeout 这四个 result 由 two_choice、
+  // open_question、repeat_after_me、reward 四种交互类型共用。事件上不带类型与段号，
+  // 报表就算不出「二选一的兜底率」——分母会把开放提问的处置一起算进去。
+  describe("interaction attribution on result events", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    const resultCreate = (eventType: string) =>
+      prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === eventType,
+      )![0].create;
+
+    it("stamps segmentOrder and interactionType onto the result event", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["没关系，那我们先去森林吧！"],
+        action: "narrate",
+        result: "fallback",
+        interaction: { type: "two_choice", order: 2 },
+      });
+
+      expect(resultCreate("fallback")).toEqual(
+        expect.objectContaining({
+          eventType: "fallback",
+          segmentOrder: 2,
+          payload: { interactionType: "two_choice" },
+        }),
+      );
+    });
+
+    it("attributes an open_question result to its own type and order", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["哇，你说得真有意思！"],
+        action: "await_reply",
+        result: "answered",
+        interaction: { type: "open_question", order: 4 },
+      });
+
+      expect(resultCreate("answered")).toEqual(
+        expect.objectContaining({
+          segmentOrder: 4,
+          payload: { interactionType: "open_question" },
+        }),
+      );
+    });
+
+    it("leaves segmentOrder null and omits payload when the reply carries no interaction", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["兜底话术"],
+        action: "completed",
+        result: "timeout",
+      });
+
+      const create = resultCreate("timeout");
+      expect(create.segmentOrder).toBeNull();
+      expect(create).not.toHaveProperty("payload");
+    });
+  });
+
+  // ── 引擎给回复盖交互点标记 ──
+  describe("interaction meta on replies", () => {
+    it("tags a deterministic two_choice hit with the interaction type and order", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply.result).toBe("answered");
+      expect(reply.interaction).toEqual({ type: "two_choice", order: 2 });
+    });
+
+    it("tags an open_question answer with the interaction type and order", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 5,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我想吃冰淇淋",
+      );
+
+      expect(reply.interaction).toEqual({ type: "open_question", order: 4 });
+    });
+
+    it("does not tag the unified exit with interaction meta", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "不想玩了");
+
+      expect(reply.result).toBe("exit");
+      // #83 起退出统一走 exitAdventure()，它刻意不看当前停在旁白还是互动段，
+      // 因此不盖 interaction 元数据；报表侧 totalInteractions 也明确排除 exit，
+      // 两边口径自洽。若将来给 exit 加上 interaction，退出轮次会混进二选一分母，
+      // 这条断言就是拦这个的。
+      expect(reply.interaction).toBeUndefined();
+    });
+  });
+
   it("should append presented and interaction events without duplicating narrated text", async () => {
     prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
 
@@ -816,6 +1411,175 @@ describe("AdventureService", () => {
       prisma.adventureEvent.upsert.mock.calls,
     );
     expect(eventPayload).not.toContain("故事原文");
+  });
+
+  describe("choice_matched telemetry", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    it("must never persist PII (child's spoken text) in the event payload", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["好呀，我们去森林！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: {
+            index: 0,
+            source: "deterministic",
+            key: "forest",
+            segmentOrder: 2,
+            episodeVersionId: null,
+          },
+        },
+        "msg-user-2",
+      );
+
+      const choiceCall = prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === "choice_matched",
+      );
+      expect(choiceCall).toBeDefined();
+      const payload = choiceCall![0].create.payload;
+      expect(Object.keys(payload).sort()).toEqual(["index", "key", "source"]);
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain("好呀");
+      expect(serialized).not.toContain("森林");
+      expect(serialized).not.toContain("我们去森林");
+    });
+
+    it("should upsert a choice_matched event when matchedChoice is deterministic", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["好呀，我们去森林！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: {
+            index: 1,
+            source: "deterministic",
+            key: "river",
+            segmentOrder: 2,
+            episodeVersionId: null,
+          },
+        },
+        "msg-user-2",
+      );
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledTimes(3);
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { eventKey: "turn:turn-1:choice_matched" },
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            turnId: "turn-1",
+            messageId: "msg-user-2",
+            segmentOrder: 2,
+            episodeVersionId: null,
+            payload: { index: 1, source: "deterministic", key: "river" },
+          }),
+        }),
+      );
+    });
+
+    it("should set source to llm when matchedChoice comes from LLM verdict", async () => {
+      await service.recordPresented(
+        "dev-uuid-1",
+        "turn-1",
+        {
+          texts: ["走，我们去河边！"],
+          action: "await_reply",
+          result: "answered",
+          matchedChoice: {
+            index: 0,
+            source: "llm",
+            key: "forest",
+            segmentOrder: 2,
+            episodeVersionId: "ver-pinned-1",
+          },
+        },
+        "msg-user-3",
+      );
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { eventKey: "turn:turn-1:choice_matched" },
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            segmentOrder: 2,
+            episodeVersionId: "ver-pinned-1",
+            payload: { index: 0, source: "llm", key: "forest" },
+          }),
+        }),
+      );
+    });
+
+    it("should NOT upsert a choice_matched event when reply has no matchedChoice", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["兜底话术"],
+        action: "completed",
+        result: "timeout",
+      });
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledTimes(2);
+      const eventTypes = prisma.adventureEvent.upsert.mock.calls.map(
+        (call) => call[0].create.eventType,
+      );
+      expect(eventTypes).not.toContain("choice_matched");
+    });
+
+    it("should set messageId to null when userMessageId is not provided", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["回答"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: null,
+        },
+      });
+
+      expect(prisma.adventureEvent.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({
+            eventType: "choice_matched",
+            messageId: null,
+          }),
+        }),
+      );
+    });
+
+    it("should propagate the error when the choice_matched upsert throws", async () => {
+      prisma.adventureEvent.upsert
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("db down"));
+
+      await expect(
+        service.recordPresented(
+          "dev-uuid-1",
+          "turn-1",
+          {
+            texts: ["回答"],
+            action: "await_reply",
+            result: "answered",
+            matchedChoice: {
+              index: 0,
+              source: "deterministic",
+              key: "forest",
+              segmentOrder: 2,
+              episodeVersionId: null,
+            },
+          },
+          "msg-user-2",
+        ),
+      ).rejects.toThrow("db down");
+    });
   });
 
   it("should audit a blocked completed-day entry and its actual route", async () => {
@@ -874,7 +1638,10 @@ describe("AdventureService", () => {
 
     expect(timeoutListener).toHaveBeenCalledWith(
       "dev-uuid-1",
-      expect.objectContaining({ result: "timeout" }),
+      expect.objectContaining({
+        result: "timeout",
+        interaction: { type: "two_choice", order: 2 },
+      }),
     );
     service.onModuleDestroy();
     jest.useRealTimers();
@@ -957,6 +1724,28 @@ describe("AdventureService", () => {
       expect(reply.texts).toEqual([segments[3].text, segments[4].text]);
       expect(reply.action).toBe("await_reply");
       expect(reply.texts).not.toContain(v2Segments[0].text);
+    });
+
+    it("attributes the matched choice to the pinned version id", async () => {
+      prisma.adventureEpisodeVersion.findUnique.mockResolvedValue(v1Row);
+      prisma.adventureSegment.findMany.mockResolvedValue(v2Segments);
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        episodeVersionId: "v1",
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      const reply = await service.handleChildReply("dev-uuid-1", "森林");
+
+      expect(reply.matchedChoice).toEqual({
+        index: 0,
+        source: "deterministic",
+        key: "forest",
+        segmentOrder: 2,
+        episodeVersionId: "v1",
+      });
     });
 
     it("does not prematurely complete a pinned episode whose live table shrank", async () => {
@@ -1629,6 +2418,78 @@ describe("AdventureService", () => {
 
       expect(prisma.adventureDailyRecord.update).not.toHaveBeenCalled();
       expect(prisma.adventureDailyRecord.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("测试冒险故事（仅 staging）", () => {
+    function enableTestStory() {
+      configService.get.mockImplementation((key: string) =>
+        key === "ADVENTURE_TEST_MODE_ENABLED" ? "true" : undefined,
+      );
+    }
+
+    it("isTestStoryEnabled 只在环境变量为字面 true 时为真", () => {
+      configService.get.mockReturnValue("true");
+      expect(service.isTestStoryEnabled()).toBe(true);
+      configService.get.mockReturnValue("false");
+      expect(service.isTestStoryEnabled()).toBe(false);
+    });
+
+    it("环境未开启时触发词返回 null（落回正常链路）", async () => {
+      configService.get.mockReturnValue(undefined);
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("不是触发词返回 null", async () => {
+      enableTestStory();
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "我想听故事"),
+      ).resolves.toBeNull();
+    });
+
+    it("触发词命中但设备未下发 → 确定性 not-assigned 话术", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: null,
+        testAdventureEpisodeVersionId: null,
+      });
+
+      const reply = await service.tryTestStoryTrigger(
+        "dev-uuid-1",
+        "测试冒险故事",
+      );
+
+      expect(reply).toEqual({
+        texts: [expect.stringContaining("还没有下发")],
+        action: "narrate",
+      });
+    });
+
+    it("触发词命中（含 ASR 末尾标点）且有下发 → 从第 0 段播放并写 assigned/started 事件", async () => {
+      enableTestStory();
+      prisma.device.findUnique.mockResolvedValue({
+        characterKey: "elly",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: "v1",
+      });
+
+      const reply = await service.tryTestStoryTrigger(
+        "dev-uuid-1",
+        "测试冒险故事。",
+      );
+
+      expect(reply?.action).toBe("await_reply");
+      expect(reply?.texts).toContain("今天 Elly 要出门啦。");
+      const createdKeys = prisma.adventureEvent.create.mock.calls.map(
+        (call) => call[0].data.eventKey,
+      );
+      expect(createdKeys.some((key) => key.includes(":assigned:"))).toBe(true);
+      expect(createdKeys.some((key) => key.includes(":started:"))).toBe(true);
     });
   });
 });

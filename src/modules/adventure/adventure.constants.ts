@@ -20,6 +20,66 @@ export const ADVENTURE_DEGRADED_REPLIES = {
   lastResort: "我在这儿呢，我们等一会儿再玩好不好？",
 } as const;
 
+/**
+ * 全局唯一的退出话术。
+ *
+ * 刻意不做成每段可写的字段（原 `AdventureSegment.exitText` 已下线）：孩子在任何
+ * IP、任何一集、任何一个互动点、甚至打断旁白时退出，都该听到同一句温柔收尾——
+ * 逐段自定义只会让同一句话术在几十个段落里漂移出几十种说法，人设反而不一致。
+ *
+ * 与 ADVENTURE_DEGRADED_REPLIES 那条「不承诺继续冒险」的铁律**不冲突**：降级是
+ * 「我们兜不住了」，退出是「孩子说不玩了，我们尊重他」。退出走 `exited` 状态，
+ * 当日进度原样保留、孩子明确要求时可以从未答完的互动点续玩，所以这句承诺是真的。
+ *
+ * 这句话通过 admin capabilities 的 `fixedExitText` 下发给看板只读展示，
+ * 前端不得内联硬编码（单一真相源在这里）。
+ */
+export const ADVENTURE_EXIT_TEXT = "好的，那么我们之后再一起继续冒险吧";
+
+/**
+ * 明确拒绝/退出的关键词。命中即温柔退出，绝不调模型、绝不追问。
+ *
+ * 这份词表是**引擎与会话层的唯一真相**：`AdventureService` 用它接管冒险轮次，
+ * `ConversationSessionService.isExplicitExit` 用它中断 english_story / idiom_story /
+ * sleep_story 的粘滞会话。此前两边各有一份（引擎 5 个词、会话层一条正则），
+ * 于是孩子说「退出」时冒险不接管、说「不想玩」时粘滞会话不中断——同一句话在
+ * 两条链路上结论不同。合成一份之后，任何一侧加词都自动对另一侧生效。
+ *
+ * 英文词按小写比较（见 isAdventureExitRequest）。
+ */
+export const ADVENTURE_EXIT_KEYWORDS = [
+  "不要听",
+  "不想听",
+  "不想玩",
+  "不玩了",
+  "不要玩了",
+  "退出",
+  "停止",
+  "结束",
+  "别讲了",
+  "stop",
+  "quit",
+  "exit",
+] as const;
+
+/**
+ * 孩子这句话是不是「不想玩了」。
+ *
+ * 纯子串匹配、不调模型：退出是唯一一条**宁可多判也不能漏判**的路径——漏判的代价
+ * 是孩子说了不玩还被继续追问，多判的代价只是提前温柔收尾且当日可续玩。
+ */
+export function isAdventureExitRequest(
+  asrText: string | null | undefined,
+): boolean {
+  const normalized = (asrText ?? "").toLowerCase();
+  if (!normalized.trim()) {
+    return false;
+  }
+  return ADVENTURE_EXIT_KEYWORDS.some((keyword) =>
+    normalized.includes(keyword),
+  );
+}
+
 /** 巡检与熔断的默认阈值。全部可被环境变量覆盖（见 ADVENTURE_RECOVERY_ENV）。 */
 export const ADVENTURE_RECOVERY_DEFAULTS = {
   /** 总开关：关掉后巡检不启动、不注册失败监听 */
@@ -116,3 +176,41 @@ export interface EngineFailureRecord {
 
 /** 引擎失败上报的内存环形缓冲长度。 */
 export const ADVENTURE_ENGINE_FAILURE_LIMIT = 50;
+
+/**
+ * 二选一 LLM 兜底判定开关默认值。
+ *
+ * 默认关：播放内容来自物化副本或孩子被锁定的版本快照，所以改内容只对新发布版本生效，
+ * 但改匹配算法对正在玩的孩子立刻生效、没有版本快照保护 —— 这个开关是唯一能不发版就
+ * 止血的机制。灰度验证通过后再由运维打开。
+ */
+export const ADVENTURE_CHOICE_LLM_DEFAULTS = {
+  enabled: false,
+} as const;
+
+/** 二选一 LLM 兜底判定开关 → 环境变量名。值一律按字符串读，非字面 true 视为关。 */
+export const ADVENTURE_CHOICE_LLM_ENV = {
+  enabled: "ADVENTURE_CHOICE_LLM_ENABLED",
+} as const;
+
+/**
+ * 测试冒险故事（仅 staging）环境开关。
+ *
+ * 新方案不再用 Redis 武装会话：device 上持久化一条下发关系
+ * （testAdventureEpisodeId + 版本快照），孩子说固定触发词「测试冒险故事」
+ * 即从第 0 段播放被下发的集，不限次数、不限顺序、可播草稿快照。
+ *
+ * 总开关沿用 fail-safe 哲学：只有部署显式写 ADVENTURE_TEST_MODE_ENABLED=true
+ * 才启用（staging compose 硬写，base/prod 刻意不转发，由 compose-env-gate.spec.ts
+ * 钉死）。未开启时触发词不生效、行为与普通设备完全一致。
+ */
+export const ADVENTURE_TEST_ENV = {
+  enabled: "ADVENTURE_TEST_MODE_ENABLED",
+} as const;
+
+/** 测试冒险故事的语音触发词：ASR 文本包含它即进入测试播放（容忍末尾标点）。 */
+export const ADVENTURE_TEST_STORY_TRIGGER = "测试冒险故事";
+
+/** 触发词命中但设备未下发任何集时的确定性话术：不走 LLM、不写库。 */
+export const ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT =
+  "这台设备还没有下发测试冒险故事，请先在看板里给这台设备指定一集。";

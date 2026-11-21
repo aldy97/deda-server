@@ -59,6 +59,8 @@ model Device {
   dns             String?  // DNS
   timezone        String?  // 时区
   topicAddress    String?  // 主题地址
+  testAdventureEpisodeId        String?  // 测试冒险故事：下发的集（仅 staging，孩子说「测试冒险故事」即播）
+  testAdventureEpisodeVersionId String?  // 测试冒险故事：锁定的版本快照（草稿或当前发布版）
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -70,6 +72,8 @@ model Device {
   adventureProgresses AdventureProgress[]
   adventureDailyRecords AdventureDailyRecord[]
   adventureEvents AdventureEvent[]
+  testAdventureEpisode        AdventureEpisode?        @relation("DeviceTestAdventureEpisode", fields: [testAdventureEpisodeId], references: [id], onDelete: SetNull)
+  testAdventureEpisodeVersion AdventureEpisodeVersion? @relation("DeviceTestAdventureEpisodeVersion", fields: [testAdventureEpisodeVersionId], references: [id], onDelete: SetNull)
   childMemories   ChildMemory[]
   parentReports   ParentReport[]
   habitPlans      HabitPlan[]
@@ -119,6 +123,7 @@ model ParentReport {
   feedbacks ParentReportFeedback[]
 
   @@unique([deviceId, reportDate])
+  @@index([generationStatus, nextRetryAt])
   @@map("parent_reports")
 }
 
@@ -245,6 +250,8 @@ model Message {
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  adventureEvents AdventureEvent[]
+
   @@unique([conversationId, role])
   @@index([deviceId, spokeAt])
   @@index([turnId])
@@ -307,6 +314,7 @@ model AdventureEpisode {
   dailyRecords AdventureDailyRecord[]
   events AdventureEvent[]
   versions AdventureEpisodeVersion[]
+  testAssignedDevices Device[] @relation("DeviceTestAdventureEpisode")
 
   @@unique([characterKey, season, episodeNumber])
   @@index([characterKey, season, retiredAt])
@@ -331,6 +339,8 @@ model AdventureEpisodeVersion {
   updatedAt   DateTime @updatedAt
 
   episode AdventureEpisode @relation(fields: [episodeId], references: [id], onDelete: Restrict)
+  events AdventureEvent[]
+  testAssignedDevices Device[] @relation("DeviceTestAdventureEpisodeVersion")
 
   @@unique([episodeId, version])
   @@index([episodeId, status])
@@ -371,7 +381,9 @@ model AdventureSegment {
   interactionType String?  // open_question / two_choice / repeat_after_me / reward
   options         Json?    // 二选一：{ choices: [{key, text, reply}] }，回应预生成
   fallbackText    String?  // 兜底话术（跑题/沉默/不配合）
-  exitText        String?  // 明确拒绝时的温柔收尾
+  // 刻意没有 exitText 列：孩子说「不想玩了」时念的是全局统一话术
+  // （adventure.constants 的 ADVENTURE_EXIT_TEXT），不分 IP / 集 / 段 / 互动类型，
+  // 也不分是打断旁白还是在互动点退出。历史文案仍可在 AdventureEpisodeVersion.payload 里查到。
   rewardStar      Boolean  @default(false) // 通过该交互点奖励一颗星光
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -437,6 +449,8 @@ model AdventureEvent {
   episodeId     String
   dailyRecordId String
   turnId        String?
+  messageId     String?  // 关联 Message 获取孩子原话（choice_matched 等事件）
+  episodeVersionId String?  // 命中时锁定的版本快照；为空表示走 segments 物化表
   eventType     String
   segmentOrder  Int?
   payload       Json?
@@ -445,9 +459,13 @@ model AdventureEvent {
   device      Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   episode     AdventureEpisode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   dailyRecord AdventureDailyRecord @relation(fields: [dailyRecordId], references: [id], onDelete: Cascade)
+  message     Message?             @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  episodeVersion AdventureEpisodeVersion? @relation(fields: [episodeVersionId], references: [id], onDelete: SetNull)
 
   @@index([deviceId, createdAt])
   @@index([dailyRecordId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([episodeId, eventType, createdAt])
   @@map("adventure_events")
 }
 
@@ -500,6 +518,18 @@ model SleepConfig {
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@map("sleep_configs")
+}
+
+// 全局语速配置（单行表）：非哄睡 + 哄睡两个语速倍数。
+// spd 合法范围 [0.5, 2.0]（设备端协议 v1.4 §4.2）。
+// 管理端 /analytics/voice-speed 读写；getvalue 每轮实时查，改后无需重启。
+model VoiceSpeedConfig {
+  id        String   @id @default("default") // 单行，恒为 "default"
+  normalSpd Float    @default(0.7) // 非哄睡语速倍数
+  sleepSpd  Float    @default(0.5) // 哄睡语速倍数
+  updatedAt DateTime @updatedAt
+
+  @@map("voice_speed_config")
 }
 
 // LLM 调用日志（主模型 + 小模型全量），模型监控页数据源

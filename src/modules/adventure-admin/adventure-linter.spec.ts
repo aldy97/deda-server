@@ -41,7 +41,6 @@ describe("adventure-linter", () => {
       ],
     },
     fallbackText: "没关系，那我替你选森林吧！",
-    exitText: "好呀，那我们明天接着玩。",
     rewardStar: true,
     ...extra,
   });
@@ -235,17 +234,25 @@ describe("adventure-linter", () => {
       );
     });
 
-    it("requires fallback and exit text on every reply-waiting interaction", () => {
+    it("requires fallback text on every reply-waiting interaction", () => {
       const report = lintEpisode(identity, {
         ...valid(),
         segments: [
           narration(0, "a"),
-          twoChoice(1, { fallbackText: null, exitText: "" }),
+          twoChoice(1, { fallbackText: null }),
           narration(2, "b"),
         ],
       });
       expect(codes(report.errors)).toContain("FALLBACK_TEXT_REQUIRED");
-      expect(codes(report.errors)).toContain("EXIT_TEXT_REQUIRED");
+    });
+
+    // 退出话术已收归全局常量（ADVENTURE_EXIT_TEXT），不再是逐段字段：看板上
+    // 没有输入框了，服务端也就不许再因为它缺失而拦住发布——否则没有一集发得出去。
+    it("no longer requires a per-segment exit text", () => {
+      const report = lintEpisode(identity, valid());
+
+      expect(codes(report.errors)).not.toContain("EXIT_TEXT_REQUIRED");
+      expect(report.errors).toEqual([]);
     });
 
     it("does not demand fallback text from a reward segment that never waits", () => {
@@ -264,7 +271,6 @@ describe("adventure-linter", () => {
         ],
       });
       expect(codes(report.errors)).not.toContain("FALLBACK_TEXT_REQUIRED");
-      expect(codes(report.errors)).not.toContain("EXIT_TEXT_REQUIRED");
     });
 
     it("warns about a reward segment that awards no star", () => {
@@ -296,23 +302,73 @@ describe("adventure-linter", () => {
       ],
     });
 
-    it("requires at least two choices", () => {
-      expect(
-        codes(lintEpisode(identity, withChoices({ choices: [] })).errors),
-      ).toContain("CHOICES_REQUIRED");
-      expect(
-        codes(
-          lintEpisode(
-            identity,
-            withChoices({
-              choices: [{ key: "forest", text: "森林", reply: "好" }],
-            }),
-          ).errors,
-        ),
-      ).toContain("CHOICES_REQUIRED");
+    it("rejects non-array choices as structurally invalid", () => {
       expect(codes(lintEpisode(identity, withChoices(null)).errors)).toContain(
         "CHOICES_REQUIRED",
       );
+    });
+
+    it("rejects 0 or 1 choices with CHOICES_REQUIRED and not CHOICES_COUNT_INVALID", () => {
+      // 0 选项 → 写到一半，不是写坏了
+      const r0 = lintEpisode(identity, withChoices({ choices: [] }));
+      expect(codes(r0.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r0.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r0.ok).toBe(false);
+
+      // 1 选项 → 也是写到一半
+      const r1 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [{ key: "forest", text: "森林", reply: "好" }],
+        }),
+      );
+      expect(codes(r1.errors)).toContain("CHOICES_REQUIRED");
+      expect(codes(r1.errors)).not.toContain("CHOICES_COUNT_INVALID");
+      expect(r1.ok).toBe(false);
+    });
+
+    it("rejects 3 or 4 choices with CHOICES_COUNT_INVALID", () => {
+      // 3 选项 → 写坏了：多出的选项是静默失效的死分支
+      const r3 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "river", text: "河边", reply: "走" },
+            { key: "mountain", text: "山上", reply: "爬" },
+          ],
+        }),
+      );
+      expect(codes(r3.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r3.ok).toBe(false);
+
+      // 4 选项
+      const r4 = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "a", text: "一", reply: "1" },
+            { key: "b", text: "二", reply: "2" },
+            { key: "c", text: "三", reply: "3" },
+            { key: "d", text: "四", reply: "4" },
+          ],
+        }),
+      );
+      expect(codes(r4.errors)).toContain("CHOICES_COUNT_INVALID");
+      expect(r4.ok).toBe(false);
+    });
+
+    it("accepts exactly 2 valid choices", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "river", text: "河边", reply: "走" },
+          ],
+        }),
+      );
+      expect(report.ok).toBe(true);
     });
 
     it("requires key, text and reply on every choice", () => {
@@ -329,7 +385,7 @@ describe("adventure-linter", () => {
       expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
     });
 
-    it("rejects a one-character key because ASR matching uses substring includes", () => {
+    it("allows a one-character key now that key-length validation is removed", () => {
       const report = lintEpisode(
         identity,
         withChoices({
@@ -339,10 +395,11 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(report.errors)).toContain("CHOICE_KEY_INVALID");
+      expect(codes(report.errors)).not.toContain("CHOICE_KEY_INVALID");
+      expect(report.ok).toBe(true);
     });
 
-    it("rejects a key containing whitespace because ASR never emits it", () => {
+    it("allows a key containing whitespace now that key-format validation is removed", () => {
       const report = lintEpisode(
         identity,
         withChoices({
@@ -352,7 +409,8 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(report.errors)).toContain("CHOICE_KEY_INVALID");
+      expect(codes(report.errors)).not.toContain("CHOICE_KEY_INVALID");
+      expect(report.ok).toBe(true);
     });
 
     it("rejects a one-character choice text for the same substring reason", () => {
@@ -368,7 +426,7 @@ describe("adventure-linter", () => {
       expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
     });
 
-    it("rejects duplicated keys or texts", () => {
+    it("warns on duplicated keys but still reports ok since key dup is not an error", () => {
       const dupKey = lintEpisode(
         identity,
         withChoices({
@@ -378,7 +436,9 @@ describe("adventure-linter", () => {
           ],
         }),
       );
-      expect(codes(dupKey.errors)).toContain("CHOICE_KEY_DUPLICATE");
+      expect(codes(dupKey.warnings)).toContain("CHOICE_KEY_DUPLICATE");
+      expect(codes(dupKey.errors)).not.toContain("CHOICE_KEY_DUPLICATE");
+      expect(dupKey.ok).toBe(true);
 
       const dupText = lintEpisode(
         identity,
@@ -405,10 +465,45 @@ describe("adventure-linter", () => {
       expect(codes(report.errors)).toContain("CHOICE_TEXT_SUBSTRING");
     });
 
+    it("does not reject when only the key is a substring, since key matching is not substring-based", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [
+            { key: "forest", text: "森林", reply: "好" },
+            { key: "pine_forest", text: "松树林", reply: "走" },
+          ],
+        }),
+      );
+      expect(codes(report.errors)).not.toContain("CHOICE_TEXT_SUBSTRING");
+      expect(report.ok).toBe(true);
+    });
+
     it("attaches the offending segment order to the issue", () => {
       const report = lintEpisode(identity, withChoices(null));
       const issue = report.errors.find((i) => i.code === "CHOICES_REQUIRED");
       expect(issue?.segmentOrder).toBe(1);
+    });
+
+    it("null 选项与字段类型不对 → 按空值走校验而不是崩", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [null, { key: 1, text: 2, reply: 3 }],
+        }),
+      );
+      expect(codes(report.errors)).toContain("CHOICE_TEXT_INVALID");
+      expect(codes(report.errors)).toContain("CHOICE_REPLY_REQUIRED");
+    });
+
+    it("另一个选项是 null 时子串检查按空文本跳过，不误报也不崩", () => {
+      const report = lintEpisode(
+        identity,
+        withChoices({
+          choices: [{ key: "forest", text: "森林", reply: "好" }, null],
+        }),
+      );
+      expect(codes(report.errors)).not.toContain("CHOICE_TEXT_SUBSTRING");
     });
   });
 
@@ -424,7 +519,6 @@ describe("adventure-linter", () => {
           interactionType: "repeat_after_me" as const,
           options: options as never,
           fallbackText: "没关系，我们继续。",
-          exitText: "好呀，明天接着玩。",
         },
         narration(2, "b"),
       ],
@@ -562,5 +656,65 @@ describe("adventure-linter", () => {
     expect(issue.message.length).toBeGreaterThan(0);
     expect(issue.businessKey).toBe("elly/2/1");
     expect(issue.severity).toBe("error");
+  });
+
+  describe("畸形输入防御", () => {
+    it("segments 不是数组 → 报 NO_SEGMENTS 而不是崩", () => {
+      const report = lintEpisode(identity, {
+        title: "x",
+        segments: "不是数组",
+      } as unknown as EpisodeContentDraft);
+      expect(codes(report.errors)).toContain("NO_SEGMENTS");
+    });
+
+    it("title 不是字符串 → 按空标题报 TITLE_REQUIRED", () => {
+      const report = lintEpisode(identity, {
+        title: 42,
+        segments: [],
+      } as unknown as EpisodeContentDraft);
+      expect(codes(report.errors)).toContain("TITLE_REQUIRED");
+    });
+
+    it.each([-1, 1.5, "abc"])(
+      "segment.order=%p 不是不小于 0 的整数 → SEGMENT_ORDER_INVALID",
+      (order) => {
+        const report = lintEpisode(identity, {
+          ...valid(),
+          segments: [
+            {
+              order,
+              kind: "narration",
+              text: "第一段。",
+            } as unknown as EpisodeSegmentDraft,
+          ],
+        });
+        expect(codes(report.errors)).toContain("SEGMENT_ORDER_INVALID");
+      },
+    );
+
+    it("segment.text 不是字符串 → 按空文本报 SEGMENT_TEXT_REQUIRED", () => {
+      const report = lintEpisode(identity, {
+        ...valid(),
+        segments: [
+          {
+            order: 0,
+            kind: "narration",
+            text: 42,
+          } as unknown as EpisodeSegmentDraft,
+        ],
+      });
+      expect(codes(report.errors)).toContain("SEGMENT_TEXT_REQUIRED");
+    });
+
+    it("配了禁用词但正文没命中 → 什么都不报", () => {
+      const report = lintEpisode(
+        identity,
+        valid(),
+        { forPublish: true },
+        { forbiddenWords: ["刀子"] },
+      );
+      expect(codes(report.errors)).not.toContain("FORBIDDEN_WORD");
+      expect(report.ok).toBe(true);
+    });
   });
 });

@@ -634,4 +634,30 @@ describe("TurnDecisionAnalyticsService", () => {
       expect((findMany.mock.calls[0][0] as { skip: number }).skip).toBe(0);
     });
   });
+
+  describe("边界补测", () => {
+    it("getIntentTrend 无数据日期补零（bucket undefined fallback）", async () => {
+      const { service, findMany } = setup();
+      findMany.mockResolvedValue([]);
+      const result = await service.getIntentTrend(RANGE);
+      expect(result.series.length).toBe(7);
+      expect(result.series[0].total).toBe(0);
+      expect(result.series[0].modelInvoked).toBe(0);
+      expect(result.series[0].fallbackCount).toBe(0);
+      expect(result.series[0].byIntent).toEqual([]);
+    });
+
+    it("getIntentSummary intent 为 null 时按空串排序不抛", async () => {
+      const { service, stubGroups } = setup();
+      stubGroups({
+        "intent,intentSource": [
+          { intent: null, intentSource: "model", _count: { _all: 1 } },
+          { intent: "free_chat", intentSource: "model", _count: { _all: 1 } },
+        ],
+      });
+      const result = await service.getIntentSummary(RANGE);
+      expect(result.total).toBe(2);
+      expect(result.byIntent).toHaveLength(2);
+    });
+  });
 });

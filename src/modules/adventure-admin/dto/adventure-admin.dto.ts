@@ -8,9 +8,11 @@ import {
   IsDefined,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -223,7 +225,8 @@ export class CreateEpisodeDto {
   @ApiProperty({
     description:
       "内容草稿 {title, recap?, segments[]}；segments 每段 " +
-      "{order, kind: narration|interaction, text, interactionType?, options?, fallbackText?, exitText?, rewardStar?}",
+      "{order, kind: narration|interaction, text, interactionType?, options?, fallbackText?, rewardStar?}。" +
+      "退出话术不是内容字段：孩子说不玩时一律念全局那句（见 capabilities.fixedExitText），传入 exitText 会被忽略。",
   })
   @IsDefined()
   @IsObject()
@@ -378,6 +381,20 @@ export class ImportPreviewDto {
   bundle: Record<string, unknown>;
 }
 
+export class ChoiceStatsQueryDto {
+  @ApiPropertyOptional({ description: "起始日期 YYYY-MM-DD（含）" })
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  startDate?: string;
+
+  @ApiPropertyOptional({ description: "结束日期 YYYY-MM-DD（含）" })
+  @IsOptional()
+  @Transform(({ value }) => emptyToUndefined(value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  endDate?: string;
+}
+
 export class ImportApplyDto {
   @ApiProperty({ description: "要导入的 bundle 原文" })
   @IsDefined()
@@ -403,4 +420,36 @@ export class ImportApplyDto {
   @IsString()
   @MaxLength(128)
   expectedBundleHash?: string;
+}
+
+export class TestAssignDto {
+  @ApiProperty({ description: "设备业务 ID（小写 MAC）或设备编码" })
+  @IsString()
+  @IsNotEmpty()
+  deviceId: string;
+
+  @ApiPropertyOptional({ description: "变更理由，至少 8 个字" })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class ScriptConvertDto {
+  @ApiPropertyOptional({ description: "原始文件名，仅用于提示，不落库" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  fileName?: string;
+
+  @ApiProperty({ description: "docx 文件的 base64 编码内容" })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(8000000)
+  contentBase64: string;
+}
+
+export class NextEpisodeNumberQueryDto {
+  @ApiProperty({ description: "IP 标识", enum: ADVENTURE_CHARACTER_KEYS })
+  @IsIn(ADVENTURE_CHARACTER_KEYS as readonly string[])
+  characterKey: AdventureCharacterKey;
 }

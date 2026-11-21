@@ -55,6 +55,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "ioredis": "^5.4.0",
+    "mammoth": "^1.13.0",
     "mqtt": "^5.16.0",
     "nestjs-pino": "^4.1.0",
     "passport": "^0.7.0",
@@ -113,6 +114,20 @@
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
+    "coverageThreshold": {
+      "global": {
+        "branches": 80,
+        "functions": 90,
+        "lines": 90,
+        "statements": 90
+      },
+      "./src/modules/adventure-admin/": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      }
+    },
     "testEnvironment": "node"
   },
   "engines": {

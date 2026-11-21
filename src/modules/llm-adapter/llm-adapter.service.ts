@@ -22,6 +22,7 @@ import {
 } from "@/modules/vendor/conversation-session.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import {
   AdventureReply,
   AdventureService,
@@ -33,6 +34,18 @@ import {
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
+import {
+  checkFillerHead,
+  fillerFallback,
+  fillerTemplateFor,
+  logFillerPostChecks,
+} from "./llm-adapter-filler";
+import {
+  describeError,
+  extractHistory,
+  lastUserMessage,
+} from "./llm-adapter-request";
+import { buildHistoryFromRows } from "./llm-adapter-history";
 
 /** 上游故障时的兜底话术：保证设备端有声音，不让孩子面对沉默。
  *  按设备角色 keyed，为 Polly 等后续批次预留判断余地；
@@ -48,9 +61,6 @@ function resolveUpstreamFallbackText(characterKey?: string | null): string {
     DEFAULT_UPSTREAM_FALLBACK_TEXT
   );
 }
-
-/** 历史轮数上限：防爆上下文（最近 10 轮一问一答） */
-const MAX_HISTORY_TURNS = 10;
 
 /** 落库历史条数上限：与老链路 getRecentHistory 口径一致（12 条 ≈ 6 轮） */
 const DB_HISTORY_LIMIT = 12;
@@ -123,6 +133,7 @@ export class LlmAdapterService {
     private readonly adventure: AdventureService,
     private readonly prisma: PrismaService,
     private readonly turnDecisions: TurnDecisionRecorder,
+    private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
@@ -162,7 +173,7 @@ export class LlmAdapterService {
     req: ChatCompletionRequest,
     deviceHint?: string,
   ): AsyncGenerator<string> {
-    const asrText = this.lastUserMessage(req);
+    const asrText = lastUserMessage(req);
     const baiduSystem = req.messages.filter((m) => m.role === "system");
 
     const device = await this.resolveDevice(req, deviceHint);
@@ -228,6 +239,35 @@ export class LlmAdapterService {
       return;
     }
 
+    // 测试冒险故事触发词（仅测试环境）：固定短语「测试冒险故事」确定性开播下发集。
+    // 排在等待态接管之前——测试者想重玩时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；未下发返回确定性话术；异常落回正常链路。
+    if (device) {
+      try {
+        const testStoryReply = await this.adventure.tryTestStoryTrigger(
+          device.id,
+          asrText,
+        );
+        if (testStoryReply) {
+          this.turnDecisions.record({
+            turnId,
+            deviceId: device.id,
+            safety: null,
+            safetySource: "not_evaluated",
+            intent: null,
+            intentSource: "adventure_takeover",
+            asrText,
+          });
+          yield* this.emitAdventureReply(device, testStoryReply, asrText);
+          return;
+        }
+      } catch (error) {
+        this.logger.error(
+          `Adventure test story trigger failed, degrading to normal flow for device=${device.deviceId}: ${describeError(error)}`,
+        );
+      }
+    }
+
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
@@ -240,7 +280,7 @@ export class LlmAdapterService {
         );
       } catch (error) {
         this.logger.error(
-          `Adventure reply handling failed, degrading to free chat for device=${device.deviceId}: ${this.describeError(error)}`,
+          `Adventure reply handling failed, degrading to free chat for device=${device.deviceId}: ${describeError(error)}`,
         );
       }
       if (adventureReply) {
@@ -396,7 +436,7 @@ export class LlmAdapterService {
         }
       } catch (error) {
         this.logger.error(
-          `Adventure gate failed, degrading to free story for device=${device.deviceId}: ${this.describeError(error)}`,
+          `Adventure gate failed, degrading to free story for device=${device.deviceId}: ${describeError(error)}`,
         );
       }
     }
@@ -428,6 +468,7 @@ export class LlmAdapterService {
     let sleepContentDegraded: SleepContentDegradation | null = null;
     if (device && intent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, asrText);
+      await this.sleepMode.enter(device.id);
       sleepContentDegraded = await this.resolveSleepContentDegradation(
         device.id,
       );
@@ -441,7 +482,7 @@ export class LlmAdapterService {
     if (device) {
       ({ history, recentFillers } = await this.getDbHistory(device.id, mode));
     } else {
-      history = this.extractHistory(req);
+      history = extractHistory(req);
     }
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
@@ -725,8 +766,9 @@ export class LlmAdapterService {
     // 段落已经生成好了，落库只是审计。首条 create 发生在任何 chunk 之前，
     // 一旦抛错整轮就静音——这是本文件最容易让孩子听不到声音的一处，
     // 所以三次写库全部 best-effort：失败只记日志，内容照常播出。
+    let userMessageId: string | undefined;
     try {
-      await this.prisma.message.create({
+      const msg = await this.prisma.message.create({
         data: {
           deviceId: device.id,
           turnId,
@@ -738,9 +780,10 @@ export class LlmAdapterService {
           spokeAt: new Date(),
         },
       });
+      userMessageId = msg.id;
     } catch (error) {
       this.logger.error(
-        `Failed to persist adventure user message for device=${device.deviceId}: ${this.describeError(error)}`,
+        `Failed to persist adventure user message for device=${device.deviceId}: ${describeError(error)}`,
       );
     }
 
@@ -761,26 +804,28 @@ export class LlmAdapterService {
             filler: null,
             answer: responseText,
             interactionResult: adventureReply.result ?? null,
+            matchedChoice: adventureReply.matchedChoice ?? null,
           },
           spokeAt: new Date(),
         },
       });
     } catch (error) {
       this.logger.error(
-        `Failed to persist adventure assistant message for device=${device.deviceId}: ${this.describeError(error)}`,
+        `Failed to persist adventure assistant message for device=${device.deviceId}: ${describeError(error)}`,
       );
     }
     try {
-      await this.adventure.recordPresented(device.id, turnId, adventureReply);
+      await this.adventure.recordPresented(
+        device.id,
+        turnId,
+        adventureReply,
+        userMessageId,
+      );
     } catch (error) {
       this.logger.error(
-        `Failed to record adventure presentation for device=${device.deviceId}: ${this.describeError(error)}`,
+        `Failed to record adventure presentation for device=${device.deviceId}: ${describeError(error)}`,
       );
     }
-  }
-
-  private describeError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
   }
 
   /**
@@ -985,66 +1030,8 @@ export class LlmAdapterService {
       select: { role: true, content: true, rawPayload: true },
     });
 
-    const history: Array<{ role: "user" | "assistant"; content: string }> = [];
-    const fillers: string[] = [];
-    for (const row of rows.reverse()) {
-      if (row.role === "user") {
-        history.push({ role: "user", content: row.content });
-        continue;
-      }
-      const answer = LlmService.extractAnswer(row.content, row.rawPayload);
-      if (answer === null) {
-        continue;
-      }
-      history.push({ role: "assistant", content: answer });
-      const filler = (row.rawPayload as { filler?: unknown } | null)?.filler;
-      if (typeof filler === "string" && filler.length > 0) {
-        fillers.push(filler);
-      }
-    }
-    return { history, recentFillers: fillers.slice(-5) };
+    return buildHistoryFromRows(rows);
   }
-
-  /** 问 Elly 身份（名字/是谁）的窄类问句：filler 走模板，不交给小模型 */
-  private static readonly SELF_IDENTITY_QUESTION =
-    /你(叫什么|是谁|是干什么的)|你的名字|who are you|your name/i;
-  /** 问 Elly 偏好的窄类问句：同上走模板（实机事故：filler 主客颠倒） */
-  private static readonly SELF_PREFERENCE_QUESTION =
-    /你(最?(喜欢|爱)|喜欢什么|爱吃什么|平时喜欢)/i;
-
-  // 模板池统一 ≥15 字 / ≥8 词：模板也是过渡音覆盖，同样要盖住主模型首包
-  private static readonly IDENTITY_FILLERS_ZH = [
-    "你在问我的名字呀，让我想一想怎么介绍自己呢……",
-    "你想知道我是谁呀，这个问题还挺有意思的呢……",
-  ];
-  private static readonly PREFERENCE_FILLERS_ZH = [
-    "你想知道我喜欢什么呀，让我认真想一想呢……",
-    "你在问我的喜好呀，我还真想跟你好好聊聊呢……",
-  ];
-  private static readonly IDENTITY_FILLERS_EN = [
-    "Oh, you are asking about my name? Let me think!",
-  ];
-  private static readonly PREFERENCE_FILLERS_EN = [
-    "You want to know what I like? Let me think about it!",
-  ];
-  private static readonly GENERIC_FILLERS_ZH = [
-    "嗯嗯，我在认真听呢，你接着往下说呀……",
-    "哇，你说的话真有意思呀，我还想再听呢……",
-    "哦？这件事听起来好有趣呀，后来呢后来呢……",
-    "哈哈，我最喜欢听你说话啦，再多讲一点嘛……",
-  ];
-  private static readonly GENERIC_FILLERS_EN = [
-    "Hmm, I am listening carefully, keep going!",
-    "Wow, that sounds so fun, tell me more!",
-    "Oh really? I want to hear more about it!",
-  ];
-
-  /** 流式 filler 头部缓冲长度（字符）：足以定论「孩子名开头 / 人设名出现」 */
-  private static readonly FILLER_HEAD_BUFFER_CHARS = 8;
-
-  /** filler 开头语气词/标点剥离集：判「孩子名开头」前先剥掉填充开场 */
-  private static readonly FILLER_LEADING_FILLER_CHARS =
-    /^[\s\p{P}\p{S}呀嗯啊哦哈哇噢唉嘿]+/u;
 
   /**
    * 流式 filler（3s 超时）：小模型流式生成，头部缓冲 8 字做确定性校验
@@ -1072,7 +1059,7 @@ export class LlmAdapterService {
   }): AsyncGenerator<string> {
     const { asrText, recentFillers } = params;
 
-    const templated = this.fillerTemplateFor(asrText, recentFillers);
+    const templated = fillerTemplateFor(asrText, recentFillers);
     if (templated) {
       yield templated;
       return;
@@ -1136,7 +1123,7 @@ export class LlmAdapterService {
             yield chunk;
             continue;
           }
-          const verdict = this.checkFillerHead(buffer, childName, personaName);
+          const verdict = checkFillerHead(buffer, childName, personaName);
           if (verdict === "reject") {
             rejected = true;
             break; // 头部违规：中止本条流，未外发任何内容
@@ -1152,8 +1139,7 @@ export class LlmAdapterService {
           // 全文不足头部缓冲长度（短句/空响应）：在完整文本上定论
           if (
             buffer &&
-            this.checkFillerHead(buffer, childName, personaName, true) !==
-              "reject"
+            checkFillerHead(buffer, childName, personaName, true) !== "reject"
           ) {
             flushed = true;
             fullText += buffer;
@@ -1168,133 +1154,26 @@ export class LlmAdapterService {
         if (flushed) {
           // 半截 filler 已播给孩子：不可撤回、不重试（避免孩子听到
           // 「前半句 + 另一句」的冲突内容），保留已播部分直接结束
-          this.logFillerPostChecks(fullText, recentFillers, personaName);
+          logFillerPostChecks(
+            this.logger,
+            fullText,
+            recentFillers,
+            personaName,
+          );
           return;
         }
         rejected = true; // 未外发 → 重试或兜底
       }
       if (!rejected) {
-        this.logFillerPostChecks(fullText, recentFillers, personaName);
+        logFillerPostChecks(this.logger, fullText, recentFillers, personaName);
         return;
       }
     }
 
     // 两次均违规/失败：兜底模板池（dedup-aware），保证过渡音覆盖不缺席
-    const fallback = this.fillerFallback(asrText, recentFillers);
+    const fallback = fillerFallback(asrText, recentFillers);
     this.logger.warn("Filler fell back to template pool");
     yield fallback;
-  }
-
-  /**
-   * 流式 filler 头部校验：拒绝两类实机事故的头部现象
-   * （剥离语气词后以孩子名开头 / 任意位置出现人设名）。
-   * 缓冲不足 8 字且非终态时返回 undecided（继续等后续 chunk）。
-   */
-  private checkFillerHead(
-    buffer: string,
-    childName: string | undefined,
-    personaName: string,
-    final = false,
-  ): "pass" | "reject" | "undecided" {
-    const compact = buffer.replace(/\s+/g, "");
-    const compactPersona = personaName.replace(/\s+/g, "");
-    if (compactPersona && compact.includes(compactPersona)) {
-      return "reject";
-    }
-    if (childName) {
-      const stripped = buffer.replace(
-        LlmAdapterService.FILLER_LEADING_FILLER_CHARS,
-        "",
-      );
-      if (stripped.startsWith(childName)) {
-        return "reject";
-      }
-    }
-    return final ||
-      [...buffer].length >= LlmAdapterService.FILLER_HEAD_BUFFER_CHARS
-      ? "pass"
-      : "undecided";
-  }
-
-  /**
-   * 流式 filler 事后校验：已播不可撤回，违规只告警供日志/dashboard 观测。
-   * （复读与长度下限的硬门让位给首音延迟，prompt 禁用清单是主防线）
-   */
-  private logFillerPostChecks(
-    fullText: string,
-    recentFillers: string[],
-    personaName: string,
-  ): void {
-    if (!fullText) {
-      return;
-    }
-    if (this.isFillerDuplicate(fullText, recentFillers)) {
-      this.logger.warn(`Filler repeated despite banned list: ${fullText}`);
-    }
-    const isZh = /[\u4e00-\u9fff]/.test(fullText);
-    const tooShort = isZh
-      ? [...fullText.replace(/[\s\p{P}\p{S}]/gu, "")].length < 15
-      : fullText.trim().split(/\s+/).length < 8;
-    if (tooShort) {
-      this.logger.warn(
-        `Filler shorter than the 15-char/8-word floor: ${fullText}`,
-      );
-    }
-    const compactPersona = personaName.replace(/\s+/g, "");
-    if (
-      compactPersona &&
-      fullText.replace(/\s+/g, "").includes(compactPersona)
-    ) {
-      this.logger.warn(
-        `Filler contains persona name beyond head check: ${fullText}`,
-      );
-    }
-  }
-
-  /** 身份/偏好问句的确定性模板；非此类问句返回 null 走小模型 */
-  private fillerTemplateFor(
-    asrText: string,
-    recentFillers: string[],
-  ): string | null {
-    const isZh = /[\u4e00-\u9fff]/.test(asrText);
-    let pool: string[] | null = null;
-    if (LlmAdapterService.SELF_IDENTITY_QUESTION.test(asrText)) {
-      pool = isZh
-        ? LlmAdapterService.IDENTITY_FILLERS_ZH
-        : LlmAdapterService.IDENTITY_FILLERS_EN;
-    } else if (LlmAdapterService.SELF_PREFERENCE_QUESTION.test(asrText)) {
-      pool = isZh
-        ? LlmAdapterService.PREFERENCE_FILLERS_ZH
-        : LlmAdapterService.PREFERENCE_FILLERS_EN;
-    }
-    if (!pool) {
-      return null;
-    }
-    return (
-      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
-    );
-  }
-
-  /** 重试仍重复时的兜底：通用模板池里挑一条最近没用过的 */
-  private fillerFallback(asrText: string, recentFillers: string[]): string {
-    const pool = /[\u4e00-\u9fff]/.test(asrText)
-      ? LlmAdapterService.GENERIC_FILLERS_ZH
-      : LlmAdapterService.GENERIC_FILLERS_EN;
-    return (
-      pool.find((f) => !this.isFillerDuplicate(f, recentFillers)) ?? pool[0]
-    );
-  }
-
-  /** 归一化比对（去大小写/空白/标点/符号）：挡逐字复读与近重复 */
-  private isFillerDuplicate(text: string, recentFillers: string[]): boolean {
-    const normalized = LlmAdapterService.normalizeFiller(text);
-    return recentFillers.some(
-      (recent) => LlmAdapterService.normalizeFiller(recent) === normalized,
-    );
-  }
-
-  private static normalizeFiller(text: string): string {
-    return text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
   }
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */
@@ -1330,26 +1209,5 @@ export class LlmAdapterService {
         spokeAt: new Date(),
       },
     });
-  }
-
-  private lastUserMessage(req: ChatCompletionRequest): string {
-    for (let i = req.messages.length - 1; i >= 0; i--) {
-      if (req.messages[i].role === "user") return req.messages[i].content;
-    }
-    throw new BadRequestException("messages must contain a user message");
-  }
-
-  /** 取最后一条 user 消息之前的 user/assistant 对作为历史，截最近 N 轮 */
-  private extractHistory(
-    req: ChatCompletionRequest,
-  ): Array<{ role: "user" | "assistant"; content: string }> {
-    const turns = req.messages.filter((m) => m.role !== "system");
-    // 最后一条即当前 asrText，不进历史
-    const prior = turns.slice(0, -1);
-    const history = prior.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
-    return history.slice(-MAX_HISTORY_TURNS * 2);
   }
 }

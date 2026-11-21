@@ -17,7 +17,8 @@ import {
  * 每一条 error 都对应一个「上线后孩子会遇到什么」的真实故障，而不是风格偏好：
  * - order 不连续 → 引擎 `order >= segments.length` 会提前判完集，孩子听到半截就被记完成；
  * - 二选一 key/text 过短或互为子串 → 引擎用 `asrText.includes(...)` 匹配，会静默走错分支；
- * - 交互点缺兜底/退出话术 → 孩子沉默或跑题时只能落回硬编码的通用句，人设崩塌；
+ * - 交互点缺兜底话术 → 孩子沉默或跑题时只能落回硬编码的通用句，人设崩塌
+ *   （退出话术不在此列：它已收归全局 ADVENTURE_EXIT_TEXT，不再逐段填写）；
  * - 发布顺序断档 → 引擎在未发布集处硬停播，后面所有已发布集全部播不到。
  *
  * warning 是可发布的质量提示（时长、星光密度、开场节奏），不阻断。
@@ -55,9 +56,7 @@ export interface LintThresholds {
   maxTitleChars: number;
   /** 单集星光上限（防止「每段都发星」稀释激励） */
   maxStarsPerEpisode: number;
-  /** 二选一 key 最小长度：引擎用 includes 匹配，单字符几乎必误命中 */
-  minChoiceKeyChars: number;
-  /** 二选一 text 最小长度：同上 */
+  /** 二选一 text 最小长度：引擎用 includes 匹配，过短会误命中 */
   minChoiceTextChars: number;
   /** 禁用词，命中即阻断；默认空，由 config/env 注入 */
   forbiddenWords: string[];
@@ -68,7 +67,6 @@ export const DEFAULT_LINT_THRESHOLDS: LintThresholds = {
   maxNarrationTextChars: 120,
   maxTitleChars: 40,
   maxStarsPerEpisode: 5,
-  minChoiceKeyChars: 2,
   minChoiceTextChars: 2,
   forbiddenWords: [],
 };
@@ -395,10 +393,9 @@ function lintSegment(
     index,
     error,
   );
-  lintForbiddenWords(segment.exitText ?? "", thresholds, order, index, error);
 
   if (type === "two_choice") {
-    lintTwoChoice(segment, index, thresholds, error);
+    lintTwoChoice(segment, index, thresholds, error, warn);
   }
   if (type === "repeat_after_me") {
     const praise = (segment.options as SegmentOptions | null)?.praise;
@@ -433,13 +430,9 @@ function lintSegment(
       at("fallbackText"),
     );
   }
-  if (typeof segment.exitText !== "string" || !segment.exitText.trim()) {
-    error(
-      "EXIT_TEXT_REQUIRED",
-      `第 ${order} 段等孩子作答，必须填退出话术：孩子说「不想玩了」时要温柔收尾。`,
-      at("exitText"),
-    );
-  }
+  // 刻意没有「退出话术必填」这条规则（原 EXIT_TEXT_REQUIRED 已删除）：孩子说
+  // 「不想玩了」时念的是全局统一的 ADVENTURE_EXIT_TEXT，与这一段是谁写的无关，
+  // 看板上也不再有这个输入框。若在这里继续要求它，就没有任何一集能发布出去。
 
   if (index === segments.length - 1) {
     warn(
@@ -459,6 +452,11 @@ function lintTwoChoice(
     message: string,
     detail?: { segmentOrder?: number; path?: string },
   ) => void,
+  warn: (
+    code: string,
+    message: string,
+    detail?: { segmentOrder?: number; path?: string },
+  ) => void,
 ) {
   const order = Number(segment.order);
   const at = (field: string) => ({
@@ -468,12 +466,28 @@ function lintTwoChoice(
   const options = segment.options as SegmentOptions | null | undefined;
   const choices = options?.choices;
 
-  if (!Array.isArray(choices) || choices.length < 2) {
+  if (!Array.isArray(choices)) {
     error(
       "CHOICES_REQUIRED",
-      `第 ${order} 段是二选一交互点，必须给出至少 2 个选项，收到 ${
-        Array.isArray(choices) ? choices.length : 0
-      } 个。`,
+      `第 ${order} 段是二选一交互点，但 options.choices 不是数组。`,
+      at("options.choices"),
+    );
+    return;
+  }
+
+  if (choices.length < 2) {
+    error(
+      "CHOICES_REQUIRED",
+      `第 ${order} 段是二选一交互点，必须恰好 2 个选项，目前只有 ${choices.length} 个。`,
+      at("options.choices"),
+    );
+    return;
+  }
+
+  if (choices.length > 2) {
+    error(
+      "CHOICES_COUNT_INVALID",
+      `第 ${order} 段二选一交互点有 ${choices.length} 个选项，但引擎只在两个选项里判定——多出来的选项孩子永远选不到，是静默失效的死分支。`,
       at("options.choices"),
     );
     return;
@@ -489,19 +503,6 @@ function lintTwoChoice(
     const reply = typeof item.reply === "string" ? item.reply.trim() : "";
 
     const trimmedKey = choiceKey.trim();
-    if (
-      !trimmedKey ||
-      trimmedKey.length < thresholds.minChoiceKeyChars ||
-      /\s/.test(trimmedKey)
-    ) {
-      error(
-        "CHOICE_KEY_INVALID",
-        `第 ${order} 段第 ${choiceIndex + 1} 个选项的 key "${choiceKey}" 不合法：不能为空、至少 ${
-          thresholds.minChoiceKeyChars
-        } 个字符、且不能含空格。引擎用「孩子说的话里是否包含 key」来匹配，单字符或带空格的 key 要么必误命中、要么永远匹配不上。`,
-        at(`${path}.key`),
-      );
-    }
     const trimmedText = choiceText.trim();
     if (!trimmedText || trimmedText.length < thresholds.minChoiceTextChars) {
       error(
@@ -520,9 +521,9 @@ function lintTwoChoice(
 
     if (trimmedKey) {
       if (seenKeys.has(trimmedKey)) {
-        error(
+        warn(
           "CHOICE_KEY_DUPLICATE",
-          `第 ${order} 段选项 key "${trimmedKey}" 重复，引擎只会命中前一个。`,
+          `第 ${order} 段选项 key "${trimmedKey}" 重复，key 是内部标识、重复让作者难以辨认。`,
           at(`${path}.key`),
         );
       }
@@ -544,7 +545,6 @@ function lintTwoChoice(
   choices.forEach((choice, i) => {
     const a = (choice ?? {}) as Partial<TwoChoiceOption>;
     const aText = typeof a.text === "string" ? a.text.trim() : "";
-    const aKey = typeof a.key === "string" ? a.key.trim() : "";
     if (!aText) {
       return;
     }
@@ -554,12 +554,9 @@ function lintTwoChoice(
       }
       const b = (other ?? {}) as Partial<TwoChoiceOption>;
       const bText = typeof b.text === "string" ? b.text.trim() : "";
-      const bKey = typeof b.key === "string" ? b.key.trim() : "";
       const textSwallowed =
         bText.length > aText.length && bText.includes(aText);
-      const keySwallowed =
-        !!bKey && bKey.length > aKey.length && bKey.includes(aKey);
-      if (textSwallowed || keySwallowed) {
+      if (textSwallowed) {
         error(
           "CHOICE_TEXT_SUBSTRING",
           `第 ${order} 段选项 ${i + 1}（"${aText}"）是选项 ${

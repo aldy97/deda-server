@@ -1,7 +1,7 @@
 import { IsNotEmpty, IsString, Matches } from "class-validator";
 
 /**
- * 设备上线登记（机芯厂《设备端接口文档》3.1 节）。
+ * 设备上线登记（机芯厂《设备端接口文档》v1.4 §3.1）。
  * 字段名与协议保持一致；全局 ValidationPipe 开启 forbidNonWhitelisted，
  * 仅声明协议字段，固件多带字段将被 400 拒绝。
  */

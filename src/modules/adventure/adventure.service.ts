@@ -4,14 +4,40 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import {
+  ADVENTURE_CHOICE_LLM_DEFAULTS,
+  ADVENTURE_CHOICE_LLM_ENV,
   ADVENTURE_ENGINE_FAILURE_MARKER,
+  ADVENTURE_EXIT_TEXT,
+  ADVENTURE_TEST_ENV,
+  ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT,
+  ADVENTURE_TEST_STORY_TRIGGER,
   AdventureFailurePhase,
   AdventureFailureReport,
+  isAdventureExitRequest,
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
+import {
+  buildClosedEpisodeIds,
+  isClosedStatus,
+  isExitableStatus,
+  isReassignableStatus,
+  selectFirstPlayableEpisode,
+} from "./adventure-progress";
+import {
+  buildMatchedChoice,
+  findCurrentInteraction,
+  resolveChoiceLlmEnabled,
+  toRecapLines,
+  withInteractionMeta,
+} from "./adventure-reply";
+import {
+  matchChoiceDeterministic,
+  parseChoiceVerdict,
+} from "./adventure-match";
 import {
   AdventureDailyRecord,
   AdventureEpisode,
@@ -25,6 +51,28 @@ export interface AdventureReply {
   action: "narrate" | "await_reply" | "completed" | "exit";
   /** 本轮交互处置结果；开集/续播等非交互回复为 undefined。 */
   result?: "answered" | "off_topic" | "fallback" | "exit" | "timeout";
+  /**
+   * 本轮处置发生在哪个交互点：类型 + 段 order。
+   * result 事件由四种交互类型共用（two_choice / open_question /
+   * repeat_after_me / reward），报表要算「二选一的兜底率」必须能把分母
+   * 限定在 two_choice 上，所以把类型一起盖到事件里。非交互回复为 undefined。
+   */
+  interaction?: { type: string; order: number };
+  /**
+   * 二选一命中信息：命中了第几个选项、判定来源（确定性/LLM）、
+   * 该选项的作者内部 key、所在段 order、以及命中时锁定的版本快照 id。
+   * 用于报表做「哪一段/哪个选项/哪个版本」的归因；不含任何儿童数据。
+   */
+  matchedChoice?: {
+    index: number;
+    source: "deterministic" | "llm";
+    /** 被选中选项的作者内部 key（稳定 ID）；payload 缺 key 时为 null */
+    key: string | null;
+    /** interaction.order，报表用它 join 回内容 payload 取选项文案 */
+    segmentOrder: number;
+    /** progress.episodeVersionId；为空表示走 segments 物化表而非版本快照 */
+    episodeVersionId: string | null;
+  };
 }
 
 interface InteractionChoice {
@@ -45,7 +93,6 @@ export interface PlayableSegment {
   interactionType?: string | null;
   options?: unknown;
   fallbackText?: string | null;
-  exitText?: string | null;
   rewardStar?: boolean;
 }
 
@@ -56,15 +103,6 @@ export interface EpisodeContent {
 
 /** 沉默超时：引导词最后一个 chunk ack 后 10s 无上行则兜底续播 */
 const REPLY_TIMEOUT_MS = 10000;
-
-/** 明确拒绝关键词（命中即温柔退出，进度保留当天可续玩） */
-const REFUSAL_KEYWORDS = ["不要听", "不想听", "不想玩", "不玩了", "不要玩了"];
-
-/** 进度终态：选集时永久排除，且任何路径都不得覆盖 */
-const CLOSED_PROGRESS_STATUSES = ["completed", "abandoned"];
-
-/** 已被收走、不再续玩的进度：落到选集重新分配（区别于 exited 的当日可续玩） */
-const REASSIGNABLE_PROGRESS_STATUSES = ["abandoned", "failed_over"];
 
 /** 版本快照缓存上限；payload 不可变，故只做容量淘汰，永不失效 */
 const VERSION_CACHE_LIMIT = 200;
@@ -101,7 +139,7 @@ export function parseEpisodePayload(payload: unknown): EpisodeContent | null {
       options: row.options ?? null,
       fallbackText:
         typeof row.fallbackText === "string" ? row.fallbackText : null,
-      exitText: typeof row.exitText === "string" ? row.exitText : null,
+      // 旧版本快照里的 exitText 刻意不读：退出话术已全局统一，见 ADVENTURE_EXIT_TEXT
       rewardStar: row.rewardStar === true,
     });
   }
@@ -142,6 +180,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
+    private readonly configService: ConfigService,
   ) {}
 
   onModuleInit() {
@@ -197,6 +236,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 今日是否已经完成任意一集；这是所有冒险入口的确定性门禁。 */
+  /** 测试冒险故事环境总闸：非字面 "true" 一律视为关（prod 永远不可用）。 */
+  isTestStoryEnabled(): boolean {
+    return (
+      this.configService.get<string>(ADVENTURE_TEST_ENV.enabled) === "true"
+    );
+  }
+
   async isCompletedToday(deviceInternalId: string): Promise<boolean> {
     const record = await this.prisma.adventureDailyRecord.findFirst({
       where: {
@@ -301,9 +347,17 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /** 新分配一集的开场前情回顾：优先当前版本 payload，回落 episode 行的物化副本。 */
   private async resolveRecap(episode: AdventureEpisode): Promise<string[]> {
-    const content = await this.resolveVersionContent(episode.currentVersionId);
+    return this.resolveRecapFor(episode, episode.currentVersionId);
+  }
+
+  /** 指定版本快照的开场前情回顾（测试冒险故事可播草稿快照的 recap）。 */
+  private async resolveRecapFor(
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<string[]> {
+    const content = await this.resolveVersionContent(episodeVersionId);
     const recap = content?.recap ?? episode.recap;
-    return recap ? [recap] : [];
+    return toRecapLines(recap);
   }
 
   /**
@@ -329,23 +383,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         select: { episodeId: true, status: true },
       }),
     ]);
-    const closedEpisodeIds = new Set(
-      progresses
-        .filter((progress) =>
-          CLOSED_PROGRESS_STATUSES.includes(progress.status),
-        )
-        .map((progress) => progress.episodeId),
+    const closedEpisodeIds = buildClosedEpisodeIds(
+      progresses,
+      excludeEpisodeId,
     );
-    if (excludeEpisodeId) {
-      closedEpisodeIds.add(excludeEpisodeId);
-    }
-    const episode = episodes.find(
-      (item) => !closedEpisodeIds.has(item.id) && !item.retiredAt,
-    );
-    if (!episode || !episode.published) {
-      return null;
-    }
-    return episode;
+    return selectFirstPlayableEpisode(episodes, closedEpisodeIds);
   }
 
   /**
@@ -375,7 +417,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
-    if (CLOSED_PROGRESS_STATUSES.includes(existing.status)) {
+    if (isClosedStatus(existing.status)) {
       this.logger.warn(
         `Refusing to overwrite terminal adventure progress: deviceId=${deviceInternalId} episodeId=${episode.id} status=${existing.status}`,
       );
@@ -431,6 +473,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     deviceInternalId: string,
     episodeId: string,
+    opts?: { allowCompletedOverwrite?: boolean },
   ): Promise<AdventureDailyRecord> {
     const today = this.dateKey();
     const existing = await tx.adventureDailyRecord.findUnique({
@@ -452,6 +495,19 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       });
     }
     if (existing.status === "completed") {
+      if (opts?.allowCompletedOverwrite) {
+        // 测试冒险故事：同一天反复重玩要覆盖完集状态，否则第二次「测试冒险故事」
+        // 会被完集记录挡住。
+        return tx.adventureDailyRecord.update({
+          where: { id: existing.id },
+          data: {
+            episodeId,
+            status: "in_progress",
+            completedAt: null,
+            completedDate: null,
+          },
+        });
+      }
       // 不可达：isCompletedToday 已在上游拦住。真到了这里说明每日额度判定
       // 出了意外，此时宁可本轮不写库，也不能把孩子的完集记录改成 in_progress。
       this.logger.warn(
@@ -471,6 +527,89 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       select: { characterKey: true },
     });
     return device?.characterKey || "elly";
+  }
+
+  /**
+   * 测试冒险故事开跑：清等待定时器 → 事务内复用/改指当日 daily 行（允许覆盖完集）、
+   * 无条件把进度重置到第 0 段、写带时间戳后缀的 assigned/started 事件（重玩不撞
+   * eventKey 唯一约束）。与正常开集路径分家：测试播放不走每日一集门禁、不走顺序选集。
+   */
+  private async openTestRun(
+    deviceInternalId: string,
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<{ daily: AdventureDailyRecord; progress: AdventureProgress }> {
+    this.clearTimer(deviceInternalId);
+    return this.prisma.$transaction(async (tx) => {
+      const daily = await this.openOrReuseTodayDaily(
+        tx,
+        deviceInternalId,
+        episode.id,
+        { allowCompletedOverwrite: true },
+      );
+      const progress = await this.resetProgressForTest(
+        tx,
+        deviceInternalId,
+        episode,
+        episodeVersionId,
+      );
+      const run = Date.now();
+      await tx.adventureEvent.create({
+        data: {
+          eventKey: `daily:${daily.id}:assigned:${run}`,
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+          dailyRecordId: daily.id,
+          eventType: "daily_assigned",
+        },
+      });
+      await tx.adventureEvent.create({
+        data: {
+          eventKey: `daily:${daily.id}:started:${run}`,
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+          dailyRecordId: daily.id,
+          eventType: "started",
+        },
+      });
+      return { daily, progress };
+    });
+  }
+
+  /**
+   * 测试冒险故事的进度重置：无条件回到第 0 段。与 assignProgress 的区别是它
+   * 覆盖终态（completed/exited/failed_over），因为测试要的是可重复的从头到尾体验。
+   */
+  private async resetProgressForTest(
+    tx: Prisma.TransactionClient,
+    deviceInternalId: string,
+    episode: AdventureEpisode,
+    episodeVersionId: string | null,
+  ): Promise<AdventureProgress> {
+    return tx.adventureProgress.upsert({
+      where: {
+        deviceId_episodeId: {
+          deviceId: deviceInternalId,
+          episodeId: episode.id,
+        },
+      },
+      create: {
+        deviceId: deviceInternalId,
+        episodeId: episode.id,
+        status: "in_progress",
+        episodeVersionId,
+        nextSegmentOrder: 0,
+      },
+      update: {
+        status: "in_progress",
+        episodeVersionId,
+        nextSegmentOrder: 0,
+        stars: 0,
+        offTopicCount: 0,
+        waitingSince: null,
+        completedAt: null,
+      },
+    });
   }
 
   /**
@@ -496,6 +635,77 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * 测试冒险故事的语音入口（两条对话链路共用）：固定触发词「测试冒险故事」，
+   * 包含匹配（容忍 ASR 在词后带句号等标点）。命中即从第 0 段播放该设备下发的集；
+   * 未下发返回确定性话术；不是触发词或环境未开启返回 null，由链路层落回正常
+   * 意图路由。任何异常都返回 null 落回正常链路，绝不让这一轮静音。
+   */
+  async tryTestStoryTrigger(
+    deviceInternalId: string,
+    asrText: string | null | undefined,
+  ): Promise<AdventureReply | null> {
+    if (!this.isTestStoryEnabled()) {
+      return null;
+    }
+    if (!(asrText ?? "").includes(ADVENTURE_TEST_STORY_TRIGGER)) {
+      return null;
+    }
+    try {
+      const reply = await this.playTestEpisode(deviceInternalId);
+      if (reply) {
+        return reply;
+      }
+      return {
+        texts: [ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT],
+        action: "narrate",
+      };
+    } catch (error) {
+      this.logger.error(
+        `Test story trigger failed, degrading to normal flow for device=${deviceInternalId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /** 播放下发的测试集：读 device 字段 → 锁定版本 → 从第 0 段重开。未下发返回 null。 */
+  async playTestEpisode(
+    deviceInternalId: string,
+  ): Promise<AdventureReply | null> {
+    if (!this.isTestStoryEnabled()) {
+      return null;
+    }
+    const device = await this.prisma.device.findUnique({
+      where: { id: deviceInternalId },
+      select: {
+        testAdventureEpisodeId: true,
+        testAdventureEpisodeVersionId: true,
+      },
+    });
+    const episodeId = device?.testAdventureEpisodeId;
+    if (!episodeId) {
+      return null;
+    }
+    const episode = await this.prisma.adventureEpisode.findUnique({
+      where: { id: episodeId },
+    });
+    if (!episode) {
+      return null;
+    }
+    const episodeVersionId =
+      device.testAdventureEpisodeVersionId ?? episode.currentVersionId ?? null;
+    const { daily, progress } = await this.openTestRun(
+      deviceInternalId,
+      episode,
+      episodeVersionId,
+    );
+    const segments = await this.loadSegmentsForPlay(progress);
+    const prefix = await this.resolveRecapFor(episode, episodeVersionId);
+    return this.playFrom(progress, segments, prefix, daily);
+  }
+
   private async startTodayInternal(
     deviceInternalId: string,
     explicitlyRequested = false,
@@ -506,10 +716,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
     const current = await this.findCurrentAdventure(deviceInternalId);
     // abandoned（admin retire 收走）与 failed_over（故障自愈收走）都不再续玩，落到选集重新分配。
-    if (
-      current &&
-      !REASSIGNABLE_PROGRESS_STATUSES.includes(current.progress.status)
-    ) {
+    if (current && !isReassignableStatus(current.progress.status)) {
       const { daily, progress } = current;
       if (progress.status === "exited" && !explicitlyRequested) {
         return null;
@@ -687,20 +894,9 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     this.scheduleTimeout(deviceInternalId);
   }
 
-  /** 当前等待回答的交互点（已播，order = nextSegmentOrder - 1）；非交互段一律不认。 */
-  private currentInteraction(
-    progress: AdventureProgress,
-    segments: PlayableSegment[],
-  ) {
-    return segments.find(
-      (s) =>
-        s.order === progress.nextSegmentOrder - 1 && s.kind === "interaction",
-    );
-  }
-
   /**
-   * 孩子在交互等待中的回答：五类处置。
-   * 非等待态返回 null（不接管上行）。
+   * 孩子回话：明确拒绝在任何阶段都接管（见 exitAdventure），其余四类处置只在
+   * 交互等待态生效；非等待态返回 null（不接管上行）。
    */
   /** 孩子回话入口。兜底口径同 startToday。 */
   async handleChildReply(
@@ -719,49 +915,52 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     asrText: string,
   ): Promise<AdventureReply | null> {
     const current = await this.findCurrentAdventure(deviceInternalId);
-    if (!current || current.progress.status !== "awaiting_reply") {
+    if (!current) {
       return null;
     }
     const { daily, progress } = current;
+
+    // 明确拒绝优先于一切判定，且与状态机停在哪一格无关：等回答时、旁白还在播时、
+    // 甚至已经退出过又喊一次，都只念同一句全局话术。放在最前面是因为它绝不能被
+    // 后面的分支吃掉——二选一匹配、跑题引回、开放提问接话都不该先于「孩子说不玩了」。
+    if (isAdventureExitRequest(asrText)) {
+      return this.exitAdventure(deviceInternalId, progress);
+    }
+
+    if (progress.status !== "awaiting_reply") {
+      return null;
+    }
     this.clearTimer(deviceInternalId);
 
     const segments = await this.loadSegmentsForPlay(progress);
-    const interaction = this.currentInteraction(progress, segments);
+    const interaction = findCurrentInteraction(progress, segments);
     if (!interaction) {
       return null;
     }
 
-    // 明确拒绝：温柔退出，每日档案与进度保留，之后只能续玩这一集。
-    if (REFUSAL_KEYWORDS.some((kw) => asrText.includes(kw))) {
-      await this.prisma.adventureProgress.update({
-        where: { id: progress.id },
-        data: { status: "exited", waitingSince: null },
-      });
-      return {
-        texts: [interaction.exitText || "好呀，那我们下次接着玩。"],
-        action: "exit",
-        result: "exit",
-      };
-    }
-
     if (interaction.interactionType === "two_choice") {
-      return this.handleTwoChoice(
-        deviceInternalId,
-        daily,
-        progress,
-        segments,
+      return withInteractionMeta(
+        await this.handleTwoChoice(
+          deviceInternalId,
+          daily,
+          progress,
+          segments,
+          interaction,
+          asrText,
+        ),
         interaction,
-        asrText,
       );
     }
     if (interaction.interactionType === "repeat_after_me") {
-      // ASR 粗匹配即可，以鼓励为主，不苛求发音
+      // 跟读以鼓励为主、完全不判定：孩子说任何话——漏词、发音不准、甚至完全无关——
+      // 都算成功，一律播 praise 并推进主线。刻意不比对目标句：跟读的目标是让孩子
+      // 开口，不是考发音；判失败只会打击孩子，且跟读没有剧情约束要求它必须命中。
       const options = interaction.options as unknown as {
         praise?: string;
       } | null;
       const praise = options?.praise || "说得真好！给你鼓掌！";
       const reply = await this.playFrom(progress, segments, [praise], daily);
-      return { ...reply, result: "answered" };
+      return withInteractionMeta({ ...reply, result: "answered" }, interaction);
     }
     // open_question：小模型接话（含正常/跑题/超前发挥），失败降级兜底
     const bridge = await this.generateBridge(
@@ -771,7 +970,84 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       "open_question",
     );
     const reply = await this.playFrom(progress, segments, [bridge], daily);
-    return { ...reply, result: "answered" };
+    return withInteractionMeta({ ...reply, result: "answered" }, interaction);
+  }
+
+  /**
+   * 温柔退出：任何阶段都念同一句全局话术，进度落 exited（当日可续玩）。
+   *
+   * 三点刻意的取舍：
+   * 1. **不看当前停在旁白还是互动段。** 孩子打断旁白说「不想玩了」和在互动点说，
+   *    对他是同一件事，引擎不该因为状态机停在哪一格而给出不同回应。
+   * 2. **终态不接管。** completed / abandoned / failed_over 返回 null：既不覆盖终态，
+   *    也不念一句做不到的承诺，这句话交回正常意图路由。
+   * 3. **已退出时幂等。** 只重复那句话，不再写库——否则 updatedAt 被无意义刷动，
+   *    看板上「最后活动时间」会变成孩子喊退出的时间；也绝不触发 resume。
+   */
+  private async exitAdventure(
+    deviceInternalId: string,
+    progress: AdventureProgress,
+  ): Promise<AdventureReply | null> {
+    if (!isExitableStatus(progress.status)) {
+      return null;
+    }
+    // 等待中的 10s 沉默超时必须取消：孩子已经走了，定时器不该再追一句兜底话术
+    this.clearTimer(deviceInternalId);
+    if (progress.status !== "exited") {
+      await this.prisma.adventureProgress.update({
+        where: { id: progress.id },
+        data: { status: "exited", waitingSince: null },
+      });
+    }
+    return {
+      texts: [ADVENTURE_EXIT_TEXT],
+      action: "exit",
+      result: "exit",
+    };
+  }
+
+  private isChoiceLlmEnabled(): boolean {
+    return resolveChoiceLlmEnabled(
+      this.configService.get<string>(ADVENTURE_CHOICE_LLM_ENV.enabled) as
+        string | undefined,
+      ADVENTURE_CHOICE_LLM_DEFAULTS.enabled,
+    );
+  }
+
+  /** 小模型二选一兜底判定，失败返回 index=null 降级给上层走旧跑题逻辑 */
+  private async judgeAndRedirect(
+    deviceInternalId: string,
+    interaction: PlayableSegment,
+    asrText: string,
+    choices: InteractionChoice[],
+  ): Promise<{ index: number | null; redirectText: string }> {
+    try {
+      const characterKey = await this.getCharacterKey(deviceInternalId);
+      const characterPersona =
+        CHARACTER_PERSONAS[characterKey] || CHARACTER_PERSONAS.elly;
+      const result = await this.llmService.complete({
+        scene: "adventure_interaction",
+        deviceId: deviceInternalId,
+        messages: this.llmService.buildAdventureChoiceMatchPrompt({
+          characterPersona,
+          segmentText: interaction.text,
+          choiceA: choices[0]?.text ?? "",
+          choiceB: choices[1]?.text ?? "",
+          childReply: asrText,
+        }),
+        model: this.llmService.smallModelName,
+        maxTokens: 160,
+        timeoutMs: 3500,
+      });
+      return parseChoiceVerdict(result.text, choices.length);
+    } catch (error) {
+      this.logger.warn(
+        `Adventure choice LLM failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { index: null, redirectText: "" };
+    }
   }
 
   private async handleTwoChoice(
@@ -786,9 +1062,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       choices?: InteractionChoice[];
     } | null;
     const choices = options?.choices || [];
-    const matched = choices.find(
-      (c) => asrText.includes(c.text) || asrText.includes(c.key),
-    );
+    const hitIndex = matchChoiceDeterministic(choices, asrText);
+    const matched = hitIndex !== null ? choices[hitIndex] : undefined;
 
     if (matched) {
       if (interaction.rewardStar) {
@@ -800,10 +1075,78 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         [matched.reply],
         daily,
       );
-      return { ...reply, result: "answered" };
+      return {
+        ...reply,
+        result: "answered",
+        matchedChoice: buildMatchedChoice({
+          index: hitIndex!,
+          source: "deterministic",
+          choices,
+          segmentOrder: interaction.order,
+          episodeVersionId: progress.episodeVersionId ?? null,
+        }),
+      };
     }
 
-    // 首次跑题：小模型接住 + 轻引回一次，仍停在该交互点，不推进主线
+    // LLM 兜底判定（开关打开时）：确定性匹配未命中，调一次小模型再试
+    if (this.isChoiceLlmEnabled()) {
+      const verdict = await this.judgeAndRedirect(
+        deviceInternalId,
+        interaction,
+        asrText,
+        choices,
+      );
+
+      if (verdict.index !== null) {
+        const matchedChoice = choices[verdict.index];
+        if (interaction.rewardStar) {
+          progress.stars += 1;
+        }
+        const reply = await this.playFrom(
+          progress,
+          segments,
+          [matchedChoice.reply],
+          daily,
+        );
+        return {
+          ...reply,
+          result: "answered",
+          matchedChoice: buildMatchedChoice({
+            index: verdict.index!,
+            source: "llm",
+            choices,
+            segmentOrder: interaction.order,
+            episodeVersionId: progress.episodeVersionId ?? null,
+          }),
+        };
+      }
+
+      if (progress.offTopicCount === 0) {
+        const redirect =
+          verdict.redirectText ||
+          interaction.fallbackText ||
+          "没关系，我们继续吧。";
+        await this.prisma.adventureProgress.update({
+          where: { id: progress.id },
+          data: { offTopicCount: 1, waitingSince: null },
+        });
+        return {
+          texts: [redirect],
+          action: "await_reply",
+          result: "off_topic",
+        };
+      }
+
+      const reply = await this.playFrom(
+        progress,
+        segments,
+        [interaction.fallbackText || "没关系，我们继续吧。"],
+        daily,
+      );
+      return { ...reply, result: "fallback" };
+    }
+
+    // 首次跑题（开关关闭时）：小模型接住 + 轻引回一次，仍停在该交互点，不推进主线
     if (progress.offTopicCount === 0) {
       const redirect = await this.generateBridge(
         deviceInternalId,
@@ -818,7 +1161,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return { texts: [redirect], action: "await_reply", result: "off_topic" };
     }
 
-    // 第二次跑题：预生成兜底话术推进，不再引回、不调 LLM
+    // 第二次跑题（开关关闭时）：预生成兜底话术推进，不再引回、不调 LLM
     const reply = await this.playFrom(
       progress,
       segments,
@@ -892,11 +1235,11 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     }
 
     const segments = await this.loadSegmentsForPlay(progress);
-    const interaction = this.currentInteraction(progress, segments);
+    const interaction = findCurrentInteraction(progress, segments);
     const fallback = interaction?.fallbackText || "没关系，我们继续吧。";
     this.clearTimer(deviceInternalId);
     const reply = await this.playFrom(progress, segments, [fallback], daily);
-    return { ...reply, result: "timeout" };
+    return withInteractionMeta({ ...reply, result: "timeout" }, interaction);
   }
 
   /**
@@ -1043,11 +1386,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     return this.playFrom(nextProgress, segments, prefix, targetDaily);
   }
 
-  /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。 */
+  /** 播报完成后追加审计事件；ASR 与播报全文只保留在 Message。
+   * @param userMessageId 用户消息 ID，用于 choice_matched 事件关联孩子原话（payload 仅含 index/source/key，不存原话本身）。 */
   async recordPresented(
     deviceInternalId: string,
     turnId: string,
     reply: AdventureReply,
+    userMessageId?: string,
   ): Promise<void> {
     const daily = await this.prisma.adventureDailyRecord.findFirst({
       where: { deviceId: deviceInternalId },
@@ -1080,6 +1425,31 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           ...base,
           eventKey: `turn:${turnId}:result:${reply.result}`,
           eventType: reply.result,
+          // result 事件由四种交互类型共用，带上类型与段号报表才能把
+          // 「二选一兜底率」的分母从开放提问里摘出来。
+          segmentOrder: reply.interaction?.order ?? null,
+          ...(reply.interaction
+            ? { payload: { interactionType: reply.interaction.type } }
+            : {}),
+        },
+      });
+    }
+    if (reply.matchedChoice) {
+      await this.prisma.adventureEvent.upsert({
+        where: { eventKey: `turn:${turnId}:choice_matched` },
+        update: { messageId: userMessageId ?? null },
+        create: {
+          ...base,
+          eventKey: `turn:${turnId}:choice_matched`,
+          eventType: "choice_matched",
+          messageId: userMessageId ?? null,
+          episodeVersionId: reply.matchedChoice.episodeVersionId,
+          segmentOrder: reply.matchedChoice.segmentOrder,
+          payload: {
+            index: reply.matchedChoice.index,
+            source: reply.matchedChoice.source,
+            key: reply.matchedChoice.key,
+          },
         },
       });
     }

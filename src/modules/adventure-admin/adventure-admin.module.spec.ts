@@ -14,6 +14,8 @@ import { AdventureAdminModule } from "./adventure-admin.module";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureContentQueryService } from "./adventure-content-query.service";
 import { AdventureContentService } from "./adventure-content.service";
+import { AdventureScriptImportService } from "./adventure-script-import.service";
+import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
 
@@ -68,6 +70,8 @@ describe("AdventureAdminModule", () => {
       AdventureAuditService,
       AdventureContentQueryService,
       AdventureContentService,
+      AdventureScriptImportService,
+      AdventureTestAssignService,
       AdventureTransferService,
     ]) {
       expect(moduleRef.get(token)).toBeInstanceOf(token as never);

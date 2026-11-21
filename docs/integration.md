@@ -158,10 +158,12 @@
 
 ### 前端对齐
 
-- 小程序进入音色设置页先调 `GET /device-configs/:deviceId/voice`，用 `catalog` 渲染音色列表、用 `vcn`/`speechRate` 回填当前选中项。
-- 提交时调 `POST /device-configs/:deviceId/voice`，传入用户选择的 `vcn` 和/或 `speechRate`。
+- **产品定义**（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色。因此**家长端不展示音色选择**，`vcn` 不由小程序设置；音色的权威来源是服务端配置 `CHARACTER_TIMBRE_JSON`（IP → timbreId），设备侧按《设备端接口文档》v1.4 的 `POST /client/bot/bot/getvalue` 每轮创建实例前拉取（不缓存）。本组接口保留为运维与联调的可观测/可干预入口（看 `applied` 与 `reason` 归因）。
+- **这里写入的 `vcn` 不会改变设备下一轮的音色**：设备每轮的 `vcn` 只来自服务端配置 `CHARACTER_TIMBRE_JSON`（按设备 IP 查表，见 `docs/voice-switching.md` §2.5）。本接口写入的 `vcn` 只对**当前正在进行的实例**做一次实时修正（`applied="live"`），下一轮新建实例仍回到该 IP 的专属音色。语速不同——`speechRate` 会被下一轮继承。
+- 语速是否在家长端开放由前端产品决定；后端两个字段都支持。若开放：`GET` 用 `speechRate` 回填当前档位，`POST` 传 `speechRate`（`slow`/`normal`/`fast`）。
 - `applied="deferred"` 且 `reason` 非空时，应展示文案提示用户「将在下次对话开始时生效」。
-- `available=false` 时隐藏或禁用音色选择 UI（当前目录为空，不展示空列表）。
+- `available=false` 表示音色目录未填充（`VOICE_CATALOG_JSON=[]`），此时任何 `vcn` 都会被 400 拒绝。
+- 剧情内按角色切音色（多 IP 同剧）是服务端内部行为，不需前端参与；尚未接入，见 `docs/voice-switching.md` 的 Q16。
 - 字段命名 camelCase，响应信封 `{ code, message, data }`，`code=0` 为成功。
 
 ## 百度 RTC 直连主链路（当前主链路，2026-11 起）

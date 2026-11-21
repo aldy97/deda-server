@@ -9,6 +9,7 @@ export const PROMPT_KEYS = [
   "filler_system",
   "filler_retry_instruction",
   "adventure_interaction_system",
+  "adventure_choice_match_system",
   // 主模型规则段。以下两类刻意不在此列、永久硬编码：
   // - childSafetyRules（L3 儿童安全兜底，恒定追加在规则段之后）
   // - personaSection 身份包装文本（防身份漂移 guardrail，性质同 L3）

@@ -54,7 +54,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
         ],
       },
       fallbackText: "没关系，那我们先去森林吧！",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: true,
     },
     {
@@ -73,7 +72,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
       text: "你觉得 Elly 会对小松鼠说什么呢？",
       options: null,
       fallbackText: "没关系，我们一起接着看。",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: false,
     },
     {
@@ -97,7 +95,6 @@ describe("Adventure streaming pipeline (e2e)", () => {
         ],
       },
       fallbackText: "没关系，那我们就唱着歌回去吧！",
-      exitText: "好呀，我们明天接着玩。",
       rewardStar: false,
     },
     {
@@ -466,11 +463,37 @@ describe("Adventure streaming pipeline (e2e)", () => {
         "answered",
         "timeout",
         "completed",
+        "choice_matched",
       ]),
     );
     expect(
       events.filter((event) => event.eventType === "completed"),
     ).toHaveLength(1);
+
+    // 二选一命中遥测：第 2 步说「森林」确定性命中 index 0。事件只落
+    // {index, source} 两个枚举，孩子原话靠 messageId 外键关联 Message，不复制。
+    const choiceEvents = events.filter(
+      (event) => event.eventType === "choice_matched",
+    );
+    expect(choiceEvents).toHaveLength(1);
+    expect(choiceEvents[0].payload).toEqual({
+      index: 0,
+      source: "deterministic",
+      key: "forest",
+    });
+    expect(Object.keys(choiceEvents[0].payload).sort()).toEqual([
+      "index",
+      "key",
+      "source",
+    ]);
+    expect(JSON.stringify(choiceEvents[0].payload)).not.toContain("森林");
+    expect(choiceEvents[0].segmentOrder).toBe(1);
+    expect(choiceEvents[0].episodeVersionId).toBeNull();
+    const forestUserRow = messages.find(
+      (row) => row.role === "user" && row.content === "森林",
+    );
+    expect(forestUserRow).toBeDefined();
+    expect(choiceEvents[0].messageId).toBe(forestUserRow.id);
 
     const assistantRows = messages.filter((row) => row.role === "assistant");
     expect(assistantRows).toHaveLength(4);
@@ -484,6 +507,7 @@ describe("Adventure streaming pipeline (e2e)", () => {
       filler: null,
       answer: [segments[5].fallbackText, segments[6].text].join("\n"),
       interactionResult: "timeout",
+      matchedChoice: null,
     });
     expect(assistantRows.every((row) => row.mode === "adventure_story")).toBe(
       true,

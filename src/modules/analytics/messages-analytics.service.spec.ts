@@ -370,4 +370,51 @@ describe("MessagesAnalyticsService", () => {
       expect(where.spokeAt.lt).toEqual(new Date("2026-11-08T00:00:00+08:00"));
     });
   });
+
+  describe("边界补测", () => {
+    it("getInterruptionRate 空数据 → rate null", async () => {
+      const service = await buildService(
+        buildPrisma({ countImpl: () => 0, groups: [] }),
+      );
+      const result = await service.getInterruptionRate({});
+      expect(result.assistantTotal).toBe(0);
+      expect(result.interruptionRate).toBeNull();
+      expect(result.byMode).toEqual([]);
+    });
+
+    it("getInterruptionRate group.mode null → (unknown)", async () => {
+      const service = await buildService(
+        buildPrisma({
+          countImpl: () => 1,
+          groups: [{ mode: null, status: "completed", _count: { _all: 1 } }],
+        }),
+      );
+      const result = await service.getInterruptionRate({});
+      expect(result.byMode[0].mode).toBe("(unknown)");
+    });
+
+    it("listMessages 只传 startDate / 只传 endDate", async () => {
+      const prisma = buildPrisma({
+        devices: [{ id: "u1", deviceId: "DEDA-1" }],
+        messages: [],
+      });
+      const service = await buildService(prisma);
+
+      await service.listMessages({
+        deviceId: "DEDA-1",
+        startDate: "2026-11-01",
+      });
+      let args = prisma.message.findMany.mock.lastCall?.[0] as any;
+      expect(args.where.spokeAt.gte).toBeDefined();
+      expect(args.where.spokeAt.lt).toBeUndefined();
+
+      await service.listMessages({
+        deviceId: "DEDA-1",
+        endDate: "2026-11-05",
+      });
+      args = prisma.message.findMany.mock.lastCall?.[0] as any;
+      expect(args.where.spokeAt.gte).toBeUndefined();
+      expect(args.where.spokeAt.lt).toBeDefined();
+    });
+  });
 });

@@ -45,7 +45,6 @@ const MUST_FORWARD = [
   "ADVENTURE_LINT_MAX_NARRATION_CHARS",
   "ADVENTURE_LINT_MAX_STARS_PER_EPISODE",
   "ADVENTURE_LINT_MAX_TITLE_CHARS",
-  "ADVENTURE_LINT_MIN_CHOICE_KEY_CHARS",
   "ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS",
   "ADVENTURE_RECOVERY_ENABLED",
   "ADVENTURE_RECOVERY_STALE_AWAIT_ACTION",
@@ -53,6 +52,14 @@ const MUST_FORWARD = [
   "ADVENTURE_RECOVERY_SWEEP_INTERVAL_MS",
   "ADVENTURE_SIM_MAX_AWAIT_POINTS",
   "ADVENTURE_SIM_MAX_SESSION_SECONDS",
+  // 百度智能体与设备端 TTS（v1.4 getvalue 的取值来源）。这组键只写在 env 文件里
+  // 不会进容器：CHARACTER_TIMBRE_JSON 缺失时 getvalue 一律 500，设备每轮对话都
+  // 创建失败，而容器侧不会有任何报错——正是「不报错的失效」最需要钉住。
+  "BAIDU_AGENT_ENABLED",
+  "BAIDU_AGENT_TIMEOUT_MS",
+  "CHARACTER_TIMBRE_JSON",
+  "TTS_DEFAULT_VOL",
+  "VOICE_CATALOG_JSON",
 ];
 
 /** 单键替换形式：${KEY} 或 ${KEY:-默认值} */
@@ -86,6 +93,18 @@ describe("compose 环境变量白名单", () => {
     expect("CONTENT_ADMIN_PROFILE" in baseEnv).toBe(false);
     expect("CONTENT_ADMIN_PROFILE" in prodEnv).toBe(false);
     expect(stagingEnv.CONTENT_ADMIN_PROFILE).toBe("authoring");
+  });
+
+  it("ADVENTURE_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
+    expect("ADVENTURE_TEST_MODE_ENABLED" in baseEnv).toBe(false);
+    expect("ADVENTURE_TEST_MODE_ENABLED" in prodEnv).toBe(false);
+    expect(stagingEnv.ADVENTURE_TEST_MODE_ENABLED).toBe("true");
+  });
+
+  it("SLEEP_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
+    expect("SLEEP_TEST_MODE_ENABLED" in baseEnv).toBe(false);
+    expect("SLEEP_TEST_MODE_ENABLED" in prodEnv).toBe(false);
+    expect(stagingEnv.SLEEP_TEST_MODE_ENABLED).toBe("true");
   });
 });
 

@@ -10,6 +10,7 @@ import { LlmService } from "@/modules/llm/llm.service";
 import { VendorGateway } from "@/modules/vendor/vendor.gateway";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { PushSenderService } from "@/modules/push-notifications/push-sender.service";
+import { SleepModeService } from "./sleep-mode.service";
 import { SleepConfig } from "@prisma/client";
 
 const SCAN_INTERVAL_MS = 60 * 1000;
@@ -58,6 +59,7 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly vendorGateway: VendorGateway,
     private readonly conversationSessionService: ConversationSessionService,
     private readonly pushSender: PushSenderService,
+    private readonly sleepMode: SleepModeService,
   ) {}
 
   onModuleInit() {
@@ -153,6 +155,8 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     // 无条件覆写会话：孩子后续接话留在哄睡模式（45 分钟 TTL）
     await this.conversationSessionService.activateSleepMode(config.device.id);
+    // 进入哄睡：音量压到 min(当前, 50)、语速切到 0.5（编排失败不中断定时进入）
+    await this.sleepMode.enter(config.device.id);
   }
 
   /**

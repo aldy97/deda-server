@@ -1,6 +1,6 @@
 import { IsNotEmpty, IsString, Matches } from "class-validator";
 
-/** 智能体退下通知（机芯厂《设备端接口文档》5.1 节） */
+/** 智能体退下通知（机芯厂《设备端接口文档》v1.4 §6.1） */
 export class BotStopDto {
   /** 设备 MAC */
   @IsString()

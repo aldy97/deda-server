@@ -113,13 +113,41 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 | 类别 | 判定 | 动作 | LLM 调用 |
 |---|---|---|---|
 | 正常作答 | 二选一匹配到选项；开放提问在故事语境内 | 二选一播预生成回应；开放提问小模型接一句；随后续播 | 开放提问才调 |
-| 脱离语境（首次） | 与故事无关但未达兜底条件 | 接住 + 轻引回一次（小模型），offTopicCount=1 | 调 |
+| 脱离语境（首次） | 与故事无关但未达兜底条件 | 确定性匹配失败后：开关开→调一次小模型二选一判定（判出来则走正常作答路径，判不出则引回一次）；开关关→接住+轻引回一次 | 调（开关开/关都调） |
 | 超前发挥/编剧情 | 内容涉及后续剧情 | 不确认不否认不跟随，接话后照常播原文；禁止按孩子想象续写主线 | 调 |
-| 持续不配合 | offTopicCount ≥ 1 再次跑题 | 播 fallbackText 推进，不再引回 | 不调 |
-| 明确拒绝 | 含「不要听/不想玩」等 | 播 exitText，退出冒险回自由对话，进度保留当天可续 | 不调 |
+| 持续不配合 | offTopicCount ≥ 1 再次跑题 | 开关开→调一次小模型二选一判定，命中视同正常作答，未命中播 fallbackText 推进；开关关→播 fallbackText 推进，不引回 | 开关开时调 |
+| 明确拒绝 | 命中全局退出词表 `ADVENTURE_EXIT_KEYWORDS`（与粘滞会话的显式退出共用同一份词表） | **任何阶段**都播同一句全局话术 `ADVENTURE_EXIT_TEXT`，退出冒险回自由对话，进度落 `exited` 当天可续 | 不调 |
 | 沉默 | 10s 无上行（第 6 节） | 播 fallbackText 推进 | 不调 |
 
+> **退出话术是全局的，不是内容字段。** 原 `AdventureSegment.exitText` 已下线（bundle schema v2 起从段落形状中删除）：孩子在任何 IP、任何一集、任何互动点、甚至**打断旁白**时退出，听到的都是 `ADVENTURE_EXIT_TEXT`（定义在 `adventure.constants.ts`），看板侧只读展示为 `capabilities.fixedExitText`。
+>
+> 接管范围是 `in_progress` / `awaiting_reply` / `exited` 三种状态；`completed` / `abandoned` / `failed_over` 是终态，一律**不接管**——既不覆盖终态，也不念一句做不到的承诺，这句话交回正常意图路由。已 `exited` 时幂等：只重复那句话，不写库、不 resume（否则孩子喊「不想玩」反而会把刚退出的故事又开起来）。
+>
+> 退出词表 `ADVENTURE_EXIT_KEYWORDS` 与粘滞会话的显式退出判定（`ConversationSessionService.isExplicitExit`）**共用同一份**，此前两边各有一份导致同一句话在两条链路上结论不同。
+
+> `ADVENTURE_CHOICE_LLM_ENABLED` 默认 `false`（开关关）时，行为与旧版完全一致。开关打开后，二选一确定性匹配不中时会追加一次小模型 LLM 兜底判定。
+
+**LLM 二选一三层降级**（模型输出不合契约时保护孩子不听到原始模型文字）：
+
+1. **判定层**（`parseChoiceVerdict`）：解析模型输出首行。合法 `"0"`/`"1"`（在选项范围内）→ 命中选项；`"NONE"` → 走引回；其余任何输出（越界数字、乱码、空行开头）→ `index = null, redirectText = ""`。
+2. **引回话术层**：`redirectText` 有值时使用模型自产的引回话术（仅 NONE 情况）；`redirectText` 为空串时落到 `interaction.fallbackText`（作者预写）。
+3. **兜底层**：连续跑题或超时，播 `fallbackText` 后直接推进主线，不再引回。
+
+关键安全约束：模型输出不合契约时 `redirectText` 一定为空串，**孩子听到的一定是内容作者预写的 fallbackText，绝不会听到原始模型输出文字**。
+
 每次交互结果打标：`answered / off_topic / fallback / exit / timeout`，供周报与内测质量分析。
+
+### 5.1 二选一确定性匹配
+
+`two_choice` 交互点的匹配完全由纯函数 `matchChoiceDeterministic` 承担，无 LLM、无数据库访问：
+
+- **只看选项文案 `text`**。`key` 是内容作者的内部标识（用于草稿编辑与看板展示），**不参与识别**，今后也不会为它新增任何用途。
+- **零命中**（孩子说的内容未包含任一选项文案）→ 放弃结论，走首次跑题引回。
+- **多命中**（孩子同时提到两个选项文案）→ 视为歧义，放弃结论，不静默取第一个。
+- **否定守卫**：唯一命中时，检查命中词前 4 个字符窗口内是否出现「不 / 别 / 甭 / 勿」任一否定字。出现则放弃确定性结论（例如「不要走河边」中「河边」前有「不」）。
+- 通过以上检查 → 返回唯一命中下标，播该选项的预生成 `reply` 回应句。
+
+确定性层放弃判定时返回 `null`，由上层决定走跑题引回还是 LLM 兜底判定。
 
 ## 6. 10 秒沉默超时设计（本次新增需求）
 
@@ -190,7 +218,7 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 4. 今日完成后不再调用 `startToday`，记录 `entry_blocked_completed` 与 `routed_other_mode`，再进入对应故事链路；
 5. 非故事普通聊天不自动开冒险，按设备当前配置进入英语对话或自由对话流程。
 
-冒险回复复用 `VendorReplyUploader`：`source=answer`、seq 连续、逐 chunk await ack、最后发送 `vendor:text:out` 全量兜底；WS DTO 不变。落库后追加 `segments_presented` 和交互结果事件。
+冒险回复复用 `VendorReplyUploader`：`source=answer`、seq 连续、逐 chunk await ack、最后发送 `vendor:text:out` 全量兜底；WS DTO 不变。落库后追加 `segments_presented`、交互结果事件和 `choice_matched` 事件（payload 仅含 `{index, source}`，原话通过 `messageId` 外键关联 Message）。
 
 ## 8. 小模型 prompt
 
@@ -237,3 +265,30 @@ npx prisma validate --schema=src/prisma/schema.prisma
 - `test/vendor-stream.e2e-spec.ts`、`test/vendor.e2e-spec.ts`：仅对齐新 Prisma mock。
 
 所有改动保持未提交；不 commit/push 除非明确要求。
+
+---
+
+## 11. 测试冒险故事下发（仅 staging）
+
+**目标**：内容作者在 staging 上拿样机自由验收任意一集——不限次数、不限顺序、可播未发布草稿。
+
+**触发方式**：对样机说固定短语「**测试冒险故事**」，即播放看板下发到该设备的集。不再是「我想玩+标题」的语音标题匹配——下发关系在 dashboard 的 episode 抽屉里直接绑定到具体 `episodeId`，触发词零歧义。
+
+**状态真相**：device 上两条持久化字段（`testAdventureEpisodeId` + `testAdventureEpisodeVersionId`），不再用 Redis 武装会话（无 TTL、无 runSeq、无 zset 索引）。孩子每说一次触发词，就从第 0 段重播一遍。
+
+**两道闸**（照内容管理台同一套双闸哲学）：
+
+1. **环境闸**：`ADVENTURE_TEST_MODE_ENABLED` 必须是字面 `"true"`。base/prod 的 compose 刻意不转发（`compose-env-gate.spec.ts` 钉死），staging override 硬写 `'true'`。未开启时触发词不生效、引擎行为与普通设备完全一致。
+2. **设备闸（隐式）**：只有被下发过的设备才进入测试态（字段非空）。下发前说触发词返回确定性「还没有下发」话术，不落库、不进正常意图路由。
+
+**管理台接口**（见 `docs/analytics-api.md`）：
+
+- `POST episodes/:episodeId/test-assign`：下发当前集（`{deviceId, reason}`，优先锁草稿快照，否则锁当前发布版本，重置粘滞会话，留审计）；
+- `POST episodes/:episodeId/test-clear`：清除该设备当前下发（仅当它正是这一集，否则 409，留审计）；
+- `GET device-test/assignment/:deviceId`：读设备当前下发（prod 返回 `enabled=false`）。
+
+写操作沿用 ContentAdminGuard（scope `adventure-content` + `CONTENT_ADMIN_PROFILE=authoring`）+ 环境闸三重保险，理由过 `assertReason`，动作留 `AdventureContentAuditLog`。
+
+**测试播放的行为差异**（以下发字段为前置条件，普通设备零影响）：每次触发词都从第 0 段重开（含 recap）；当日 daily 行允许覆盖完集状态（`openOrReuseTodayDaily` 的 `allowCompletedOverwrite`）；事件键带时间戳后缀避免重玩撞 `eventKey` 唯一约束；测试播放不走每日一集门禁、不走顺序选集，也不豁免 L1/L2 安全闸与内容熔断。
+
+**体验提示**：主链路（百度 RTC）无服务器推送通道，试播时交互点没有 10s 沉默兜底——停下就必须开口或说「不想玩了」；备用链路（vendor WS）有超时推送，行为不同属设计使然。

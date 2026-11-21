@@ -13,6 +13,7 @@ import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { VendorReplyUploader } from "./vendor-reply.uploader";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { LlmMessage } from "@/modules/llm/llm.service";
 import {
   AdventureReply,
@@ -49,6 +50,7 @@ export class VendorService {
     private readonly childSafetyService: ChildSafetyService,
     private readonly sleepConfigsService: SleepConfigsService,
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
+    private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
   ) {
     this.adventureService.registerTimeoutListener(
@@ -226,6 +228,28 @@ export class VendorService {
       );
     }
 
+    // 测试冒险故事触发词（仅测试环境）：固定短语「测试冒险故事」确定性开播下发集。
+    // 排在等待态接管之前——测试者想重玩时，触发词不能被等待态吞掉。
+    // 引擎未启用/不是触发词返回 null；未下发返回确定性话术；异常落回正常链路。
+    try {
+      const testStoryReply = await this.adventureService.tryTestStoryTrigger(
+        device.id,
+        dto.asrText,
+      );
+      if (testStoryReply) {
+        return this.sendAdventureReply(
+          device,
+          testStoryReply,
+          dto.asrText,
+          turnId,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Adventure test story trigger failed, degrading to normal flow for deviceId=${dto.deviceId}: ${this.describeError(error)}`,
+      );
+    }
+
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
@@ -324,6 +348,7 @@ export class VendorService {
 
     if (storyIntent === "sleep_story") {
       await this.applySleepVoiceConfig(device.id, dto.asrText);
+      await this.sleepMode.enter(device.id);
     }
 
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
@@ -730,11 +755,12 @@ export class VendorService {
       ttsOptions: {},
     };
 
+    let userMessageId: string | undefined;
     if (asrText) {
       // best-effort：这次 create 发生在任何 chunk 之前，抛错就等于整轮静音，
       // 而段落内容此时已经由引擎生成好了，没有理由因为它播不出去。
       try {
-        await this.prisma.message.create({
+        const msg = await this.prisma.message.create({
           data: {
             deviceId: device.id,
             turnId,
@@ -746,6 +772,7 @@ export class VendorService {
             spokeAt: new Date(),
           },
         });
+        userMessageId = msg.id;
       } catch (error) {
         this.logger.error(
           `Failed to persist adventure user message for deviceId=${device.deviceId}: ${this.describeError(error)}`,
@@ -813,6 +840,7 @@ export class VendorService {
             filler: null,
             answer: responseText,
             interactionResult: adventureReply.result ?? null,
+            matchedChoice: adventureReply.matchedChoice ?? null,
           },
           spokeAt: new Date(),
         },
@@ -827,6 +855,7 @@ export class VendorService {
         device.id,
         turnId,
         adventureReply,
+        userMessageId,
       );
     } catch (error) {
       this.logger.error(

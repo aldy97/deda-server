@@ -1,6 +1,11 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
-import { RequestMethod, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Logger,
+  RequestMethod,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureContentService } from "./adventure-content.service";
@@ -8,6 +13,8 @@ import { AdventureContentQueryService } from "./adventure-content-query.service"
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
+import { AdventureTestAssignService } from "./adventure-test-assign.service";
+import { AdventureScriptImportService } from "./adventure-script-import.service";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
@@ -131,6 +138,12 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     readOnlyExempt: false,
   },
   {
+    handler: "choiceStats",
+    method: RequestMethod.GET,
+    path: "episodes/:episodeId/choice-stats",
+    readOnlyExempt: false,
+  },
+  {
     handler: "lint",
     method: RequestMethod.POST,
     path: "lint",
@@ -141,6 +154,18 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     method: RequestMethod.POST,
     path: "simulate",
     readOnlyExempt: true,
+  },
+  {
+    handler: "convertScript",
+    method: RequestMethod.POST,
+    path: "script/convert",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "nextEpisodeNumber",
+    method: RequestMethod.GET,
+    path: "script/next-number",
+    readOnlyExempt: false,
   },
   {
     handler: "listAudit",
@@ -182,6 +207,24 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     handler: "recoveryReset",
     method: RequestMethod.POST,
     path: "recovery/reset",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "deviceTestAssignment",
+    method: RequestMethod.GET,
+    path: "device-test/assignment/:deviceId",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "testAssignEpisode",
+    method: RequestMethod.POST,
+    path: "episodes/:episodeId/test-assign",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "testClearEpisode",
+    method: RequestMethod.POST,
+    path: "episodes/:episodeId/test-clear",
     readOnlyExempt: false,
   },
 ];
@@ -238,6 +281,8 @@ describe("AdventureAdminController", () => {
   let transfer: Record<string, jest.Mock>;
   let audit: Record<string, jest.Mock>;
   let recovery: Record<string, jest.Mock>;
+  let testAssign: Record<string, jest.Mock>;
+  let scriptImport: Record<string, jest.Mock>;
   let profile: string;
 
   beforeEach(async () => {
@@ -252,6 +297,7 @@ describe("AdventureAdminController", () => {
       retireImpact: jest.fn(),
       checkContent: jest.fn(),
       simulate: jest.fn(),
+      choiceStats: jest.fn(),
     };
     content = {
       createEpisode: jest.fn(),
@@ -274,6 +320,15 @@ describe("AdventureAdminController", () => {
       sweepBrokenProgress: jest.fn(),
       resetBreaker: jest.fn(),
     };
+    testAssign = {
+      assignment: jest.fn(),
+      assign: jest.fn(),
+      clear: jest.fn(),
+    };
+    scriptImport = {
+      convertDocx: jest.fn(),
+      nextEpisodeNumber: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -283,6 +338,8 @@ describe("AdventureAdminController", () => {
         { provide: AdventureTransferService, useValue: transfer },
         { provide: AdventureAuditService, useValue: audit },
         { provide: AdventureRecoveryService, useValue: recovery },
+        { provide: AdventureTestAssignService, useValue: testAssign },
+        { provide: AdventureScriptImportService, useValue: scriptImport },
         {
           provide: ConfigService,
           useValue: {
@@ -468,6 +525,15 @@ describe("AdventureAdminController", () => {
       expect(query.diffVersions).toHaveBeenCalledWith("ep1", "v1", "v2");
     });
 
+    it("forwards choice-stats with the raw date window untouched", async () => {
+      query.choiceStats.mockResolvedValue({ hits: [] });
+      const window = { startDate: "2026-01-01", endDate: "2026-01-31" };
+
+      await controller.choiceStats("ep1", window as never);
+
+      expect(query.choiceStats).toHaveBeenCalledWith("ep1", window);
+    });
+
     it("converts audit from/to to Date and trims the rest", async () => {
       audit.list.mockResolvedValue({ items: [], total: 0 });
 
@@ -499,6 +565,39 @@ describe("AdventureAdminController", () => {
     });
   });
 
+  describe("script import routes", () => {
+    it("convertScript decodes base64 and forwards the buffer to the service", async () => {
+      scriptImport.convertDocx.mockResolvedValue({ characterKey: "elly" });
+      const base64 = Buffer.from("fake docx").toString("base64");
+
+      await controller.convertScript({ contentBase64: base64 } as never);
+
+      expect(scriptImport.convertDocx).toHaveBeenCalledWith(
+        Buffer.from("fake docx"),
+      );
+    });
+
+    it("convertScript rejects a missing or empty base64 body", async () => {
+      await expect(
+        controller.convertScript({ contentBase64: "" } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(scriptImport.convertDocx).not.toHaveBeenCalled();
+    });
+
+    it("nextEpisodeNumber forwards the character key and pins the season", async () => {
+      scriptImport.nextEpisodeNumber.mockResolvedValue(5);
+
+      await expect(
+        controller.nextEpisodeNumber({ characterKey: "polly" } as never),
+      ).resolves.toEqual({
+        characterKey: "polly",
+        season: 1,
+        episodeNumber: 5,
+      });
+      expect(scriptImport.nextEpisodeNumber).toHaveBeenCalledWith("polly");
+    });
+  });
+
   describe("non-mutating POST routes", () => {
     it("lint passes episodeId=null when validating a brand new episode", async () => {
       query.checkContent.mockResolvedValue({ ok: true });
@@ -509,10 +608,15 @@ describe("AdventureAdminController", () => {
         forPublish: true,
       } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
-        ...IDENTITY,
-        forPublish: true,
-      });
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          ...IDENTITY,
+          forPublish: true,
+        },
+        true,
+      );
     });
 
     it("lint targets an existing episode and leaves identity undefined when not editing it", async () => {
@@ -520,7 +624,12 @@ describe("AdventureAdminController", () => {
 
       await controller.lint({ episodeId: " ep1 ", content: DRAFT } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith("ep1", DRAFT, undefined);
+      expect(query.checkContent).toHaveBeenCalledWith(
+        "ep1",
+        DRAFT,
+        undefined,
+        undefined,
+      );
     });
 
     it("lint defaults season so a hand-written bundle is not rejected for omitting it", async () => {
@@ -531,11 +640,65 @@ describe("AdventureAdminController", () => {
         identity: { characterKey: "elly", episodeNumber: 3 },
       } as never);
 
-      expect(query.checkContent).toHaveBeenCalledWith(null, DRAFT, {
-        characterKey: "elly",
-        season: 1,
-        episodeNumber: 3,
-      });
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 3,
+        },
+        undefined,
+      );
+    });
+
+    it("lint passes forPublish through to checkContent even without identity", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({
+        content: DRAFT,
+        forPublish: true,
+      } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        undefined,
+        true,
+      );
+    });
+
+    it("lint passes forPublish as undefined when the caller omits it", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({ content: DRAFT } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        undefined,
+        undefined,
+      );
+    });
+
+    it("lint gives checkContent both layers of forPublish when identity is present", async () => {
+      query.checkContent.mockResolvedValue({ ok: true });
+
+      await controller.lint({
+        content: DRAFT,
+        identity: IDENTITY,
+        forPublish: true,
+      } as never);
+
+      expect(query.checkContent).toHaveBeenCalledWith(
+        null,
+        DRAFT,
+        {
+          ...IDENTITY,
+          forPublish: true,
+        },
+        true,
+      );
     });
 
     it("simulate passes identity + content only", async () => {
@@ -781,6 +944,17 @@ describe("AdventureAdminController", () => {
       );
     });
 
+    it("export with a non-array episodeIds treats it as no filter rather than crashing", async () => {
+      transfer.exportBundle.mockResolvedValue({ bundleHash: "h" });
+
+      await controller.exportBundle(
+        { episodeIds: "ep1,ep2" } as never,
+        adminRequest(),
+      );
+
+      expect(transfer.exportBundle).toHaveBeenCalledWith({}, expect.anything());
+    });
+
     it("import applies the confirm token and expected hash from the preview", async () => {
       const bundle = { bundleSchemaVersion: 1, episodes: [] };
       transfer.applyImport.mockResolvedValue({ bundleHash: "h" });
@@ -901,6 +1075,49 @@ describe("AdventureAdminController", () => {
       expect(result.report).toBeDefined();
     });
 
+    it("survives a recovery service that returns no report: audit detail 全落空值", async () => {
+      recovery.sweepBrokenProgress.mockResolvedValue(undefined);
+
+      await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      const entry = audit.record.mock.calls[0][1] as { detail: unknown };
+      expect(entry.detail).toEqual({
+        startedAt: null,
+        finishedAt: null,
+        durationMs: null,
+        skipped: false,
+        skipReason: null,
+        scanned: null,
+        repairCount: 0,
+        alertCount: 0,
+        errorCount: 0,
+        repairs: [],
+        alerts: [],
+      });
+    });
+
+    it("logs the audit failure even when the thrown value is not an Error", async () => {
+      const logSpy = jest
+        .spyOn(Logger.prototype, "error")
+        .mockReturnValue(undefined);
+      recovery.sweepBrokenProgress.mockResolvedValue(emptyReport);
+      audit.record.mockRejectedValue("审计表不可用");
+
+      const result = await controller.recoverySweep(
+        { reason: "巡检一下卡住的进度" } as never,
+        adminRequest(),
+      );
+
+      expect(result.audited).toBe(false);
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining("审计表不可用"),
+      );
+      logSpy.mockRestore();
+    });
+
     it("caps the audit detail so one sweep cannot write an unbounded Json blob", async () => {
       const repairs = Array.from({ length: 120 }, (_, index) => ({
         code: "AWAITING_NON_INTERACTION",
@@ -949,9 +1166,82 @@ describe("AdventureAdminController", () => {
     });
   });
 
+  describe("test story assign routes", () => {
+    it("forwards the assignment read without an actor", async () => {
+      testAssign.assignment.mockResolvedValue({
+        enabled: true,
+        assignment: null,
+      });
+
+      await expect(
+        controller.deviceTestAssignment("dev-1001"),
+      ).resolves.toEqual({ enabled: true, assignment: null });
+      expect(testAssign.assignment).toHaveBeenCalledWith("dev-1001");
+    });
+
+    it("assigns with actor and only the picked fields", async () => {
+      testAssign.assign.mockResolvedValue({ ok: true });
+
+      await controller.testAssignEpisode(
+        "ep1",
+        {
+          deviceId: "dev-1001",
+          reason: "测试环境验收这一集",
+          evil: "should be dropped",
+        } as never,
+        adminRequest(),
+      );
+
+      expect(testAssign.assign).toHaveBeenCalledWith(
+        "ep1",
+        { deviceId: "dev-1001", reason: "测试环境验收这一集" },
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+      );
+    });
+
+    it("clears with actor and the picked fields", async () => {
+      testAssign.clear.mockResolvedValue({ ok: true });
+
+      await controller.testClearEpisode(
+        "ep1",
+        { deviceId: "dev-1001", reason: "验收完成清除下发" } as never,
+        adminRequest(),
+      );
+
+      expect(testAssign.clear).toHaveBeenCalledWith(
+        "ep1",
+        { deviceId: "dev-1001", reason: "验收完成清除下发" },
+        { username: "alice", displayName: "Alice", profile: "authoring" },
+      );
+    });
+
+    it.each([
+      ["missing user", { user: undefined }],
+      ["blank username", adminRequest({ username: "   " })],
+    ])("refuses to assign anonymously: %s", async (_label, request) => {
+      await expect(
+        controller.testAssignEpisode(
+          "ep1",
+          { deviceId: "dev-1001", reason: "测试环境验收这一集" } as never,
+          request as never,
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(testAssign.assign).not.toHaveBeenCalled();
+    });
+  });
+
   it("resolveContentAdminProfile stays fail-safe for the controller too", () => {
     const configService = { get: () => undefined } as unknown as ConfigService;
 
     expect(resolveContentAdminProfile(configService)).toBe("readonly");
+  });
+
+  it("auditFilter 拿到 falsy DTO（管线之后的防御路径）→ 空筛选，不崩", () => {
+    const filter = (
+      controller as unknown as {
+        auditFilter(dto: unknown): Record<string, unknown>;
+      }
+    ).auditFilter(undefined);
+    expect(filter).toEqual({});
   });
 });

@@ -11,6 +11,7 @@ import { ConversationSessionService } from "./../src/modules/vendor/conversation
 import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service";
 import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
+import { SleepModeService } from "./../src/modules/sleep-configs/sleep-mode.service";
 import { PROMPT_REGISTRY_PROVIDER } from "./../src/modules/prompt-registry/prompt-registry.testing";
 
 const extraction = (value: string, operation = "assert", evidence: string) =>
@@ -199,6 +200,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
         {
           provide: SleepVoiceConfigService,
           useValue: { handle: jest.fn() },
+        },
+        {
+          provide: SleepModeService,
+          useValue: { enter: jest.fn(), exit: jest.fn() },
         },
         // prompt 注册表：DB 恒空的替身，全部 prompt 走代码默认值，
         // 即聚合重构前各 service 内硬编码字面量的行为

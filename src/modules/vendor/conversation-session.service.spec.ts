@@ -1,7 +1,13 @@
 import { Test, TestingModule } from "@nestjs/testing";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
+import {
+  SLEEP_TEST_MODE_ENV,
+  SLEEP_TEST_MODE_TRIGGER,
+  SleepModeService,
+} from "@/modules/sleep-configs/sleep-mode.service";
 import { ConversationSessionService } from "./conversation-session.service";
 import {
   PROMPT_REGISTRY_PROVIDER,
@@ -30,6 +36,8 @@ describe("ConversationSessionService", () => {
   let prisma: PrismaMock;
   let llmService: jest.Mocked<LlmService>;
   let sleepConfigs: SleepConfigsMock;
+  let sleepMode: { enter: jest.Mock; exit: jest.Mock };
+  let configValues: Record<string, string | undefined>;
 
   const activeSession = (
     currentMode: "english_story" | "idiom_story" | "sleep_story",
@@ -65,6 +73,8 @@ describe("ConversationSessionService", () => {
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(now);
+    configValues = {};
+    sleepMode = { enter: jest.fn(), exit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PROMPT_REGISTRY_PROVIDER,
@@ -93,6 +103,11 @@ describe("ConversationSessionService", () => {
             getByDeviceId: jest.fn().mockResolvedValue(sleepConfig()),
           },
         },
+        {
+          provide: ConfigService,
+          useValue: { get: (key: string) => configValues[key] },
+        },
+        { provide: SleepModeService, useValue: sleepMode },
       ],
     }).compile();
 
@@ -329,6 +344,8 @@ describe("ConversationSessionService", () => {
       llmService,
       sleepConfigs as unknown as SleepConfigsService,
       makePromptRegistry(),
+      { get: (key: string) => configValues[key] } as unknown as ConfigService,
+      sleepMode as unknown as SleepModeService,
     );
 
     await expect(
@@ -502,6 +519,26 @@ describe("ConversationSessionService", () => {
       expect(llmService.complete).not.toHaveBeenCalled();
     });
 
+    // 词表与冒险引擎共用 ADVENTURE_EXIT_KEYWORDS：这里锁「引擎侧原有的拒绝词
+    // 会话层也认」（旧正则缺「不想玩」，孩子说这句会掉进模型分类）。
+    // 反方向由 adventure.service.spec.ts 的 shared keyword 用例锁住。
+    it.each(["我不想玩了", "不要玩了", "不想玩"])(
+      "explicit_exit：与冒险引擎共用退出词表（%s）",
+      async (word) => {
+        prisma.conversationSession.findUnique.mockResolvedValue(
+          activeSession("english_story"),
+        );
+
+        const decision = await service.resolveWithSource("device-1", word);
+
+        expect(decision).toEqual({
+          intent: "free_chat",
+          source: "explicit_exit",
+        });
+        expect(llmService.complete).not.toHaveBeenCalled();
+      },
+    );
+
     it("过期会话不参与粘滞：按模型重新判定", async () => {
       prisma.conversationSession.findUnique.mockResolvedValue(
         activeSession("english_story", new Date("2026-10-31T04:00:00.000Z")),
@@ -528,7 +565,7 @@ describe("ConversationSessionService", () => {
       expect(plain).toBe("sleep_config");
     });
 
-    it("八种 source 互不相同，可在看板上分桶", async () => {
+    it("九种 source 互不相同，可在看板上分桶", async () => {
       const sources = new Set<string>();
 
       mockModel("free_chat");
@@ -566,6 +603,11 @@ describe("ConversationSessionService", () => {
       mockModel("sleep_story");
       sources.add((await service.resolveWithSource("d", "我困了")).source);
 
+      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
+      sources.add(
+        (await service.resolveWithSource("d", SLEEP_TEST_MODE_TRIGGER)).source,
+      );
+
       expect(sources).toEqual(
         new Set([
           "model",
@@ -576,6 +618,7 @@ describe("ConversationSessionService", () => {
           "explicit_exit",
           "force_sleep",
           "sleep_window_closed",
+          "test_sleep",
         ]),
       );
     });
@@ -938,6 +981,87 @@ describe("ConversationSessionService", () => {
       expect(systemPrompt).toContain("困意");
       expect(systemPrompt).toContain("Elly困了嘛");
       expect(systemPrompt).toContain("时段门禁");
+    });
+  });
+
+  describe("测试哄睡模式触发词（仅 staging）", () => {
+    it("开关开启 + 触发词命中 → 直接 sleep_story（test_sleep），不调模型", async () => {
+      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
+
+      await expect(
+        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
+      ).resolves.toEqual({ intent: "sleep_story", source: "test_sleep" });
+
+      expect(llmService.complete).not.toHaveBeenCalled();
+    });
+
+    it("开关未开启 → 触发词不特殊处理，走正常分类", async () => {
+      llmService.complete.mockResolvedValue({
+        text: "sleep_story",
+      } as Awaited<ReturnType<LlmService["complete"]>>);
+
+      await expect(
+        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
+      ).resolves.toEqual({ intent: "sleep_story", source: "model" });
+    });
+
+    it("开关开启但非触发词 → 走正常分类", async () => {
+      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
+      llmService.complete.mockResolvedValue({
+        text: "free_chat",
+      } as Awaited<ReturnType<LlmService["complete"]>>);
+
+      await expect(
+        service.resolveWithSource("device-1", "我困了"),
+      ).resolves.toEqual({ intent: "free_chat", source: "model" });
+    });
+  });
+
+  describe("退出哄睡恢复音速/音量", () => {
+    it("从 sleep_story 显式退出 → 调 sleepMode.exit", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+
+      await service.resolveWithSource("device-1", "退出");
+
+      expect(sleepMode.exit).toHaveBeenCalledWith("device-1");
+    });
+
+    it("从 sleep_story 切到其他故事意图 → 调 sleepMode.exit", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+      llmService.complete.mockResolvedValue({
+        text: "english_story",
+      } as Awaited<ReturnType<LlmService["complete"]>>);
+
+      await service.resolveWithSource("device-1", "我想听英语故事");
+
+      expect(sleepMode.exit).toHaveBeenCalledWith("device-1");
+    });
+
+    it("sleep_story 会话内续听 → 不调 sleepMode.exit", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+
+      await service.resolveWithSource("device-1", "继续讲");
+
+      expect(sleepMode.exit).not.toHaveBeenCalled();
+    });
+
+    it("sleep_story 会话内闲聊（session_sticky）→ 不调 sleepMode.exit", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+      llmService.complete.mockResolvedValue({
+        text: "free_chat",
+      } as Awaited<ReturnType<LlmService["complete"]>>);
+
+      await service.resolveWithSource("device-1", "我喜欢这个故事");
+
+      expect(sleepMode.exit).not.toHaveBeenCalled();
     });
   });
 });
