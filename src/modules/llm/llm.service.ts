@@ -16,6 +16,7 @@ export const LLM_SCENES = [
   "intent_classify",
   "filler",
   "adventure_interaction",
+  "adventure_script_convert",
   "memory_extract",
   "sleep_config_extract",
   "sleep_story_generate",

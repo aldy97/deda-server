@@ -55,6 +55,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "ioredis": "^5.4.0",
+    "mammoth": "^1.13.0",
     "mqtt": "^5.16.0",
     "nestjs-pino": "^4.1.0",
     "passport": "^0.7.0",

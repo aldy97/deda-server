@@ -40,6 +40,7 @@ import {
   ImportOptions,
 } from "./adventure-transfer.service";
 import { AdventureTestAssignService } from "./adventure-test-assign.service";
+import { AdventureScriptImportService } from "./adventure-script-import.service";
 import { ADVENTURE_SEASON, EpisodeIdentity } from "./adventure-content.types";
 import { resolveContentAdminProfile } from "./content-admin-profile";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
@@ -58,9 +59,11 @@ import {
   ImportPreviewDto,
   LintDto,
   MutationDto,
+  NextEpisodeNumberQueryDto,
   PublishDto,
   RevertDto,
   SaveDraftDto,
+  ScriptConvertDto,
   SimulateDto,
   TestAssignDto,
   VersionDiffQueryDto,
@@ -140,6 +143,7 @@ export class AdventureAdminController {
     private readonly configService: ConfigService,
     private readonly recovery: AdventureRecoveryService,
     private readonly testAssign: AdventureTestAssignService,
+    private readonly scriptImport: AdventureScriptImportService,
   ) {}
 
   @Get("capabilities")
@@ -399,6 +403,36 @@ export class AdventureAdminController {
   })
   async simulate(@Body() dto: SimulateDto) {
     return this.query.simulate(this.identityOf(dto?.identity), dto.content);
+  }
+
+  @Post("script/convert")
+  @ApiOperation({
+    summary:
+      "把 docx 故事稿转成结构化草稿预览（不落库）。不标 @ContentReadOnly：只在 authoring（staging）开放",
+  })
+  async convertScript(@Body() dto: ScriptConvertDto) {
+    const buffer = Buffer.from(dto?.contentBase64 ?? "", "base64");
+    if (buffer.length === 0) {
+      throw new BadRequestException({
+        message: "contentBase64 缺失或为空。",
+        code: "SCRIPT_CONVERT_FAILED",
+      });
+    }
+    return this.scriptImport.convertDocx(buffer);
+  }
+
+  @Get("script/next-number")
+  @ApiOperation({
+    summary: "某 IP 下一集的自增集号（含已下架/已作废的集——业务键永久占用）",
+  })
+  async nextEpisodeNumber(@Query() dto: NextEpisodeNumberQueryDto) {
+    return {
+      characterKey: dto.characterKey,
+      season: ADVENTURE_SEASON,
+      episodeNumber: await this.scriptImport.nextEpisodeNumber(
+        dto.characterKey,
+      ),
+    };
   }
 
   @Get("audit")

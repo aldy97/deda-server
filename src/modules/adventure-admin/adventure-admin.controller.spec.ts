@@ -1,6 +1,11 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
-import { Logger, RequestMethod, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Logger,
+  RequestMethod,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureContentService } from "./adventure-content.service";
@@ -9,6 +14,7 @@ import { AdventureTransferService } from "./adventure-transfer.service";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureRecoveryService } from "@/modules/adventure/adventure-recovery.service";
 import { AdventureTestAssignService } from "./adventure-test-assign.service";
+import { AdventureScriptImportService } from "./adventure-script-import.service";
 import { ContentAdminExceptionFilter } from "./filters/content-admin-exception.filter";
 import {
   CONTENT_READ_ONLY_METADATA_KEY,
@@ -150,6 +156,18 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     readOnlyExempt: true,
   },
   {
+    handler: "convertScript",
+    method: RequestMethod.POST,
+    path: "script/convert",
+    readOnlyExempt: false,
+  },
+  {
+    handler: "nextEpisodeNumber",
+    method: RequestMethod.GET,
+    path: "script/next-number",
+    readOnlyExempt: false,
+  },
+  {
     handler: "listAudit",
     method: RequestMethod.GET,
     path: "audit",
@@ -264,6 +282,7 @@ describe("AdventureAdminController", () => {
   let audit: Record<string, jest.Mock>;
   let recovery: Record<string, jest.Mock>;
   let testAssign: Record<string, jest.Mock>;
+  let scriptImport: Record<string, jest.Mock>;
   let profile: string;
 
   beforeEach(async () => {
@@ -306,6 +325,10 @@ describe("AdventureAdminController", () => {
       assign: jest.fn(),
       clear: jest.fn(),
     };
+    scriptImport = {
+      convertDocx: jest.fn(),
+      nextEpisodeNumber: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdventureAdminController],
@@ -316,6 +339,7 @@ describe("AdventureAdminController", () => {
         { provide: AdventureAuditService, useValue: audit },
         { provide: AdventureRecoveryService, useValue: recovery },
         { provide: AdventureTestAssignService, useValue: testAssign },
+        { provide: AdventureScriptImportService, useValue: scriptImport },
         {
           provide: ConfigService,
           useValue: {
@@ -538,6 +562,39 @@ describe("AdventureAdminController", () => {
       await controller.listAudit({ from: "not-a-date" } as never);
 
       expect(audit.list).toHaveBeenCalledWith({});
+    });
+  });
+
+  describe("script import routes", () => {
+    it("convertScript decodes base64 and forwards the buffer to the service", async () => {
+      scriptImport.convertDocx.mockResolvedValue({ characterKey: "elly" });
+      const base64 = Buffer.from("fake docx").toString("base64");
+
+      await controller.convertScript({ contentBase64: base64 } as never);
+
+      expect(scriptImport.convertDocx).toHaveBeenCalledWith(
+        Buffer.from("fake docx"),
+      );
+    });
+
+    it("convertScript rejects a missing or empty base64 body", async () => {
+      await expect(
+        controller.convertScript({ contentBase64: "" } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(scriptImport.convertDocx).not.toHaveBeenCalled();
+    });
+
+    it("nextEpisodeNumber forwards the character key and pins the season", async () => {
+      scriptImport.nextEpisodeNumber.mockResolvedValue(5);
+
+      await expect(
+        controller.nextEpisodeNumber({ characterKey: "polly" } as never),
+      ).resolves.toEqual({
+        characterKey: "polly",
+        season: 1,
+        episodeNumber: 5,
+      });
+      expect(scriptImport.nextEpisodeNumber).toHaveBeenCalledWith("polly");
     });
   });
 
