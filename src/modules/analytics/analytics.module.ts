@@ -48,6 +48,7 @@ import { VoiceSpeedAdminService } from "./voice-speed-admin.service";
 import { VoiceTimbreAdminController } from "./voice-timbre-admin.controller";
 import { VoiceTimbreAdminService } from "./voice-timbre-admin.service";
 import { AnalyticsMetaController } from "./analytics-meta.controller";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { DeviceLinkModule } from "../device-link/device-link.module";
 import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
 
@@ -76,6 +77,7 @@ import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
   ],
   providers: [
     FleetService,
+    SuperAdminGuard,
     {
       provide: ANALYTICS_JWT_SERVICE,
       inject: [ConfigService],

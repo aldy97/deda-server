@@ -1,5 +1,7 @@
 import { VoiceTimbreAdminController } from "./voice-timbre-admin.controller";
 import { VoiceTimbreAdminService } from "./voice-timbre-admin.service";
+import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 
 describe("VoiceTimbreAdminController", () => {
   let controller: VoiceTimbreAdminController;
@@ -25,6 +27,16 @@ describe("VoiceTimbreAdminController", () => {
   it("delegates list", async () => {
     await controller.list();
     expect(service.list).toHaveBeenCalled();
+  });
+
+  it("整组挂在 SuperAdminGuard 之下（音色也是全局设备行为）", () => {
+    const guards = Reflect.getMetadata(
+      "__guards__",
+      VoiceTimbreAdminController,
+    ) as unknown[];
+
+    expect(guards).toContain(SuperAdminGuard);
+    expect(guards).not.toContain(AnalyticsAuthGuard);
   });
 
   it("delegates create", async () => {

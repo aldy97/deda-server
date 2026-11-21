@@ -48,6 +48,7 @@ import {
   ContentAdminGuard,
   ContentReadOnly,
 } from "./guards/content-admin.guard";
+import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
 import {
   AuditListQueryDto,
   ChoiceStatsQueryDto,
@@ -129,7 +130,7 @@ function summarizeSweep(report: SweepReport) {
 
 @ApiTags("analytics-adventure-admin")
 @ApiBearerAuth()
-@UseGuards(ContentAdminGuard)
+@UseGuards(SuperAdminGuard, ContentAdminGuard)
 @UseFilters(ContentAdminExceptionFilter)
 @Controller("analytics/adventure-admin")
 export class AdventureAdminController {

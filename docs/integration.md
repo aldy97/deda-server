@@ -312,7 +312,8 @@
 ## Prompt 管理（dashboard 后台编辑）
 
 - 机制：全部系统 prompt / 规则段 / 话术模板集中在 prompt registry（17 个 key），运行时按「DB published → 代码默认值 → 抛错」回落；首次上线行为零变化。详见 `docs/prompt-registry.md`。
-- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）与写策略；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）、写策略与 `admin.role`；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- 权限：`/analytics/prompts*`、`/analytics/llm/*`、`/analytics/voice-speed`、`/analytics/adventure-admin/*`、`POST /analytics/devices/:deviceId/wipe` 全部要求 `role === "superadmin"`（`SuperAdminGuard`）；普通 admin 只读报表。`/analytics/meta` 例外，只挂基础闸。
 - 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
 - 边界：原「子模式模板」归 `conversation_modes.promptTemplate`；该表已随 mode 平级化迁移 `20261113141812_remove_conversation_mode_key` 删除，子模式模板概念一并废弃，可运营编辑的 prompt 文本现在只有 prompt registry 一个入口。儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
 

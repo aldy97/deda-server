@@ -20,6 +20,7 @@ import {
   CONTENT_READ_ONLY_METADATA_KEY,
   ContentAdminGuard,
 } from "./guards/content-admin.guard";
+import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
 import {
   CONTENT_ADMIN_SCOPE,
   resolveContentAdminProfile,
@@ -364,6 +365,17 @@ describe("AdventureAdminController", () => {
       expect(
         Reflect.getMetadata("__guards__", AdventureAdminController),
       ).toContain(ContentAdminGuard);
+    });
+
+    /**
+     * 冒险内容整体进运维组之后，仅有 ContentAdminGuard 不够：它允许
+     * adventure-content scope（历史口径）。SuperAdminGuard 才是「一律 superadmin」
+     * 的判据，两道闸必须同时在。
+     */
+    it("also requires SuperAdminGuard so legacy content scopes alone are not enough", () => {
+      expect(
+        Reflect.getMetadata("__guards__", AdventureAdminController),
+      ).toContain(SuperAdminGuard);
     });
 
     /**
