@@ -51,6 +51,10 @@ describe("SleepModeService", () => {
     service = module.get(SleepModeService);
   });
 
+  it("exposes the sleep-mode speed constant as 0.5", () => {
+    expect(SLEEP_MODE_SPEED).toBe(0.5);
+  });
+
   describe("enter", () => {
     it("快照当前音量并把音量压到 50 上限（当前 80 → 快照 80 + 下发 50）", async () => {
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
@@ -91,7 +95,7 @@ describe("SleepModeService", () => {
       expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 50);
     });
 
-    it("有音色时切音速到 0.7", async () => {
+    it("有音色时切音速到 0.5", async () => {
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
       voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
 

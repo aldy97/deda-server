@@ -155,7 +155,7 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     // 无条件覆写会话：孩子后续接话留在哄睡模式（45 分钟 TTL）
     await this.conversationSessionService.activateSleepMode(config.device.id);
-    // 进入哄睡：音量压到 min(当前, 50)、语速切到 0.7（编排失败不中断定时进入）
+    // 进入哄睡：音量压到 min(当前, 50)、语速切到 0.5（编排失败不中断定时进入）
     await this.sleepMode.enter(config.device.id);
   }
 
