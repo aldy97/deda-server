@@ -543,7 +543,7 @@ GET /analytics/prompts
       deviatesFromDefault } ]
 ```
 
-- 恒返回全部 17 个 key：catalog 以代码 `PROMPT_DEFAULTS` 为准，与 DB 是否已有行无关。
+- 恒返回全部内置 key（`PROMPT_KEYS`，18 个），并追加 `character_timbre` 里已注册角色派生的动态人设行（`persona_<key>`）；catalog 以代码默认值 + DB 为准，与是否已有模板行无关。动态行 `isDynamic=true`、`defaultContent=null`、`source` 为 `none`（未发布）或 `db`。
 - `source`：`"db"` = 生效值来自已发布版本；`"default"` = 回落代码默认值。
 - `effectiveContent` 是**运行时真正生效**的正文；`deviatesFromDefault=true` 表示它
   与 `defaultContent` 不一致（dashboard 标「已偏离默认」）。

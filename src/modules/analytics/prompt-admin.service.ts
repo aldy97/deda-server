@@ -16,6 +16,9 @@ import {
   PROMPT_DEFAULTS,
 } from "@/modules/prompt-registry/prompt-defaults";
 import {
+  characterKeyFromPersonaKey,
+  isBuiltinPromptKey,
+  personaKeyFor,
   PROMPT_KEYS,
   type PromptCategory,
   type PromptKey,
@@ -43,7 +46,7 @@ export interface PromptAuthor {
 
 /** catalog 行：dashboard 列表页直接渲染，无需二次请求 */
 export interface PromptCatalogItem {
-  key: PromptKey;
+  key: string;
   category: PromptCategory;
   scene: LlmScene | null;
   name: string;
@@ -51,15 +54,22 @@ export interface PromptCatalogItem {
   /** 变量契约。代码是唯一真相，这里给 dashboard 展示与前端校验用 */
   variables: PromptVariableSpec[];
   maxChars: number;
-  defaultContent: string;
-  /** 运行时真正生效的正文（DB published，无则代码默认值） */
+  /** 内置 key 的代码默认值；动态角色人设没有默认值，为 null */
+  defaultContent: string | null;
+  /** 运行时真正生效的正文（DB published，无则代码默认值；动态人设未发布为空串） */
   effectiveContent: string;
   source: PromptSource;
+  /** true = 由 character_timbre 派生 / 后台创建的角色人设，不在 PROMPT_KEYS 内 */
+  isDynamic: boolean;
+  /** 动态人设关联的角色 key；内置 key 为 null */
+  characterKey: string | null;
+  /** 动态人设：该角色是否仍在 character_timbre；内置 key 为 null */
+  characterRegistered: boolean | null;
   publishedRevision: number | null;
   draftRevision: number | null;
   publishedAt: string | null;
   publishedBy: string | null;
-  /** 生效正文与代码默认值不一致 → dashboard 标「已偏离默认」 */
+  /** 生效正文与代码默认值不一致 → dashboard 标「已偏离默认」（动态人设恒 false） */
   deviatesFromDefault: boolean;
 }
 
@@ -84,6 +94,12 @@ export interface PromptVersionItem {
 }
 
 type Tx = Prisma.TransactionClient;
+
+interface ResolvedPromptKey {
+  key: string;
+  /** 动态角色人设关联的 characterKey；内置 key 为 null */
+  characterKey: string | null;
+}
 
 /**
  * Prompt 后台管理：dashboard 的 view / edit / publish 全部走这里。
@@ -128,27 +144,77 @@ export class PromptAdminService {
     return raw?.trim().toLowerCase() !== "false";
   }
 
+  /**
+   * catalog = 内置 PROMPT_KEYS（顺序固定）∪ 动态角色人设。
+   *
+   * 动态人设来源有两个，合并去重：
+   * 1. character_timbre 里已注册的角色（即使还没写过人设，也要出现一行，
+   *    这样「新增角色」后 Prompt 管理立刻能看到「角色人设：xxx」）；
+   * 2. 已存在的 persona_<key> 模板行（角色后来被删但人设仍在，标记为未注册）。
+   */
   async list(): Promise<PromptCatalogItem[]> {
     // 先同步一次注册表：admin 看到的「当前生效」必须与运行时一致，
     // 不能是最长 60s 前的缓存快照
     await this.promptRegistry.reload();
-    const rows = await this.prisma.promptTemplate.findMany({
-      where: { key: { in: [...PROMPT_KEYS] } },
-    });
+    const [rows, characters] = await Promise.all([
+      this.prisma.promptTemplate.findMany({
+        where: {
+          OR: [{ key: { in: [...PROMPT_KEYS] } }, { category: "persona" }],
+        },
+      }),
+      this.prisma.characterTimbre.findMany({
+        select: { characterKey: true },
+        orderBy: { characterKey: "asc" },
+      }),
+    ]);
     const byKey = new Map(rows.map((row) => [row.key, row]));
-    return PROMPT_KEYS.map((key) =>
-      this.toCatalogItem(key, byKey.get(key) ?? null),
-    );
+    const registered = new Set(characters.map((row) => row.characterKey));
+
+    const dynamicKeys = new Set<string>();
+    for (const characterKey of registered) {
+      const key = personaKeyFor(characterKey);
+      // elly/polly 是内置 key，静态 catalog 已覆盖，不能重复出现
+      if (!isBuiltinPromptKey(key)) dynamicKeys.add(key);
+    }
+    for (const row of rows) {
+      const characterKey = characterKeyFromPersonaKey(row.key);
+      if (characterKey !== null && !isBuiltinPromptKey(row.key)) {
+        dynamicKeys.add(row.key);
+      }
+    }
+
+    const dynamicItems = [...dynamicKeys]
+      .sort((a, b) => {
+        const ca = characterKeyFromPersonaKey(a) ?? a;
+        const cb = characterKeyFromPersonaKey(b) ?? b;
+        return ca.localeCompare(cb);
+      })
+      .map((key) => {
+        const characterKey = characterKeyFromPersonaKey(key) ?? key;
+        return this.toDynamicCatalogItem(
+          key,
+          characterKey,
+          byKey.get(key) ?? null,
+          registered.has(characterKey),
+        );
+      });
+
+    return [
+      ...PROMPT_KEYS.map((key) =>
+        this.toCatalogItem(key, byKey.get(key) ?? null),
+      ),
+      ...dynamicItems,
+    ];
   }
 
   async get(key: string): Promise<PromptDetail> {
-    const promptKey = this.assertKnownKey(key);
+    const { key: promptKey } = await this.resolveKey(key);
     await this.promptRegistry.reload();
     return this.buildDetail(promptKey);
   }
 
   async listVersions(key: string): Promise<PromptVersionItem[]> {
-    const promptKey = this.assertKnownKey(key);
+    const { key: promptKey } = await this.resolveKey(key);
     const row = await this.prisma.promptTemplate.findUnique({
       where: { key: promptKey },
     });
@@ -183,10 +249,11 @@ export class PromptAdminService {
     author: PromptAuthor,
   ): Promise<PromptDetail> {
     this.assertWritable();
-    const promptKey = this.assertKnownKey(key);
+    const resolved = await this.resolveKey(key);
+    const promptKey = resolved.key;
 
     await this.prisma.$transaction(async (tx) => {
-      const row = await this.ensureRow(tx, promptKey);
+      const row = await this.ensureRow(tx, resolved);
       const current = row.draftRevision ?? 0;
       if (current !== dto.expectedRevision) {
         throw new ConflictException(
@@ -236,7 +303,7 @@ export class PromptAdminService {
   ): Promise<PromptDetail> {
     this.assertWritable();
     this.assertConfirmCode(dto.confirmCode);
-    const promptKey = this.assertKnownKey(key);
+    const { key: promptKey } = await this.resolveKey(key);
 
     await this.prisma.$transaction(async (tx) => {
       const row = await tx.promptTemplate.findUnique({
@@ -285,7 +352,7 @@ export class PromptAdminService {
   ): Promise<PromptDetail> {
     this.assertWritable();
     this.assertConfirmCode(dto.confirmCode);
-    const promptKey = this.assertKnownKey(key);
+    const { key: promptKey } = await this.resolveKey(key);
     let discardedDraftRevision: number | null = null;
 
     await this.prisma.$transaction(async (tx) => {
@@ -351,10 +418,16 @@ export class PromptAdminService {
   ): Promise<PromptDetail> {
     this.assertWritable();
     this.assertConfirmCode(dto.confirmCode);
-    const promptKey = this.assertKnownKey(key);
+    const resolved = await this.resolveKey(key);
+    if (resolved.characterKey !== null) {
+      throw new BadRequestException(
+        "动态角色人设没有代码默认值，无法恢复默认；请从历史版本回滚",
+      );
+    }
+    const promptKey = resolved.key;
 
     await this.prisma.$transaction(async (tx) => {
-      const row = await this.ensureRow(tx, promptKey);
+      const row = await this.ensureRow(tx, resolved);
       const revision = await this.nextRevision(tx, row.id);
       const publishedAt = new Date();
       await tx.promptTemplateVersion.create({
@@ -393,7 +466,7 @@ export class PromptAdminService {
    * 等于刚发布的新 prompt 有一个窗口期不生效（对安全分类器尤其不可接受）。
    * reload 是「读到新数据后整体替换」，切换是原子的。
    */
-  private async refreshRegistry(key: PromptKey, action: string): Promise<void> {
+  private async refreshRegistry(key: string, action: string): Promise<void> {
     try {
       await this.promptRegistry.reload();
     } catch (error) {
@@ -430,29 +503,66 @@ export class PromptAdminService {
     }
   }
 
-  private assertKnownKey(key: string): PromptKey {
-    if (!(PROMPT_KEYS as readonly string[]).includes(key)) {
-      throw new NotFoundException(`未知的 prompt key：${key}`);
+  /**
+   * 校验并解析 key。
+   *
+   * - 内置 key 直接通过；
+   * - `persona_<characterKey>` 需要通过「角色已在 character_timbre 注册」
+   *   或「已存在该模板行（角色被删后仍可维护历史人设）」二者之一；
+   * - 其余一律 404。动态人设不允许凭空创建（避免拼错角色名造出孤儿模板）。
+   */
+  private async resolveKey(key: string): Promise<ResolvedPromptKey> {
+    if (isBuiltinPromptKey(key)) {
+      return { key, characterKey: null };
     }
-    return key as PromptKey;
+
+    const characterKey = characterKeyFromPersonaKey(key);
+    if (characterKey !== null) {
+      const [timbre, row] = await Promise.all([
+        this.prisma.characterTimbre.findUnique({ where: { characterKey } }),
+        this.prisma.promptTemplate.findUnique({ where: { key } }),
+      ]);
+      if (timbre || row) {
+        return { key, characterKey };
+      }
+    }
+
+    throw new NotFoundException(`未知的 prompt key：${key}`);
   }
 
   /** 惰性建行；两个 admin 同时首次编辑时靠 P2002 重试收敛到同一行 */
-  private async ensureRow(tx: Tx, key: PromptKey): Promise<PromptTemplate> {
+  private async ensureRow(
+    tx: Tx,
+    resolved: ResolvedPromptKey,
+  ): Promise<PromptTemplate> {
+    const { key, characterKey } = resolved;
     const existing = await tx.promptTemplate.findUnique({ where: { key } });
     if (existing) return existing;
-    const def = PROMPT_DEFAULTS[key];
+
+    const data =
+      characterKey === null
+        ? (() => {
+            const def = PROMPT_DEFAULTS[key as PromptKey];
+            return {
+              key,
+              category: def.category,
+              scene: def.scene,
+              name: def.name,
+              description: def.description,
+              renderSchema: def.variables as unknown as Prisma.InputJsonValue,
+            };
+          })()
+        : {
+            key,
+            category: "persona",
+            scene: null,
+            name: `角色人设：${characterKey}`,
+            description: `角色 ${characterKey} 的人设（后台创建，无代码默认值）。未发布时运行时回落 Elly。`,
+            renderSchema: [] as unknown as Prisma.InputJsonValue,
+          };
+
     try {
-      return await tx.promptTemplate.create({
-        data: {
-          key,
-          category: def.category,
-          scene: def.scene,
-          name: def.name,
-          description: def.description,
-          renderSchema: def.variables as unknown as Prisma.InputJsonValue,
-        },
-      });
+      return await tx.promptTemplate.create({ data });
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -491,6 +601,9 @@ export class PromptAdminService {
       defaultContent: def.template,
       effectiveContent: resolved.content,
       source: resolved.source,
+      isDynamic: false,
+      characterKey: null,
+      characterRegistered: null,
       publishedRevision: row?.publishedRevision ?? null,
       draftRevision: row?.draftRevision ?? null,
       publishedAt: row?.publishedAt ? row.publishedAt.toISOString() : null,
@@ -499,7 +612,36 @@ export class PromptAdminService {
     };
   }
 
-  private async buildDetail(key: PromptKey): Promise<PromptDetail> {
+  private toDynamicCatalogItem(
+    key: string,
+    characterKey: string,
+    row: PromptTemplate | null,
+    characterRegistered: boolean,
+  ): PromptCatalogItem {
+    const dynamic = this.promptRegistry.getDynamicPersona(characterKey);
+    return {
+      key,
+      category: "persona",
+      scene: null,
+      name: `角色人设：${characterKey}`,
+      description: `角色 ${characterKey} 的人设（后台创建，无代码默认值）。未发布时运行时回落 Elly。`,
+      variables: [],
+      maxChars: PROMPT_CONTENT_MAX_CHARS,
+      defaultContent: null,
+      effectiveContent: dynamic?.content ?? "",
+      source: dynamic ? "db" : "none",
+      isDynamic: true,
+      characterKey,
+      characterRegistered,
+      publishedRevision: row?.publishedRevision ?? null,
+      draftRevision: row?.draftRevision ?? null,
+      publishedAt: row?.publishedAt ? row.publishedAt.toISOString() : null,
+      publishedBy: row?.publishedBy ?? null,
+      deviatesFromDefault: false,
+    };
+  }
+
+  private async buildDetail(key: string): Promise<PromptDetail> {
     const row = await this.prisma.promptTemplate.findUnique({ where: { key } });
     let draftContent: string | null = null;
     let draftChangeNote: string | null = null;
@@ -529,8 +671,20 @@ export class PromptAdminService {
       publishedContent = published?.content ?? null;
     }
 
+    const characterKey = characterKeyFromPersonaKey(key);
+    let base: PromptCatalogItem;
+    if (characterKey !== null && !isBuiltinPromptKey(key)) {
+      const timbre = await this.prisma.characterTimbre.findUnique({
+        where: { characterKey },
+        select: { characterKey: true },
+      });
+      base = this.toDynamicCatalogItem(key, characterKey, row, timbre !== null);
+    } else {
+      base = this.toCatalogItem(key as PromptKey, row);
+    }
+
     return {
-      ...this.toCatalogItem(key, row),
+      ...base,
       draftContent,
       draftChangeNote,
       publishedContent,

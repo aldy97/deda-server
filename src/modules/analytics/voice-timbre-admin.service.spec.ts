@@ -3,6 +3,7 @@ import { ConflictException, NotFoundException } from "@nestjs/common";
 import { VoiceTimbreAdminService } from "./voice-timbre-admin.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { CHARACTER_TIMBRE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 
 const prismaError = (code: string) => Object.assign(new Error(code), { code });
 
@@ -24,6 +25,7 @@ describe("VoiceTimbreAdminService", () => {
     invalidate: jest.Mock;
     reload: jest.Mock;
   };
+  let promptRegistry: { reload: jest.Mock; hasPersona: jest.Mock };
 
   const moduleFor = async () => {
     const module = await Test.createTestingModule({
@@ -31,6 +33,7 @@ describe("VoiceTimbreAdminService", () => {
         VoiceTimbreAdminService,
         { provide: PrismaService, useValue: prisma },
         { provide: CHARACTER_TIMBRE_PORT, useValue: cache },
+        { provide: PromptRegistryService, useValue: promptRegistry },
       ],
     }).compile();
     return module.get(VoiceTimbreAdminService);
@@ -55,6 +58,10 @@ describe("VoiceTimbreAdminService", () => {
       list: jest.fn().mockResolvedValue([]),
       invalidate: jest.fn(),
       reload: jest.fn().mockResolvedValue(undefined),
+    };
+    promptRegistry = {
+      reload: jest.fn().mockResolvedValue(undefined),
+      hasPersona: jest.fn().mockImplementation((key: string) => key === "elly"),
     };
     service = await moduleFor();
   });
