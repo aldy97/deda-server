@@ -174,7 +174,6 @@ export interface InterruptParams {
  * （start 追平）都只依赖契约、不依赖实现，避免模块间循环引用。
  */
 export const BAIDU_AGENT_CLIENT_PORT = "BAIDU_AGENT_CLIENT";
-
 export interface BaiduAgentClientPort {
   /** BAIDU_AGENT_ENABLED 是否为 true */
   readonly enabled: boolean;
@@ -202,6 +201,23 @@ export interface VoiceCatalogPort {
   listForLang(lang: string | undefined): VoiceCatalogEntry[];
   find(timbreId: string, lang?: string): VoiceCatalogEntry | null;
   readonly available: boolean;
+}
+
+/**
+ * IP/角色 → timbreId 映射端口。
+ *
+ * 读路径（getvalue）走内存缓存，热路径零 DB；管理端写后 invalidate。
+ * 数据源是 character_timbre 表，CHARACTER_TIMBRE_JSON 仅保留给旧镜像回滚。
+ */
+export const CHARACTER_TIMBRE_PORT = "CHARACTER_TIMBRE";
+
+export interface CharacterTimbrePort {
+  /** 查表；null/空 key 或未命中返回 null，永不抛错 */
+  get(characterKey: string | null): Promise<string | null>;
+  /** 写操作后调用，下一次读强制回源 */
+  invalidate(): void;
+  /** 立即回源（启动/测试用），失败时保留旧值 */
+  reload(): Promise<void>;
 }
 
 /** 设备当前期望的音色/语速（App 落库值） */
@@ -243,7 +259,7 @@ export interface VoiceReconcilePort {
     deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
   /**
-   * IP/角色 → timbreId 权威映射查表；纯读配置，不出网、不查库、永不抛错。
+   * IP/角色 → timbreId 权威映射查表；纯读，不出网、永不抛错。
    *
    * 用途是让服务端知道「某个 IP 对应哪个音色」，两个消费方：
    * 1. 设备端协议 v1.4（2026-11-18）新增的 POST /client/bot/bot/getvalue——固件每轮
@@ -252,10 +268,13 @@ export interface VoiceReconcilePort {
    * 2. 剧情内按角色切换音色：冒险故事里非本机芯 IP 的角色说话时用该角色
    *    自己的音色，故事结束后再切回本 IP 的音色。
    *
+   * 数据源自 2026-11-21 起为 DB 表 character_timbre（管理端 /analytics/voice-timbres），
+   * 不再是 CHARACTER_TIMBRE_JSON。缓存故障时回落上次成功值。
+   *
    * @param characterKey Device.characterKey（elly / polly）；null 或空串返回 null
-   * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
+   * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中）
    */
-  getTimbreForCharacter(characterKey: string | null): string | null;
+  getTimbreForCharacter(characterKey: string | null): Promise<string | null>;
   /** 非哄睡语速倍数；DB 无行或越界时回落 DEFAULT_NORMAL_SPD */
   resolveNormalSpd(): Promise<number>;
   /** 哄睡语速倍数；DB 无行或越界时回落 DEFAULT_SLEEP_SPD */

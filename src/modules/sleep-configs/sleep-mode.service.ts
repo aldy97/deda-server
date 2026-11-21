@@ -77,7 +77,7 @@ export class SleepModeService {
       );
       this.deviceLink.setVolume(mac, target);
 
-      const vcn = this.voiceReconcile.getTimbreForCharacter(
+      const vcn = await this.voiceReconcile.getTimbreForCharacter(
         device.characterKey,
       );
       if (vcn) {
@@ -114,7 +114,7 @@ export class SleepModeService {
         }
       }
 
-      const vcn = this.voiceReconcile.getTimbreForCharacter(
+      const vcn = await this.voiceReconcile.getTimbreForCharacter(
         device.characterKey,
       );
       if (vcn) {

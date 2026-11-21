@@ -7,6 +7,10 @@ import { AppModule } from "../src/app.module";
 import { PrismaService } from "../src/common/prisma/prisma.service";
 import { ResponseInterceptor } from "../src/common/interceptors/response.interceptor";
 import { HttpExceptionFilter } from "../src/common/filters/http-exception.filter";
+import {
+  CHARACTER_TIMBRE_PORT,
+  type CharacterTimbrePort,
+} from "../src/modules/baidu-agent/baidu-agent.types";
 
 /**
  * client-api（机芯厂设备侧 HTTP）+ 配网认领链路 e2e。
@@ -20,8 +24,7 @@ const E2E_LLM_API_KEY = "e2e-llm-api-key";
 // 必须在 AppModule 编译前就位：ClientApiService 构造时读取
 process.env.DEVICE_LOGIN_MAC_KEY = E2E_MAC_KEY;
 process.env.LLM_ADAPTER_API_KEY = E2E_LLM_API_KEY;
-// getvalue（v1.4）契约用例的数据源：Device.characterKey 默认 elly
-process.env.CHARACTER_TIMBRE_JSON = JSON.stringify({ elly: "1000957" });
+// getvalue（v1.4）契约用例的数据源：character_timbre 表，在 beforeAll 内种子
 
 /** 与协议 3.1 节一致：md5_ascii(md5_utf8(macKey + mac).hexdigest()).hexdigest() */
 const loginPassword = (mac: string): string =>
@@ -61,6 +64,21 @@ describe("client-api + provision claim (e2e)", () => {
 
     prisma = moduleFixture.get(PrismaService);
     jwtService = moduleFixture.get(JwtService);
+
+    // 迁移已种子两行；这里 upsert 保证隔离库/重复运行都稳定，并刷新启动期缓存。
+    await prisma.characterTimbre.upsert({
+      where: { characterKey: "elly" },
+      update: { timbreId: "1000957" },
+      create: { characterKey: "elly", timbreId: "1000957" },
+    });
+    await prisma.characterTimbre.upsert({
+      where: { characterKey: "polly" },
+      update: { timbreId: "1001022" },
+      create: { characterKey: "polly", timbreId: "1001022" },
+    });
+    await moduleFixture
+      .get<CharacterTimbrePort>(CHARACTER_TIMBRE_PORT)
+      .reload();
   });
 
   beforeEach(async () => {
@@ -279,6 +297,23 @@ describe("client-api + provision claim (e2e)", () => {
 
       const response = await botGetValue(withSeparators).expect(200);
       expect(response.body.data.vcn).toBe("1000957");
+    });
+
+    it("returns the Polly timbre for a device whose characterKey is polly", async () => {
+      await loginMac().expect(200);
+      await prisma.device.update({
+        where: { deviceId: mac },
+        data: { characterKey: "polly" },
+      });
+
+      const response = await botGetValue().expect(200);
+
+      // 与 elly 用例同样严格：四字段一个不多一个不少，vol/spd 不受音色来源改造影响
+      expect(response.body).toEqual({
+        code: 200,
+        data: { vcn: "1001022", vol: 1, spd: 0.7, lang: "zh" },
+        msg: "success",
+      });
     });
 
     it("returns a non-200 for an id that never logged in", async () => {

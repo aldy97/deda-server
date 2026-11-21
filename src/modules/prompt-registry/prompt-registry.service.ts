@@ -1,7 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PROMPT_DEFAULTS } from "./prompt-defaults";
-import { PROMPT_KEYS, type PromptKey } from "./prompt-keys";
+import {
+  PERSONA_KEY_BY_CHARACTER,
+  PROMPT_KEYS,
+  type PromptKey,
+} from "./prompt-keys";
 import { PromptRenderError, renderPrompt } from "./prompt-render.util";
 
 export type PromptSource = "db" | "default";
@@ -19,11 +23,6 @@ const CACHE_TTL_MS = 60_000;
 
 /** DB 故障后的重试间隔：避免每轮对话都去撞一次挂掉的库 */
 const FAILURE_RETRY_MS = 5_000;
-
-const PERSONA_KEY_BY_CHARACTER: Record<string, PromptKey> = {
-  elly: "persona_elly",
-  polly: "persona_polly",
-};
 
 /** 未知/缺省 characterKey 一律回落 elly：杜绝匿名人设导致模型自编身份 */
 const DEFAULT_PERSONA_KEY: PromptKey = "persona_elly";

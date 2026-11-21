@@ -6,6 +6,7 @@ import { RedisService } from "@/common/redis/redis.service";
 import {
   VOICE_CATALOG_PORT,
   BAIDU_AGENT_CLIENT_PORT,
+  CHARACTER_TIMBRE_PORT,
   VOICE_PAYLOAD_KEY,
 } from "./baidu-agent.types";
 import { VoiceReconcileService } from "./voice-reconcile.service";
@@ -60,6 +61,7 @@ describe("VoiceReconcileService", () => {
     switchSceneRole: jest.Mock;
     interrupt: jest.Mock;
   };
+  let characterTimbre: { get: jest.Mock };
 
   const createService = async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -73,6 +75,7 @@ describe("VoiceReconcileService", () => {
         },
         { provide: VOICE_CATALOG_PORT, useValue: mockCatalog },
         { provide: BAIDU_AGENT_CLIENT_PORT, useValue: mockClient },
+        { provide: CHARACTER_TIMBRE_PORT, useValue: characterTimbre },
       ],
     }).compile();
     return module.get(VoiceReconcileService);
@@ -97,6 +100,7 @@ describe("VoiceReconcileService", () => {
       switchSceneRole: jest.fn().mockResolvedValue({ ok: true } as const),
       interrupt: jest.fn(),
     };
+    characterTimbre = { get: jest.fn().mockResolvedValue(null) };
 
     jest.clearAllMocks();
     service = await createService();
@@ -680,76 +684,40 @@ describe("VoiceReconcileService", () => {
   });
 
   // ==========================================================================
-  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表
+  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表（委托缓存端口）
   // ==========================================================================
   describe("getTimbreForCharacter", () => {
-    const rebuild = () => {
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
+    it("should delegate to the character timbre port for a known character", async () => {
+      characterTimbre.get.mockResolvedValue("1000957");
+
+      await expect(service.getTimbreForCharacter("elly")).resolves.toBe(
+        "1000957",
       );
-    };
-
-    it("should return the mapped timbreId for a known character", () => {
-      configValues = {
-        CHARACTER_TIMBRE_JSON: '{"elly":"1000063","polly":"1000064"}',
-      };
-      rebuild();
-
-      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
-      expect(service.getTimbreForCharacter("polly")).toBe("1000064");
+      expect(characterTimbre.get).toHaveBeenCalledWith("elly");
     });
 
-    it("should return null for an unmapped, null or empty character key", () => {
-      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
+    it("should short-circuit null and empty keys without touching the port", async () => {
+      await expect(service.getTimbreForCharacter(null)).resolves.toBeNull();
+      await expect(service.getTimbreForCharacter("")).resolves.toBeNull();
+      await expect(service.getTimbreForCharacter("   ")).resolves.toBeNull();
 
-      expect(service.getTimbreForCharacter("polly")).toBeNull();
-      expect(service.getTimbreForCharacter(null)).toBeNull();
-      expect(service.getTimbreForCharacter("")).toBeNull();
+      expect(characterTimbre.get).not.toHaveBeenCalled();
     });
 
-    it("should return null and never throw when unconfigured or malformed", () => {
-      configValues = {};
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
+    it("should return null when the port has no mapping", async () => {
+      characterTimbre.get.mockResolvedValue(null);
 
-      configValues = { CHARACTER_TIMBRE_JSON: "bad json" };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-
-      // 顶层不是对象：数组与标量都视为未配置，不猜
-      configValues = { CHARACTER_TIMBRE_JSON: '["1000063"]' };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-
-      configValues = { CHARACTER_TIMBRE_JSON: '"1000063"' };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
+      await expect(service.getTimbreForCharacter("nemo")).resolves.toBeNull();
     });
 
-    it("should accept a numeric timbreId and normalise it to a string", () => {
-      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":1000063}' };
-      rebuild();
+    it("should never throw when the port fails", async () => {
+      characterTimbre.get.mockRejectedValue(new Error("db down"));
+      const warn = jest.spyOn(service["logger"], "warn");
 
-      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
-    });
-
-    it("should skip empty and non-string entries without failing the map", () => {
-      configValues = {
-        CHARACTER_TIMBRE_JSON:
-          '{"elly":"","polly":null,"other":["x"],"flag":true,"ok":"1000063"}',
-      };
-      rebuild();
-
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-      expect(service.getTimbreForCharacter("polly")).toBeNull();
-      expect(service.getTimbreForCharacter("other")).toBeNull();
-      expect(service.getTimbreForCharacter("flag")).toBeNull();
-      expect(service.getTimbreForCharacter("ok")).toBe("1000063");
+      await expect(service.getTimbreForCharacter("elly")).resolves.toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("timbre lookup failed"),
+      );
     });
   });
 

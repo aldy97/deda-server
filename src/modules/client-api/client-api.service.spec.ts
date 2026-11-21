@@ -97,7 +97,7 @@ describe("ClientApiService", () => {
     voiceReconcile = {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
       readDesired: jest.fn().mockResolvedValue({ vcn: null, speechRate: null }),
-      getTimbreForCharacter: jest.fn().mockReturnValue("1000957"),
+      getTimbreForCharacter: jest.fn().mockResolvedValue("1000957"),
       resolveNormalSpd: jest.fn().mockResolvedValue(1.2),
       resolveSleepSpd: jest.fn().mockResolvedValue(0.5),
     };
@@ -495,7 +495,7 @@ describe("ClientApiService", () => {
     });
 
     it("rejects with 500 when the character has no timbreId configured", async () => {
-      voiceReconcile.getTimbreForCharacter.mockReturnValue(null);
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
 
       await expect(service.botGetValue(dto)).rejects.toBeInstanceOf(
         InternalServerErrorException,

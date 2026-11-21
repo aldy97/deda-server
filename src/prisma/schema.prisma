@@ -532,6 +532,17 @@ model VoiceSpeedConfig {
   @@map("voice_speed_config")
 }
 
+// IP/角色 → timbreId 权威映射（一个机芯一个 IP，一个 IP 一个专属音色）。
+// 管理端 /analytics/voice-timbres 增删改；getvalue 每轮读缓存，改后下一轮生效。
+// characterKey 归一化为小写（与 Device.characterKey 一致），timbreId 存字符串。
+model CharacterTimbre {
+  characterKey String   @id
+  timbreId     String
+  updatedAt    DateTime @updatedAt
+
+  @@map("character_timbre")
+}
+
 // LLM 调用日志（主模型 + 小模型全量），模型监控页数据源
 model LlmUsageLog {
   id               String   @id @default(uuid())

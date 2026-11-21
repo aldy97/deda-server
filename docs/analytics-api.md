@@ -614,6 +614,22 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 校验失败（非数字 / 越界 / 缺字段）→ 400。
 
+## 角色音色映射（admin）
+
+IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue` 每轮从内存缓存读取（启动预加载 + 60s TTL），管理端写后立即失效，下一轮生效，无需重启。prod 与 staging 同样可写（运维配置，非内容台）。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/analytics/voice-timbres` | `{ items: [{ characterKey, timbreId, updatedAt, personaConfigured, devicesInUse }] }` |
+| POST | `/analytics/voice-timbres` | body `{ characterKey, timbreId }`；重复 key → 409 |
+| PUT | `/analytics/voice-timbres/:characterKey` | body `{ timbreId }`；不存在 → 404 |
+| DELETE | `/analytics/voice-timbres/:characterKey?force=true` | 仍有设备在用且未带 `force=true` → 409，响应含 `devicesInUse` |
+
+- `characterKey` 归一化为小写，校验 `[a-z][a-z0-9_-]{1,31}`；`timbreId` 为 1–19 位数字字符串。
+- `personaConfigured=false` 表示该角色没有对应 `persona_<key>` 人设，对话会回落 elly；新增角色时界面必须提示。
+- 删除仍有设备在用的角色后，那些设备下一轮 `getvalue` 会 fail-closed 返回 500（不编兜底音色）。
+- 新增角色的完整流程（音色可自助、人设/冒险白名单/设备归属需发版或运维）见 `docs/voice-switching.md` §6。
+
 ## 冒险内容管理（Adventure Studio）
 
 > 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。
