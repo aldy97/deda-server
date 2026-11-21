@@ -45,20 +45,8 @@ export const botInstanceKey = (mac: string, instanceId: string): string =>
  */
 export const deviceNickname = (mac: string): string => `设备 ${mac.slice(-6)}`;
 
-/**
- * TTS 基础语速倍数。《设备端接口文档》v1.4 §4.2：「1.0为基础语速」，
- * 这是语速档位无法解析时唯一有书面依据的回落值。
- */
-export const TTS_BASE_SPD = 1;
-
 /** `TTS_DEFAULT_VOL` 未配置时采用的 TTS 合成音量倍数（v1.4 §4.2 的基础值） */
 export const DEFAULT_TTS_VOL = 1;
-
-/**
- * 设备未设置语速档位时采用的档位键。取 `SPEECH_RATES` 的中档，
- * 使「没有设置」与「显式选 normal」走同一条映射路径。
- */
-export const DEFAULT_SPEECH_RATE = "normal";
 
 /**
  * 解析 `TTS_DEFAULT_VOL`（getvalue 响应体 `vol` 的唯一来源，全局配置，不做每设备可调）。

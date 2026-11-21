@@ -22,11 +22,6 @@ process.env.DEVICE_LOGIN_MAC_KEY = E2E_MAC_KEY;
 process.env.LLM_ADAPTER_API_KEY = E2E_LLM_API_KEY;
 // getvalue（v1.4）契约用例的数据源：Device.characterKey 默认 elly
 process.env.CHARACTER_TIMBRE_JSON = JSON.stringify({ elly: "1000957" });
-process.env.SPEECH_RATE_MAP_JSON = JSON.stringify({
-  slow: 0.8,
-  normal: 1,
-  fast: 1.3,
-});
 
 /** 与协议 3.1 节一致：md5_ascii(md5_utf8(macKey + mac).hexdigest()).hexdigest() */
 const loginPassword = (mac: string): string =>
@@ -272,7 +267,7 @@ describe("client-api + provision claim (e2e)", () => {
       // 严格 toEqual：多一个或少一个字段都算契约漂移
       expect(response.body).toEqual({
         code: 200,
-        data: { vcn: "1000957", vol: 1, spd: 1, lang: "zh" },
+        data: { vcn: "1000957", vol: 1, spd: 0.7, lang: "zh" },
         msg: "success",
       });
     });

@@ -603,6 +603,17 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 - 404 未知 prompt key / 回滚目标版本不存在
 - 409 乐观锁冲突 / 没有待发布的草稿 / `revision` 与当前草稿号不符
 
+## 语速配置（admin）
+
+全局语速两个倍数（非哄睡 `normalSpd` + 哄睡 `sleepSpd`），存 DB `voice_speed_config` 单行表（固定主键 `default`）。读路径（`getvalue` / 进入退出哄睡）每轮实时查库，改后无需重启。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/analytics/voice-speed` | 返回 `{ normalSpd, sleepSpd }`；DB 无行回落 0.7/0.5 |
+| PATCH | `/analytics/voice-speed` | body `{ normalSpd, sleepSpd }`（两者必填，`[0.5, 2.0]`）；返回更新后的 `{ normalSpd, sleepSpd }` |
+
+校验失败（非数字 / 越界 / 缺字段）→ 400。
+
 ## 冒险内容管理（Adventure Studio）
 
 > 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。

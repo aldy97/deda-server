@@ -520,6 +520,18 @@ model SleepConfig {
   @@map("sleep_configs")
 }
 
+// 全局语速配置（单行表）：非哄睡 + 哄睡两个语速倍数。
+// spd 合法范围 [0.5, 2.0]（设备端协议 v1.4 §4.2）。
+// 管理端 /analytics/voice-speed 读写；getvalue 每轮实时查，改后无需重启。
+model VoiceSpeedConfig {
+  id        String   @id @default("default") // 单行，恒为 "default"
+  normalSpd Float    @default(0.7) // 非哄睡语速倍数
+  sleepSpd  Float    @default(0.5) // 哄睡语速倍数
+  updatedAt DateTime @updatedAt
+
+  @@map("voice_speed_config")
+}
+
 // LLM 调用日志（主模型 + 小模型全量），模型监控页数据源
 model LlmUsageLog {
   id               String   @id @default(uuid())

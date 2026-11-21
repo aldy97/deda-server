@@ -63,7 +63,7 @@ describe("VoiceConfigs (e2e)", () => {
 
   // ---- 可变替身状态：目录 / 语速映射 / 下发结果 / 配置行 ----
   let catalogEntries: VoiceCatalogEntry[] = [];
-  let spdMap: Record<string, number> = {};
+  let normalSpd = 0.7;
   let applyOutcome: VoiceApplyOutcome = {
     applied: "deferred",
     reason: "empty_catalog" as VoiceApplyBlockReason,
@@ -184,9 +184,8 @@ describe("VoiceConfigs (e2e)", () => {
     onInstanceRegistered: jest.fn(async (): Promise<VoiceApplyOutcome> => ({
       applied: "noop",
     })),
-    resolveSpd: jest.fn((speechRate: string | null): number | null =>
-      speechRate === null ? null : (spdMap[speechRate] ?? null),
-    ),
+    resolveNormalSpd: jest.fn(async (): Promise<number> => normalSpd),
+    resolveSleepSpd: jest.fn(async (): Promise<number> => 0.5),
   };
 
   const mockBaiduAgentClient = {
@@ -232,7 +231,7 @@ describe("VoiceConfigs (e2e)", () => {
 
   beforeEach(() => {
     catalogEntries = [];
-    spdMap = {};
+    normalSpd = 0.7;
     configStore = [];
     createdArgs = [];
     applyOutcome = { applied: "deferred", reason: "empty_catalog" };
@@ -289,13 +288,13 @@ describe("VoiceConfigs (e2e)", () => {
           expect(res.body.data.reason).toBe("empty_catalog");
         }));
 
-    it("returns null vcn/speechRate/spd when nothing was ever configured", () =>
+    it("returns null vcn/speechRate and the global normal spd when nothing was configured", () =>
       authedGet(voiceUrl(OWNED_DEVICE_ID))
         .expect(200)
         .expect((res) => {
           expect(res.body.data.vcn).toBeNull();
           expect(res.body.data.speechRate).toBeNull();
-          expect(res.body.data.spd).toBeNull();
+          expect(res.body.data.spd).toBe(0.7);
         }));
 
     it("never queries Redis for liveness: no reconcile side effect on read", () =>
@@ -358,7 +357,7 @@ describe("VoiceConfigs (e2e)", () => {
           expect(res.body.data.deviceId).toBe(OWNED_DEVICE_ID);
           expect(res.body.data.speechRate).toBe("slow");
           expect(res.body.data.vcn).toBeNull();
-          expect(res.body.data.spd).toBeNull();
+          expect(res.body.data.spd).toBe(0.7);
           expect(res.body.data.applied).toBe("deferred");
           expect(res.body.data.reason).toBe("empty_catalog");
         })
@@ -425,7 +424,7 @@ describe("VoiceConfigs (e2e)", () => {
           language: "chinese",
         },
       ];
-      spdMap = { slow: 0.8, normal: 1, fast: 1.3 };
+      normalSpd = 0.7;
       applyOutcome = { applied: "live" };
     });
 
@@ -451,7 +450,7 @@ describe("VoiceConfigs (e2e)", () => {
         .expect((res) => {
           expect(res.body.data.vcn).toBe("1000063");
           expect(res.body.data.speechRate).toBe("fast");
-          expect(res.body.data.spd).toBe(1.3);
+          expect(res.body.data.spd).toBe(0.7);
           expect(res.body.data.applied).toBe("live");
           expect(res.body.data.reason).toBeNull();
         })
@@ -472,7 +471,7 @@ describe("VoiceConfigs (e2e)", () => {
         .expect((res) => {
           expect(res.body.data.vcn).toBe("1000063");
           expect(res.body.data.speechRate).toBe("slow");
-          expect(res.body.data.spd).toBe(0.8);
+          expect(res.body.data.spd).toBe(0.7);
           expect(res.body.data.canApplyLive).toBe(true);
           expect(res.body.data.reason).toBeNull();
         });
@@ -489,7 +488,7 @@ describe("VoiceConfigs (e2e)", () => {
         .expect((res) => {
           expect(res.body.data.vcn).toBe("1000063");
           expect(res.body.data.speechRate).toBe("slow");
-          expect(res.body.data.spd).toBe(0.8);
+          expect(res.body.data.spd).toBe(0.7);
         });
     });
   });
@@ -507,7 +506,7 @@ describe("VoiceConfigs (e2e)", () => {
           language: "chinese",
         },
       ];
-      spdMap = { slow: 0.8, normal: 1, fast: 1.3 };
+      normalSpd = 0.7;
     });
 
     it("reports deferred with the upstream reason but still 201", () => {

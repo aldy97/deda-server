@@ -66,6 +66,12 @@ export const TTS_TYPE_DEFAULT = "DEFAULT";
 export const TTS_SPD_MIN = 0.5;
 export const TTS_SPD_MAX = 2;
 
+/** 全局语速默认值（产品决策）：非哄睡 0.7 / 哄睡 0.5。DB 无行或越界时回落。 */
+export const DEFAULT_NORMAL_SPD = 0.7;
+export const DEFAULT_SLEEP_SPD = 0.5;
+/** voice_speed_config 单行表的固定主键 */
+export const VOICE_SPEED_CONFIG_ID = "default";
+
 /**
  * 百度 ai_agent_instance_id 是 Long，请求体里必须是裸数字。
  * 我方按机芯厂协议 4.1 以十进制字符串保存（避免 JS Number 精度丢失），
@@ -109,8 +115,6 @@ export type VoiceApplyBlockReason =
   | "empty_catalog"
   /** 期望音色不在目录内，或与实例语种不匹配 */
   | "voice_not_in_catalog"
-  /** 语速档位 → spd 倍数的映射未配置 */
-  | "speech_rate_map_missing"
   /** 只有音色或只有语速，不足以组装完整 tts 串 */
   | "incomplete_tts_target"
   /** 百度返回非 2xx */
@@ -252,8 +256,10 @@ export interface VoiceReconcilePort {
    * @returns 配置的 timbreId（字符串），或 null（未配置 / 未命中 / 配置非法）
    */
   getTimbreForCharacter(characterKey: string | null): string | null;
-  /** 语速档位 → spd 倍数；映射未配置时返回 null */
-  resolveSpd(speechRate: string | null): number | null;
+  /** 非哄睡语速倍数；DB 无行或越界时回落 DEFAULT_NORMAL_SPD */
+  resolveNormalSpd(): Promise<number>;
+  /** 哄睡语速倍数；DB 无行或越界时回落 DEFAULT_SLEEP_SPD */
+  resolveSleepSpd(): Promise<number>;
   /**
    * 对设备当前活跃实例实时下发指定语速倍数 spd（不改变音色，vcn 沿用权威映射）。
    * 用于哄睡模式这类「临时降速、退出恢复」的场景：直接给倍数，不走语速档位映射。

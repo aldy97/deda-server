@@ -6,16 +6,10 @@ import {
   VOICE_RECONCILE_PORT,
   VoiceReconcilePort,
 } from "@/modules/baidu-agent/baidu-agent.types";
-import { TTS_BASE_SPD } from "@/modules/client-api/client-api.constants";
 
 /**
- * 哄睡模式的音速/音量常量。
- *
- * 数字刻意写成代码常量而非环境变量：这是产品决策（进入哄睡时语速放慢到 50%、
- * 音量上限为最大音量的 50%），不会按部署环境变化，走 env 只会让同一份代码在不同
- * 环境漂移出不同行为。
+ * 哄睡模式音量上限（最大音量的 50%）。语速已改由 DB 全局配置（voice_speed_config）。
  */
-export const SLEEP_MODE_SPEED = 0.5;
 export const SLEEP_MODE_VOLUME_CAP = 50;
 
 /** 哄睡音量快照 TTL（秒）：与 sleep_story 会话 TTL（45 分钟）一致 */
@@ -41,8 +35,8 @@ function sleepVolumeSnapshotKey(mac: string): string {
  *
  * 职责（进入 / 退出成对）：
  * - 进入：快照当前音量 → 音量压到 `min(当前, 50)`（MQTT volume 通道）→
- *   语速切到 0.5（有活跃百度实例时实时 switchSceneRole；无实例靠 getvalue）。
- * - 退出：恢复快照音量 → 语速切回设备档位映射 → 删快照。
+ *   语速切到哄睡语速（DB voice_speed_config.sleepSpd；有活跃实例实时 switchSceneRole，无实例靠 getvalue）。
+ * - 退出：恢复快照音量 → 语速切回非哄睡语速（DB voice_speed_config.normalSpd）→ 删快照。
  *
  * 两条链路（百度 RTC 主链路 / vendor 备选链路）与定时进入共用本服务，
  * 保证「进入哄睡降速降音量、退出恢复」的口径一致。
@@ -87,7 +81,8 @@ export class SleepModeService {
         device.characterKey,
       );
       if (vcn) {
-        await this.voiceReconcile.applySpd(mac, vcn, SLEEP_MODE_SPEED);
+        const sleepSpd = await this.voiceReconcile.resolveSleepSpd();
+        await this.voiceReconcile.applySpd(mac, vcn, sleepSpd);
       }
     } catch (error) {
       this.logger.warn(
@@ -123,9 +118,7 @@ export class SleepModeService {
         device.characterKey,
       );
       if (vcn) {
-        const desired = await this.voiceReconcile.readDesired(device.id);
-        const spd =
-          this.voiceReconcile.resolveSpd(desired.speechRate) ?? TTS_BASE_SPD;
+        const spd = await this.voiceReconcile.resolveNormalSpd();
         await this.voiceReconcile.applySpd(mac, vcn, spd);
       }
 
