@@ -245,4 +245,53 @@ describe("ContentAdminGuard", () => {
       },
     );
   });
+
+  /**
+   * 运维组收紧之后，进入冒险内容管理台的门槛是 `role === "superadmin"`；
+   * 老账号上遗留的 adventure-content scope 不再单独构成入口（controller 层另有
+   * SuperAdminGuard 把住），但守卫本身仍把 superadmin 视为通过「人」这一道闸，
+   * 否则运维账号还得在 env 里额外配一个已经废弃的 scope。
+   *
+   * 环境的闸与人正交：superadmin 在 readonly 环境里同样不能写。
+   */
+  describe("role: superadmin", () => {
+    const superadmin = (extra: Record<string, unknown> = {}) =>
+      scopedUser({ scopes: ["analytics"], role: "superadmin", ...extra });
+
+    it("reads without the legacy adventure-content scope", async () => {
+      const guard = buildGuard("readonly");
+
+      await expect(
+        guard.canActivate(makeContext({ method: "GET", user: superadmin() })),
+      ).resolves.toBe(true);
+    });
+
+    it("writes in an authoring environment even without the legacy scope", async () => {
+      const guard = buildGuard("authoring");
+
+      await expect(
+        guard.canActivate(
+          makeContext({
+            method: "POST",
+            user: superadmin(),
+            handler: SampleController.prototype.publish,
+          }),
+        ),
+      ).resolves.toBe(true);
+    });
+
+    it("is still blocked by the readonly environment gate", async () => {
+      const guard = buildGuard("readonly");
+
+      await expect(
+        guard.canActivate(
+          makeContext({
+            method: "POST",
+            user: superadmin(),
+            handler: SampleController.prototype.publish,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
 });

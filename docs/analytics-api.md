@@ -12,21 +12,32 @@
 管理员 JWT 与小程序 JWT 物理隔离：独立 secret（`ANALYTICS_JWT_SECRET`）、payload 必须带 `scope: "analytics"`。
 一期账号来源为环境变量白名单 `ANALYTICS_ADMIN_USERS`（JSON 数组，scrypt 哈希，格式见 `.env.example`）。
 
-`ANALYTICS_ADMIN_USERS` 里每个账号可带可选的 `scopes` 数组，声明该账号能碰哪些**专项模块**；
-签发时写入 JWT 的 `scopes` 声明，缺省为 `["analytics"]`。目前唯一的专项作用域是
-`adventure-content`（冒险内容管理台）——没有它的账号对 `/analytics/adventure-admin/*`
-**连读都是 403**。本次改动之前签发的 token 没有 `scopes` 字段，会被补成 `["analytics"]`，
-即「重新登录之前拿不到内容权限」。
+`ANALYTICS_ADMIN_USERS` 里每个账号可带可选的 `role`（`superadmin` / `admin`，缺省 `admin`）。
+它决定**能不能碰运维组**——模型监控、Prompt 管理、语速设置、冒险内容管理台、
+设备 wipe 全部要求 `role === "superadmin"`；其余报表页两类角色都能读。
+旧账号没有这个字段 → `admin`；非法值也回落 `admin`（fail-closed）。
+**改 role 或升级之后必须重新登录**：角色写在 JWT 里，7 天有效期内不会热更新。
+
+可选的 `scopes` 数组声明专项模块能力。`adventure-content` 是历史口径，
+现已不再单独构成入口：冒险内容管理台同时挂 `SuperAdminGuard`，只有 superadmin 能进。
 
 ```
 GET /analytics/auth/login?username=&password=
 → { token, adminInfo: { username, displayName } }
 
 GET /analytics/auth/profile   (Authorization: Bearer <token>)
-→ { username, displayName }
+→ { username, displayName, role }
+
+GET /analytics/meta           (Authorization: Bearer <token>)
+→ { nodeEnv, promptWriteEnabled, publishConfirmCode,
+    admin: { username, displayName, role } }
 ```
 
-错误码：401 未登录 / 凭据错误；403 token 非 analytics scope；400 参数非法（日期格式、metrics、granularity、范围倒置）。
+`admin` 块是前端判断运维组权限的唯一来源：dashboard 不解析 JWT。
+`meta` 只挂基础闸，普通 admin 也能读——否则环境标签会退化成「未知环境」并连带禁用发布按钮。
+
+错误码：401 未登录 / 凭据错误；403 token 非 analytics scope，或角色不足（运维组返回
+`message: "需要超级管理员权限"`）；400 参数非法（日期格式、metrics、granularity、范围倒置）。
 
 ## 总览（P1）
 
@@ -187,6 +198,8 @@ GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
 ```
 
 ## 模型监控（LLM）
+
+> 闸口：`SuperAdminGuard`，整组只对 superadmin 开放（含费用同步 POST）。
 
 数据源 `llm_usage_logs`：`LlmService.complete()/completeStream()` 单点埋点（fire-and-forget，
 写库失败只记日志不影响主链路）。scene 枚举：safety_l2 / intent_classify / filler /
@@ -457,13 +470,14 @@ fire-and-forget 不阻塞首音；孩子话密/家长插话都会计入，dashbo
 ## 设备运维（admin 手动操作）
 
 > 例外：本节为写操作（POST），不适用上文「所有接口均为 GET」的约定。
+> 闸口：`SuperAdminGuard`——wipe 是最重的破坏性操作，只有 superadmin 能打。
 
 ```
 POST /analytics/devices/:deviceId/wipe
 → { success, deviceId, deviceOnline }
 ```
 
-- 用途：退货／设备流转。admin 拿到机芯后手动触发。
+- 用途：退货／设备流转。superadmin 拿到机芯后手动触发。
 - 行为：先经机芯厂 MQTT 协议向设备下发 `recover`（恢复出厂），再删除 Device 记录；
   设备关联的绑定、对话消息、孩子档案、长期记忆、配置等随删除级联清除
   （schema 全部 `onDelete: Cascade`）。设备重新配网上报 `loginMac` 后作为全新设备入库。
@@ -520,13 +534,17 @@ GET /analytics/fleet/devices/:deviceId?days=30
 
 > 例外：本节含写操作（PATCH / POST），不适用上文「所有接口均为 GET」的约定。
 > 背景、回落链、版本语义、不可编辑红线见 `docs/prompt-registry.md`。
-> 路由全部挂 `analytics/` 前缀 + `AnalyticsAuthGuard`：dashboard 的 vite dev proxy
+> 路由全部挂 `analytics/` 前缀 + `SuperAdminGuard`：dashboard 的 vite dev proxy
 > 与生产 nginx 都只转发 `/analytics`，换前缀就要改部署配置。
+> 普通 admin 连 catalog 都读不到（403）——页面本身在 dashboard 侧已经被雾挡住。
 
 ```
 GET /analytics/meta
-→ { nodeEnv, promptWriteEnabled, publishConfirmCode }
+→ { nodeEnv, promptWriteEnabled, publishConfirmCode,
+    admin: { username, displayName, role } }
 ```
+
+`meta` 例外：只挂基础闸，普通 admin 也要能读（环境标签需要）。
 
 - `nodeEnv`：`development` / `staging` / `production`，dashboard 左上角环境标签据此渲染
   （配色与中文标签由前端决定，后端只给环境名）。
@@ -605,6 +623,8 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 ## 语速配置（admin）
 
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放（改一次影响所有在线设备）。
+
 全局语速两个倍数（非哄睡 `normalSpd` + 哄睡 `sleepSpd`），存 DB `voice_speed_config` 单行表（固定主键 `default`）。读路径（`getvalue` / 进入退出哄睡）每轮实时查库，改后无需重启。
 
 | 方法 | 路径 | 说明 |
@@ -644,8 +664,12 @@ IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue`
 
 | 闸 | 跟着谁走 | 由什么决定 | 不满足时 |
 | --- | --- | --- | --- |
-| scope | 人 | JWT 的 `scopes` 是否含 `adventure-content` | 读写一律 403 |
+| role | 人 | JWT 的 `role === "superadmin"` | 读写一律 403 |
 | profile | 环境 | `CONTENT_ADMIN_PROFILE=authoring` | 只读；所有写操作 403 |
+
+冒险内容管理台已整体归入运维组：入口只对 superadmin 开放。历史 `adventure-content`
+scope 不再单独构成入口——controller 同时挂 `SuperAdminGuard` 与 `ContentAdminGuard`，
+scope 只保留在后者里兼容旧账号的单元语义。
 
 两者必须同时满足才能写。即使 prod 的账号白名单被误配成和 staging 一样，prod 依然写不动。
 `CONTENT_ADMIN_PROFILE` **缺省 / 拼错 / 大小写不对一律按 readonly 处理**（fail-safe）：

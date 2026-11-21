@@ -8,6 +8,7 @@ import {
 import { IsNotEmpty, IsString } from "class-validator";
 import { AnalyticsAuthService } from "./analytics-auth.service";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { normalizeAdminRole } from "./admin-role";
 
 class AnalyticsLoginQueryDto {
   @IsString()
@@ -40,10 +41,16 @@ export class AnalyticsAuthController {
   @UseGuards(AnalyticsAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: "当前管理员信息" })
-  profile(@Req() req: { user: { username: string; displayName: string } }) {
+  profile(
+    @Req()
+    req: {
+      user: { username: string; displayName: string; role?: string };
+    },
+  ) {
     return {
       username: req.user.username,
       displayName: req.user.displayName,
+      role: normalizeAdminRole(req.user.role),
     };
   }
 }

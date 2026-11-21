@@ -13,7 +13,7 @@ import {
 } from "class-validator";
 import { LLM_SCENES } from "../llm/llm.service";
 import { AnalyticsDateRangeQueryDto } from "./dto/analytics-query.dto";
-import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { LlmAnalyticsService } from "./llm-analytics.service";
 import { BillingSyncService } from "./billing-sync.service";
 import { LlmCostService } from "./llm-cost.service";
@@ -93,7 +93,7 @@ export class LlmSlowCallsQueryDto extends AnalyticsDateRangeQueryDto {
 
 @ApiTags("analytics-llm")
 @ApiBearerAuth()
-@UseGuards(AnalyticsAuthGuard)
+@UseGuards(SuperAdminGuard)
 @Controller("analytics/llm")
 export class LlmAnalyticsController {
   constructor(

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Patch, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
-import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { VoiceSpeedAdminService } from "./voice-speed-admin.service";
 import { UpdateVoiceSpeedDto } from "./dto/voice-speed-admin.dto";
 
@@ -12,7 +12,7 @@ import { UpdateVoiceSpeedDto } from "./dto/voice-speed-admin.dto";
  */
 @ApiTags("analytics-voice-speed")
 @ApiBearerAuth()
-@UseGuards(AnalyticsAuthGuard)
+@UseGuards(SuperAdminGuard)
 @Controller("analytics/voice-speed")
 export class VoiceSpeedAdminController {
   constructor(private readonly voiceSpeed: VoiceSpeedAdminService) {}

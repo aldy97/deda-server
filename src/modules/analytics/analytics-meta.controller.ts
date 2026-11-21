@@ -1,8 +1,9 @@
-import { Controller, Get, UseGuards } from "@nestjs/common";
+import { Controller, Get, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
 import { PromptAdminService } from "./prompt-admin.service";
+import { normalizeAdminRole } from "./admin-role";
 
 /**
  * 运行时元信息。
@@ -29,11 +30,22 @@ export class AnalyticsMetaController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: "环境标识与 prompt 写策略" })
-  meta() {
+  @ApiOperation({ summary: "环境标识、prompt 写策略与当前管理员角色" })
+  meta(
+    @Req()
+    req: {
+      user: { username: string; displayName: string; role?: string };
+    },
+  ) {
     return {
       nodeEnv: this.configService.get<string>("NODE_ENV") || "development",
       ...this.promptAdmin.getWritePolicy(),
+      // 前端判断能不能进运维组的唯一来源：不解析 token，只信服务端结论。
+      admin: {
+        username: req.user.username,
+        displayName: req.user.displayName,
+        role: normalizeAdminRole(req.user.role),
+      },
     };
   }
 }

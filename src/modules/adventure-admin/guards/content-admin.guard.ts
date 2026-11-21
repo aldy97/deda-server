@@ -7,6 +7,7 @@ import {
 import { Reflector } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
 import { AnalyticsAuthGuard } from "@/modules/analytics/guards/analytics-auth.guard";
+import { normalizeAdminRole } from "@/modules/analytics/admin-role";
 import {
   CONTENT_ADMIN_SCOPE,
   resolveContentAdminProfile,
@@ -16,9 +17,11 @@ import {
  * 冒险内容管理台守卫。继承 AnalyticsAuthGuard，所以 passport 校验与
  * scope==="analytics" 的基础闸**一字不改**地先跑一遍，本类只在其之上加两道：
  *
- * 1. **人的闸**：JWT 的 scopes 必须含 adventure-content。看板管理员默认没有，
- *    所以内容管理台对他们连读都是 403。旧 token 没有 scopes 字段，
- *    策略层会补成 ["analytics"]，等价于「重新登录前拿不到内容权限」。
+ * 1. **人的闸**：`role === "superadmin"` 直接通过；否则要求 JWT 的 scopes 含
+ *    adventure-content（历史口径，保留以兼容旧账号的单元语义）。控制器另挂
+ *    SuperAdminGuard，所以实际入口只认 superadmin——遗留 scope 不再是入口。
+ *    旧 token 没有 role / scopes 字段，策略层补成 admin + ["analytics"]，
+ *    等价于「重新登录前拿不到内容权限」。
  * 2. **环境的闸**：写操作要求 CONTENT_ADMIN_PROFILE=authoring。
  *    prod 不配这个变量 → 只读。
  *
@@ -53,7 +56,8 @@ export class ContentAdminGuard extends AnalyticsAuthGuard {
     const scopes = Array.isArray(request?.user?.scopes)
       ? request.user.scopes
       : [];
-    if (!scopes.includes(CONTENT_ADMIN_SCOPE)) {
+    const superadmin = normalizeAdminRole(request?.user?.role) === "superadmin";
+    if (!superadmin && !scopes.includes(CONTENT_ADMIN_SCOPE)) {
       throw new ForbiddenException("Adventure content scope required");
     }
 

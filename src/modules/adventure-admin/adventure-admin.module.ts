@@ -9,6 +9,7 @@ import { AdventureScriptImportService } from "./adventure-script-import.service"
 import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
+import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
 
 /**
  * 冒险内容管理台模块。
@@ -34,6 +35,7 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
   controllers: [AdventureAdminController],
   providers: [
     ContentAdminGuard,
+    SuperAdminGuard,
     AdventureAuditService,
     AdventureContentQueryService,
     AdventureContentService,

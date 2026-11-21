@@ -8,7 +8,9 @@ import {
   normalizeScopes,
   resolveAnalyticsTokenTtl,
 } from "./analytics-auth.service";
+import { isSuperAdmin, normalizeAdminRole } from "./admin-role";
 import { ANALYTICS_JWT_SERVICE } from "./analytics-auth.service";
+import { AnalyticsAuthController } from "./analytics-auth.controller";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
 import { AnalyticsJwtStrategy } from "./strategies/analytics-jwt.strategy";
 
@@ -128,8 +130,9 @@ describe("AnalyticsJwtStrategy", () => {
       username: "admin",
       displayName: "管理员",
       scope: "analytics",
-      // 旧 token 没有 scopes 声明，补成只有基础作用域：拿不到任何专项权限
+      // 旧 token 没有 scopes / role 声明：补成基础作用域 + 普通管理员
       scopes: ["analytics"],
+      role: "admin",
     });
   });
 });
@@ -339,5 +342,176 @@ describe("parseAccounts 边界", () => {
     await expect(svc.login("admin", PASSWORD)).rejects.toThrow(
       "must be a JSON array",
     );
+  });
+});
+
+describe("AnalyticsAuthController", () => {
+  const authService = {
+    login: jest.fn().mockResolvedValue({
+      token: "tkn",
+      adminInfo: { username: "superadmin", displayName: "超管" },
+    }),
+  };
+  const controller = new AnalyticsAuthController(authService as never);
+
+  it("login 把 query 透传给 service", async () => {
+    await expect(
+      controller.login({ username: "superadmin", password: "pw" }),
+    ).resolves.toMatchObject({ token: "tkn" });
+    expect(authService.login).toHaveBeenCalledWith("superadmin", "pw");
+  });
+
+  it("profile 下发 role（前端运维组闸口只信这一份结论）", () => {
+    expect(
+      controller.profile({
+        user: {
+          username: "superadmin",
+          displayName: "超管",
+          role: "superadmin",
+        },
+      }),
+    ).toEqual({
+      username: "superadmin",
+      displayName: "超管",
+      role: "superadmin",
+    });
+  });
+
+  it("profile 对缺 role 的老 token 回落 admin", () => {
+    expect(
+      controller.profile({
+        user: { username: "legacy", displayName: "旧账号" },
+      }).role,
+    ).toBe("admin");
+  });
+});
+
+const ROLE_USERS = JSON.stringify([
+  {
+    username: "superadmin",
+    salt: SALT,
+    passwordHash: PASSWORD_HASH,
+    displayName: "超级管理员",
+    role: "superadmin",
+  },
+  {
+    username: "plain",
+    salt: SALT,
+    passwordHash: PASSWORD_HASH,
+    displayName: "普通管理员",
+  },
+  {
+    username: "bogus",
+    salt: SALT,
+    passwordHash: PASSWORD_HASH,
+    displayName: "配错角色",
+    role: "root",
+  },
+]);
+
+/**
+ * role 是运维组的「人」这道闸。与 scopes 同一套兼容原则：
+ * 未声明 role 的既有账号得到 admin，行为与改动之前完全一致；
+ * 非法值一律回落 admin（fail-closed），不能因为配错一个字符串就多开一个超管。
+ */
+describe("AnalyticsAuthService role", () => {
+  let service: AnalyticsAuthService;
+  const jwtService = new JwtService({ secret: SECRET });
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        AnalyticsAuthService,
+        { provide: ConfigService, useValue: buildConfig(ROLE_USERS) },
+        { provide: ANALYTICS_JWT_SERVICE, useValue: jwtService },
+      ],
+    }).compile();
+
+    service = module.get(AnalyticsAuthService);
+  });
+
+  it("把角色签进 token", async () => {
+    const result = await service.login("superadmin", PASSWORD);
+    const payload = await jwtService.verifyAsync(result.token);
+
+    expect(payload.role).toBe("superadmin");
+  });
+
+  it("未声明 role 的账号签成 admin", async () => {
+    const result = await service.login("plain", PASSWORD);
+    const payload = await jwtService.verifyAsync(result.token);
+
+    expect(payload.role).toBe("admin");
+  });
+
+  it("非法 role 回落 admin，不意外开出超管", async () => {
+    const result = await service.login("bogus", PASSWORD);
+    const payload = await jwtService.verifyAsync(result.token);
+
+    expect(payload.role).toBe("admin");
+  });
+
+  it("adminInfo 的既有契约不变（角色只走 token / meta / profile）", async () => {
+    const result = await service.login("superadmin", PASSWORD);
+
+    expect(result.adminInfo).toEqual({
+      username: "superadmin",
+      displayName: "超级管理员",
+    });
+  });
+});
+
+describe("AnalyticsJwtStrategy role", () => {
+  const strategy = (usersJson = VALID_USERS) =>
+    new AnalyticsJwtStrategy(buildConfig(usersJson));
+
+  const payload = (role?: unknown) => ({
+    sub: "admin",
+    username: "admin",
+    displayName: "管理员",
+    scope: "analytics",
+    role: role as string | undefined,
+  });
+
+  it("透传 superadmin", async () => {
+    await expect(
+      strategy().validate(payload("superadmin")),
+    ).resolves.toMatchObject({ role: "superadmin" });
+  });
+
+  it("老 token 没有 role → admin", async () => {
+    await expect(
+      strategy().validate(payload(undefined)),
+    ).resolves.toMatchObject({
+      role: "admin",
+    });
+  });
+
+  it("畸形 role → admin", async () => {
+    await expect(strategy().validate(payload("root"))).resolves.toMatchObject({
+      role: "admin",
+    });
+  });
+});
+
+describe("normalizeAdminRole / isSuperAdmin", () => {
+  it("只认字面 superadmin", () => {
+    expect(normalizeAdminRole("superadmin")).toBe("superadmin");
+    expect(normalizeAdminRole("admin")).toBe("admin");
+  });
+
+  it("缺省与畸形输入回落到 admin", () => {
+    expect(normalizeAdminRole()).toBe("admin");
+    expect(normalizeAdminRole(null)).toBe("admin");
+    expect(normalizeAdminRole("SUPERADMIN")).toBe("admin");
+    expect(normalizeAdminRole(1 as unknown as string)).toBe("admin");
+  });
+
+  it("isSuperAdmin 对空用户返回 false", () => {
+    expect(isSuperAdmin(null)).toBe(false);
+    expect(isSuperAdmin(undefined)).toBe(false);
+    expect(isSuperAdmin({})).toBe(false);
+    expect(isSuperAdmin({ role: "admin" })).toBe(false);
+    expect(isSuperAdmin({ role: "superadmin" })).toBe(true);
   });
 });
