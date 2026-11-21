@@ -101,6 +101,12 @@ describe("compose 环境变量白名单", () => {
     expect("ADVENTURE_TEST_MODE_ENABLED" in prodEnv).toBe(false);
     expect(stagingEnv.ADVENTURE_TEST_MODE_ENABLED).toBe("true");
   });
+
+  it("SLEEP_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
+    expect("SLEEP_TEST_MODE_ENABLED" in baseEnv).toBe(false);
+    expect("SLEEP_TEST_MODE_ENABLED" in prodEnv).toBe(false);
+    expect(stagingEnv.SLEEP_TEST_MODE_ENABLED).toBe("true");
+  });
 });
 
 describe("同机双栈的内存护栏", () => {
