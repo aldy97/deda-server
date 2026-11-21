@@ -127,10 +127,9 @@ export class VoiceTimbreAdminService {
       where: { characterKey },
     });
     if (devicesInUse > 0 && !force) {
-      throw new ConflictException({
-        message: `characterKey ${characterKey} is still used by ${devicesInUse} device(s)`,
-        devicesInUse,
-      });
+      throw new ConflictException(
+        `角色 ${characterKey} 仍有 ${devicesInUse} 台设备在用，删除后这些设备将无法对话；确认请带 force=true 重试`,
+      );
     }
 
     let deleted: { timbreId: string };

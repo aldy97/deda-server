@@ -620,10 +620,10 @@ IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue`
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/analytics/voice-timbres` | `{ items: [{ characterKey, timbreId, updatedAt, personaConfigured, devicesInUse }] }` |
+| GET | `/analytics/voice-timbres` | 数组：`[{ characterKey, timbreId, updatedAt, personaConfigured, devicesInUse }]` |
 | POST | `/analytics/voice-timbres` | body `{ characterKey, timbreId }`；重复 key → 409 |
 | PUT | `/analytics/voice-timbres/:characterKey` | body `{ timbreId }`；不存在 → 404 |
-| DELETE | `/analytics/voice-timbres/:characterKey?force=true` | 仍有设备在用且未带 `force=true` → 409，响应含 `devicesInUse` |
+| DELETE | `/analytics/voice-timbres/:characterKey?force=true` | 仍有设备在用且未带 `force=true` → 409，message 说明在用设备数；确认后带 `force=true` 重试 |
 
 - `characterKey` 归一化为小写，校验 `[a-z][a-z0-9_-]{1,31}`；`timbreId` 为 1–19 位数字字符串。
 - `personaConfigured=false` 表示该角色没有对应 `persona_<key>` 人设，对话会回落 elly；新增角色时界面必须提示。

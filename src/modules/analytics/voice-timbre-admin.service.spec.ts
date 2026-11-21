@@ -175,9 +175,7 @@ describe("VoiceTimbreAdminService", () => {
 
       const error = await service.remove("elly", false).catch((e) => e);
       expect(error).toBeInstanceOf(ConflictException);
-      expect(error.getResponse()).toEqual(
-        expect.objectContaining({ devicesInUse: 2 }),
-      );
+      expect(JSON.stringify(error.getResponse())).toContain("2 台设备在用");
       expect(prisma.characterTimbre.delete).not.toHaveBeenCalled();
     });
 
