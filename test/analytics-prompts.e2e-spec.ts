@@ -37,6 +37,7 @@ describe("Analytics prompts (e2e)", () => {
   let prisma: PrismaService;
   let registry: PromptRegistryService;
   let adminToken: string;
+  let plainAdminToken: string;
   let wechatScopeToken: string;
   let confirmCode: string;
 
@@ -71,6 +72,16 @@ describe("Analytics prompts (e2e)", () => {
       username: "admin",
       displayName: "管理员",
       scope: "analytics",
+      // Prompt 管理已归运维组：只有 superadmin 能进
+      role: "superadmin",
+    });
+    // 普通 admin 的对照 token：验证运维组闸口端到端生效
+    plainAdminToken = await jwt.signAsync({
+      sub: "ops",
+      username: "ops",
+      displayName: "运营",
+      scope: "analytics",
+      role: "admin",
     });
     wechatScopeToken = await jwt.signAsync({
       sub: "user-001",
@@ -125,6 +136,38 @@ describe("Analytics prompts (e2e)", () => {
         request(app.getHttpServer()).get(`/analytics/prompts/${KEY}`),
       ).expect(200);
       expect(detail.body.data.publishedRevision).toBeNull();
+    });
+
+    it("普通 admin（role=admin）→ 403，读写都进不来", async () => {
+      const list = await request(app.getHttpServer())
+        .get("/analytics/prompts")
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .expect(403);
+      expect(list.body.message).toContain("超级管理员");
+
+      await request(app.getHttpServer())
+        .post(`/analytics/prompts/${KEY}/publish`)
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .send({ revision: 1, changeNote: "x", confirmCode })
+        .expect(403);
+
+      // 对照：同一份数据 superadmin 读得到，证明 403 来自角色而不是数据问题
+      const owned = await auth(
+        request(app.getHttpServer()).get("/analytics/prompts"),
+      ).expect(200);
+      expect(Array.isArray(owned.body.data)).toBe(true);
+    });
+
+    it("meta 例外：普通 admin 仍能读环境标签与自己的角色", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/analytics/meta")
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .expect(200);
+
+      expect(res.body.data.admin).toMatchObject({
+        username: "ops",
+        role: "admin",
+      });
     });
   });
 

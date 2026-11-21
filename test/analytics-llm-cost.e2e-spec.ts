@@ -67,6 +67,8 @@ describe("Analytics llm cost (e2e)", () => {
       sub: "admin",
       username: "admin",
       scope: "analytics",
+      // 模型监控已归运维组
+      role: "superadmin",
     });
 
     const device = await prisma.device.create({
