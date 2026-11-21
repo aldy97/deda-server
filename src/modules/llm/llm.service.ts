@@ -129,6 +129,22 @@ export class LlmService {
   }
 
   /**
+   * 思考开关参数：百炼 qwen 系（含 qwen-flash）用 enable_thinking 控制
+   * （非 OpenAI 标准字段，直接放 body）；qwen-flash 默认非思考，这里再显式
+   * 关闭一次作为双保险，避免日后换成默认开思考的别名后首 token 被拖慢。
+   * 主模型、以及未配置独立小模型（回落到同一模型）时沿用 thinking: disabled。
+   */
+  private thinkingParams(
+    isSmallModel: boolean,
+    thinking: LlmCompleteOptions["thinking"],
+  ): Record<string, unknown> {
+    if (isSmallModel && this.smallModel !== this.model) {
+      return { enable_thinking: false };
+    }
+    return { thinking: thinking ?? { type: "disabled" } };
+  }
+
+  /**
    * 调用 LLM chat completions
    */
   async complete(options: LlmCompleteOptions): Promise<LlmCompleteResult> {
@@ -169,7 +185,7 @@ export class LlmService {
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 512,
-          thinking: options.thinking ?? { type: "disabled" },
+          ...this.thinkingParams(isSmallModel, options.thinking),
         },
         {
           headers: {
@@ -270,7 +286,7 @@ export class LlmService {
             messages: options.messages,
             temperature: options.temperature ?? 0.7,
             max_tokens: options.maxTokens ?? 512,
-            thinking: options.thinking ?? { type: "disabled" },
+            ...this.thinkingParams(isSmallModel, options.thinking),
             stream: true,
             // 仅小模型（DashScope）流式需要显式开启 usage 回传；
             // DeepSeek 主网关流式原生返回 usage，加此参数反而会 400，故不下发
