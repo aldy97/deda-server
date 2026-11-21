@@ -29,6 +29,27 @@ export const PROMPT_KEYS = [
 
 export type PromptKey = (typeof PROMPT_KEYS)[number];
 
+/** 动态角色人设的 key 前缀；与内置 persona_elly / persona_polly 共用命名空间 */
+export const DYNAMIC_PERSONA_KEY_PREFIX = "persona_";
+
+/** 与 character_timbre / 音色管理共用同一套角色 key 规则 */
+export const CHARACTER_KEY_PATTERN = /^[a-z][a-z0-9_-]{1,31}$/;
+
+export function personaKeyFor(characterKey: string): string {
+  return `${DYNAMIC_PERSONA_KEY_PREFIX}${characterKey}`;
+}
+
+/** persona_<key> → characterKey；不是合法人设 key 时返回 null */
+export function characterKeyFromPersonaKey(key: string): string | null {
+  if (!key.startsWith(DYNAMIC_PERSONA_KEY_PREFIX)) return null;
+  const characterKey = key.slice(DYNAMIC_PERSONA_KEY_PREFIX.length);
+  return CHARACTER_KEY_PATTERN.test(characterKey) ? characterKey : null;
+}
+
+export function isBuiltinPromptKey(key: string): key is PromptKey {
+  return (PROMPT_KEYS as readonly string[]).includes(key);
+}
+
 /**
  * 角色 → 人设 prompt key。音色管理新增的角色若不在本表，人设会回落 elly
  * （prompt-registry 的既有防匿名行为），管理端必须把这一点显式告知操作者。

@@ -10,7 +10,7 @@ import {
   CHARACTER_TIMBRE_PORT,
   type CharacterTimbrePort,
 } from "@/modules/baidu-agent/baidu-agent.types";
-import { PERSONA_KEY_BY_CHARACTER } from "@/modules/prompt-registry/prompt-keys";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import type {
   CreateVoiceTimbreDto,
   UpdateVoiceTimbreDto,
@@ -49,9 +49,12 @@ export class VoiceTimbreAdminService {
     private readonly prisma: PrismaService,
     @Inject(CHARACTER_TIMBRE_PORT)
     private readonly cache: CharacterTimbrePort,
+    private readonly promptRegistry: PromptRegistryService,
   ) {}
 
   async list(): Promise<VoiceTimbreView[]> {
+    // 人设状态以运行时注册表为准：内置角色恒已配置，动态角色以「已发布」为准
+    await this.promptRegistry.reload();
     const [rows, counts] = await Promise.all([
       this.prisma.characterTimbre.findMany({
         orderBy: { characterKey: "asc" },
@@ -69,7 +72,7 @@ export class VoiceTimbreAdminService {
       characterKey: row.characterKey,
       timbreId: row.timbreId,
       updatedAt: row.updatedAt.toISOString(),
-      personaConfigured: Boolean(PERSONA_KEY_BY_CHARACTER[row.characterKey]),
+      personaConfigured: this.promptRegistry.hasPersona(row.characterKey),
       devicesInUse: usage.get(row.characterKey) ?? 0,
     }));
   }
