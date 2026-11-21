@@ -1,9 +1,11 @@
 import { Module } from "@nestjs/common";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAuditService } from "./adventure-audit.service";
 import { AdventureContentQueryService } from "./adventure-content-query.service";
 import { AdventureContentService } from "./adventure-content.service";
+import { AdventureScriptImportService } from "./adventure-script-import.service";
 import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
@@ -20,18 +22,22 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
  * 健康快照、并在人授权下手动触发巡检 / 重置熔断器。这条依赖方向刻意是
  * 管理台 → 引擎，反向导入被 adventure-admin.module.spec.ts 钉死。
  *
+ * 另导入 LlmModule（叶子模块）供 docx 稿子转换用：LlmService 只在这里被
+ * AdventureScriptImportService 消费，不导出，播放链路不受影响。
+ *
  * 依赖说明：ContentAdminGuard 继承 AnalyticsAuthGuard，走名为 "analytics-jwt" 的
  * passport 策略，该策略由 AnalyticsModule 注册（AppModule 一直加载它）。
  * PrismaModule / RedisModule / ConfigModule 都是 @Global，无需在此重复导入。
  */
 @Module({
-  imports: [AdventureModule],
+  imports: [AdventureModule, LlmModule],
   controllers: [AdventureAdminController],
   providers: [
     ContentAdminGuard,
     AdventureAuditService,
     AdventureContentQueryService,
     AdventureContentService,
+    AdventureScriptImportService,
     AdventureTestAssignService,
     AdventureTransferService,
   ],

@@ -762,6 +762,37 @@ body { identity, content }
 阈值全部可用环境变量覆盖（`ADVENTURE_LINT_*` / `ADVENTURE_SIM_*`，见 `.env.example`），
 `capabilities` 会把生效值回给前端。
 
+### docx 稿子转换（仅 staging）
+
+把带标注的 docx 故事稿转成「可预览的草稿」，**不落库**（落库仍走 `POST /episodes`）。
+转换端点不标 `@ContentReadOnly()`，所以它按写方法处理，只在 authoring（staging）开放——
+本特性**不面向 prod**（prod 是只读环境，内容只从 staging 搬运过去）。
+
+稿子标注约定（同时展示在 dashboard 上传卡片的提示里）：
+- 正文第一个非空行 = 这一集的标题（确定性取走，不交给 LLM）；
+- 未标注的普通段落 = 旁白（narration）；
+- 交互点用独立一行标记：【互动·二选一】/【互动·开放问答】/【互动·跟我念】/【互动·奖励】，
+  各自带「选项A/B｜接话」「兜底」「表扬」等字段（完整约定见服务端
+  `adventure-script-import.service.ts` 的 prompt 与 dashboard 上传提示）。
+
+```
+POST /analytics/adventure-admin/script/convert
+body { fileName?, contentBase64 }        // contentBase64 = docx 文件的 base64；原文上限 5MB
+→ { characterKey, characterDetected, season, episodeNumber, content, sourceText, lint }
+   // characterKey = LLM 通读全文识别的主角（elly|polly）；不在白名单 → 回落 elly 且
+   //   characterDetected=false，dashboard 据此提示作者「识别不到，请手动确认」。
+   // episodeNumber = 该 IP 下一集的自增集号（含已下架/已作废的集——业务键永久占用）。
+   // content = { title, recap, segments }，title 来自正文首行，segments 已归一化：
+   //   order 重排 0..n-1；two_choice 选项截断到 2 个；非法 kind/interactionType 降级而非丢段。
+   // lint = 按草稿标准预检一次（admin 一进抽屉就能看到「哪些还没写全」）。
+   // 错误码：SCRIPT_CONVERT_FAILED（LLM/JSON 失败）、DOCX_UNPARSEABLE（损坏/空/旧 .doc）、
+   //         DOCX_TOO_LARGE（超 5MB）。
+
+GET /analytics/adventure-admin/script/next-number?characterKey=elly
+→ { characterKey, season, episodeNumber }
+   // 手动新建（无稿子）时，抽屉预填的自增集号。同样含已下架/已作废的集。
+```
+
 ### 写接口
 
 所有写操作都要求 `reason`（**至少 8 个字**）：半年后别人（包括你自己）只能靠审计看懂当时为什么这么改。

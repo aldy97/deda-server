@@ -433,3 +433,23 @@ export class TestAssignDto {
   @IsString()
   reason?: string;
 }
+
+export class ScriptConvertDto {
+  @ApiPropertyOptional({ description: "原始文件名，仅用于提示，不落库" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  fileName?: string;
+
+  @ApiProperty({ description: "docx 文件的 base64 编码内容" })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(8000000)
+  contentBase64: string;
+}
+
+export class NextEpisodeNumberQueryDto {
+  @ApiProperty({ description: "IP 标识", enum: ADVENTURE_CHARACTER_KEYS })
+  @IsIn(ADVENTURE_CHARACTER_KEYS as readonly string[])
+  characterKey: AdventureCharacterKey;
+}
