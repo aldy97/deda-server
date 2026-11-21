@@ -204,7 +204,7 @@ export class ClientApiService {
 
     const desired = await this.voiceReconcile.readDesired(device.id);
 
-    // 哄睡会话内：直接返回哄睡语速（产品常量 0.7），绕过语速档位映射。
+    // 哄睡会话内：直接返回哄睡语速（产品常量 0.5），绕过语速档位映射。
     // getvalue 每轮建实例前拉取，定时进入（设备空闲无实例）时下次建实例即生效。
     const session = await this.prisma.conversationSession.findUnique({
       where: { deviceId: device.id },
