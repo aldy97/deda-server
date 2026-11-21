@@ -3,9 +3,7 @@ import {
   TTS_SPD_MIN,
 } from "@/modules/baidu-agent/baidu-agent.types";
 import {
-  DEFAULT_SPEECH_RATE,
   DEFAULT_TTS_VOL,
-  TTS_BASE_SPD,
   deviceNickname,
   resolveTtsDefaultVol,
 } from "./client-api.constants";
@@ -48,11 +46,5 @@ describe("client-api.constants", () => {
       expect(resolveTtsDefaultVol("NaN")).toBeNull();
       expect(resolveTtsDefaultVol("Infinity")).toBeNull();
     });
-  });
-
-  it("exposes the documented base spd and the default speech-rate key", () => {
-    // v1.4 §4.2「1.0为基础语速」是 spd 兜底值的唯一书面依据
-    expect(TTS_BASE_SPD).toBe(1);
-    expect(DEFAULT_SPEECH_RATE).toBe("normal");
   });
 });

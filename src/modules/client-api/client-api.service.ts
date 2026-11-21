@@ -19,16 +19,13 @@ import {
 } from "@/modules/baidu-agent/baidu-agent.types";
 import {
   BOT_INSTANCE_TTL_SECONDS,
-  DEFAULT_SPEECH_RATE,
   PROVISION_RECENT_KEY,
-  TTS_BASE_SPD,
   botCurrentKey,
   botInstanceKey,
   deviceNickname,
   resolveProvisionWindowMs,
   resolveTtsDefaultVol,
 } from "./client-api.constants";
-import { SLEEP_MODE_SPEED } from "@/modules/sleep-configs/sleep-mode.service";
 import { LoginMacDto } from "./dto/login-mac.dto";
 import { BotGetValueDto } from "./dto/bot-getvalue.dto";
 import { BotStartDto } from "./dto/bot-start.dto";
@@ -202,9 +199,7 @@ export class ClientApiService {
       throw new InternalServerErrorException("timbre not configured");
     }
 
-    const desired = await this.voiceReconcile.readDesired(device.id);
-
-    // 哄睡会话内：直接返回哄睡语速（产品常量 0.5），绕过语速档位映射。
+    // 哄睡会话内返回哄睡语速，否则返回非哄睡语速（都来自 DB 全局 voice_speed_config）。
     // getvalue 每轮建实例前拉取，定时进入（设备空闲无实例）时下次建实例即生效。
     const session = await this.prisma.conversationSession.findUnique({
       where: { deviceId: device.id },
@@ -213,13 +208,9 @@ export class ClientApiService {
       session?.currentMode === "sleep_story" &&
       (!session.expiresAt || session.expiresAt.getTime() > Date.now());
 
-    // 未设档位 → 走中档；档位无法映射为倍数（speech_rate_configs 表无该档位行）→
-    // 回落 v1.4 §4.2 的基础语速。spd 与 vcn 不同：它有书面兜底值，不会让设备停摆。
     const spd = inSleepMode
-      ? SLEEP_MODE_SPEED
-      : ((await this.voiceReconcile.resolveSpd(
-          desired.speechRate ?? DEFAULT_SPEECH_RATE,
-        )) ?? TTS_BASE_SPD);
+      ? await this.voiceReconcile.resolveSleepSpd()
+      : await this.voiceReconcile.resolveNormalSpd();
 
     return { vcn, vol: this.ttsDefaultVol, spd };
   }

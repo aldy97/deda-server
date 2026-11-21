@@ -133,7 +133,7 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 
 **与 §2.3 的重叠（已知冗余，本版刻意不动）**：固件升级到 v1.4 后，「设备离线期间改了语速」这个场景在 getvalue 创建实例时就已覆盖，§2.3 的追平会退化成一次冗余的 `switchSceneRole` 调用；而该调用的 tts 串只带 `vcn`/`spd`、不带 `vol`（Q20），理论上可能把 getvalue 刚设好的音量重置掉。当前不改 §2.3 的理由：它只在设备存在期望值时才触发，默认状态是 `noop`，影响面为零；等 Q20 有答复后再决定是否把它收窄为「只处理同一轮内的变更」。
 
-**发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0；语速映射已迁入 DB（`speech_rate_configs` 表，migration 已种子 0.7 系），未命中档位回落 1.0，两者都不阻塞发布。
+**发布闸口**：固件升级到 v1.4 之前，`CHARACTER_TIMBRE_JSON` 必须填好该设备 IP 的 timbreId（Q1）。未填 → 每轮 getvalue 都 500 → 设备每轮对话都创建失败，且按 v1.4 §4.3 **不会**自动重新 loginMac，只能由用户再次发起。`TTS_DEFAULT_VOL` 有默认值 1.0；语速已迁入 DB（`voice_speed_config` 表：非哄睡 0.7 / 哄睡 0.5），未命中档位回落默认，两者都不阻塞发布。
 
 **取值已定（熊总 2026-11-19）**：Elly/Polly 暂不区分专属音色，两个 IP 先统一用 v1.4 文档示例里的 `1000957`，即 `{"elly":"1000957","polly":"1000957"}`；日后拿到各 IP 的专属音色，只改这个映射里对应的一行即可切换（查表发生在每轮 getvalue、固件不缓存，代码零改动）。音色目录 `VOICE_CATALOG_JSON` 不做权威覆盖（staging 现含两条**占位**条目，`status:"TRAINED"` 是我方自述而非百度真值，见 §6「env 填写状态」）。**staging 已于 2026-11-19 12:14 填入并重启生效；prod 仍未填。**
 
@@ -167,7 +167,6 @@ CHARACTER_TIMBRE_JSON（IP/角色 → timbreId 权威映射）
 | `internal_error`           | 编排过程抛出未预期异常（DB/Redis 故障等），已吞掉以保住主流程响应 | 查服务端错误日志；期望值已落库，下一轮 start 会自动追平      |
 | `empty_catalog`            | 音色目录为空（placeholder 未填充）                           | 从百度导出 timbres 列表填入 `VOICE_CATALOG_JSON`             |
 | `voice_not_in_catalog`     | 期望音色不在目录内，或与实例语种不匹配                       | 确认 timbreId 与百度控制台一致，且语种匹配                   |
-| `speech_rate_map_missing`  | 语速档位在 `speech_rate_configs` 表无对应行，无法映射为 spd 倍数 | 在管理端 /analytics/speech-rate 补该档位→倍数映射            |
 | `incomplete_tts_target`    | 只有 vcn 或只有 speechRate，不足以组装完整 tts 串            | 两者都需要才能下发（仅落库时不需要）                         |
 | `upstream_error`           | 百度返回非 2xx                                               | 查百度控制台日志；常见错误码见百度文档                       |
 

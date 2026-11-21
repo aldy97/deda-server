@@ -71,7 +71,7 @@
 
 - `vcn`：取自平台配置 `CHARACTER_TIMBRE_JSON`（IP/角色 → timbreId），按该设备绑定的 IP 查表。**我方不返回兜底音色**：查不到就 500，因为一个错的音色不会被任何人察觉。
 - `vol`：TTS 合成音量倍数，来自全局配置 `TTS_DEFAULT_VOL`（默认 `1.0`，取值范围 0.5–2.0）。当前**不做每设备可调**。与 MQTT 的本地 volume（0–100）互不影响。
-- `spd`：语速倍数。设备有语速档位设置时按 `speech_rate_configs` 表映射；无设置或映射缺失时回落公版 §4.2 的基础语速 `1.0`。
+- `spd`：语速倍数。非哄睡会话返回全局 `voice_speed_config.normalSpd`、哄睡会话返回 `sleepSpd`（管理端可改）；DB 无行或越界回落默认 0.7/0.5。
 - `lang`：**我方在公版三字段之外追加的扩展字段**，当前恒为 `zh`。依据是罗浩 2026-11-18「固件对 data 中未知参数是忽略态度」，追加它对现有固件无影响。
   待确认（Q22）：固件是否会解析并使用它；多语种时 `bilingual` 该如何映射百度 `lang`。在答复前我方不做任何猜测性映射。
 
@@ -83,7 +83,7 @@
 | --- | --- | --- |
 | `CHARACTER_TIMBRE_JSON` | `vcn` 无法解析 → 500 | 取值已定（两个 IP 暂统一用 `1000957`），**部署配置待填**；填好前 getvalue 返回 500，填好后另行通知联调 |
 | `TTS_DEFAULT_VOL` | `vol` 越界 → 500 | 有默认值 `1.0`，无需显式配置 |
-| `speech_rate_configs`（DB 表） | `spd` 回落 `1.0` | migration 已种子 0.7 系默认值；管理端 /analytics/speech-rate 可改 |
+| `voice_speed_config`（DB 表） | 回落默认 0.7/0.5 | migration 已种子；管理端 /analytics/voice-speed 可改 |
 
 ### 2.3 `POST /client/bot/bot/start`
 

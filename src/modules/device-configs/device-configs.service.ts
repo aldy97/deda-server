@@ -157,17 +157,15 @@ export class DeviceConfigsService {
     let canApplyLive = false;
     let reason: string | null = null;
 
-    const spd = speechRate ? await this.reconcile.resolveSpd(speechRate) : null;
+    const spd = await this.reconcile.resolveNormalSpd();
 
     if (!available) {
       reason = "empty_catalog";
-    } else if (vcn === null && speechRate === null) {
-      // 没有期望值，reason 用 null 而不是编造一个
+    } else if (vcn === null) {
+      // 没有音色期望值，reason 用 null 而不是编造一个
       reason = null;
-    } else if (vcn !== null && speechRate !== null && spd !== null) {
-      canApplyLive = true;
     } else {
-      reason = "incomplete_tts_target";
+      canApplyLive = true;
     }
 
     return {
@@ -263,7 +261,7 @@ export class DeviceConfigsService {
 
     // 下发：mac 口径与 devices.service.ts 一致
     const mac = device.macAddress ?? device.deviceId;
-    const spd = await this.reconcile.resolveSpd(newSpeechRate);
+    const spd = await this.reconcile.resolveNormalSpd();
 
     let applied: string;
     let reason: string | null;

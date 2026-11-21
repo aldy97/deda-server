@@ -1,6 +1,6 @@
 import { Test } from "@nestjs/testing";
 import { SleepModeService } from "./sleep-mode.service";
-import { SLEEP_MODE_SPEED, SLEEP_MODE_VOLUME_CAP } from "./sleep-mode.service";
+import { SLEEP_MODE_VOLUME_CAP } from "./sleep-mode.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { DeviceLinkService } from "@/modules/device-link/device-link.service";
@@ -33,7 +33,8 @@ describe("SleepModeService", () => {
     getTimbreForCharacter: jest.fn(),
     applySpd: jest.fn(),
     readDesired: jest.fn(),
-    resolveSpd: jest.fn(),
+    resolveNormalSpd: jest.fn(),
+    resolveSleepSpd: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -51,8 +52,8 @@ describe("SleepModeService", () => {
     service = module.get(SleepModeService);
   });
 
-  it("exposes the sleep-mode speed constant as 0.5", () => {
-    expect(SLEEP_MODE_SPEED).toBe(0.5);
+  it("exposes the sleep-mode volume cap as 50", () => {
+    expect(SLEEP_MODE_VOLUME_CAP).toBe(50);
   });
 
   describe("enter", () => {
@@ -95,16 +96,17 @@ describe("SleepModeService", () => {
       expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 50);
     });
 
-    it("有音色时切音速到 0.5", async () => {
+    it("有音色时切音速到哄睡语速", async () => {
       deviceLink.getStatus.mockResolvedValue({ volume: 80 });
       voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
+      voiceReconcile.resolveSleepSpd.mockResolvedValue(0.5);
 
       await service.enter(DEVICE_ID);
 
       expect(voiceReconcile.applySpd).toHaveBeenCalledWith(
         "AABBCCDDEEFF",
         "1000957",
-        SLEEP_MODE_SPEED,
+        0.5,
       );
     });
 
@@ -173,14 +175,10 @@ describe("SleepModeService", () => {
       expect(deviceLink.setVolume).not.toHaveBeenCalled();
     });
 
-    it("有音色时切回档位音速", async () => {
+    it("有音色时切回非哄睡语速", async () => {
       redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
       voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
-      voiceReconcile.readDesired.mockResolvedValue({
-        vcn: "1000957",
-        speechRate: "slow",
-      });
-      voiceReconcile.resolveSpd.mockReturnValue(0.8);
+      voiceReconcile.resolveNormalSpd.mockResolvedValue(0.8);
 
       await service.exit(DEVICE_ID);
 
@@ -188,24 +186,6 @@ describe("SleepModeService", () => {
         "AABBCCDDEEFF",
         "1000957",
         0.8,
-      );
-    });
-
-    it("档位无法解析时回落基础语速 1", async () => {
-      redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
-      voiceReconcile.getTimbreForCharacter.mockReturnValue("1000957");
-      voiceReconcile.readDesired.mockResolvedValue({
-        vcn: null,
-        speechRate: null,
-      });
-      voiceReconcile.resolveSpd.mockReturnValue(null);
-
-      await service.exit(DEVICE_ID);
-
-      expect(voiceReconcile.applySpd).toHaveBeenCalledWith(
-        "AABBCCDDEEFF",
-        "1000957",
-        1,
       );
     });
 

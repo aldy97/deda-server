@@ -11,7 +11,6 @@ import { ClientApiService } from "./client-api.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { VOICE_RECONCILE_PORT } from "@/modules/baidu-agent/baidu-agent.types";
-import { SLEEP_MODE_SPEED } from "@/modules/sleep-configs/sleep-mode.service";
 import {
   BOT_INSTANCE_TTL_SECONDS,
   DEFAULT_PROVISION_WINDOW_SECONDS,
@@ -44,7 +43,8 @@ describe("ClientApiService", () => {
     onInstanceRegistered: jest.Mock;
     readDesired: jest.Mock;
     getTimbreForCharacter: jest.Mock;
-    resolveSpd: jest.Mock;
+    resolveNormalSpd: jest.Mock;
+    resolveSleepSpd: jest.Mock;
   };
 
   const createService = async () => {
@@ -98,7 +98,8 @@ describe("ClientApiService", () => {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
       readDesired: jest.fn().mockResolvedValue({ vcn: null, speechRate: null }),
       getTimbreForCharacter: jest.fn().mockReturnValue("1000957"),
-      resolveSpd: jest.fn().mockReturnValue(1.2),
+      resolveNormalSpd: jest.fn().mockResolvedValue(1.2),
+      resolveSleepSpd: jest.fn().mockResolvedValue(0.5),
     };
     service = await createService();
   });
@@ -458,11 +459,7 @@ describe("ClientApiService", () => {
     const dto = { id: MAC, nickname: NICKNAME };
 
     it("returns vcn/vol/spd for a registered device", async () => {
-      voiceReconcile.readDesired.mockResolvedValue({
-        vcn: null,
-        speechRate: "fast",
-      });
-      voiceReconcile.resolveSpd.mockReturnValue(1.5);
+      voiceReconcile.resolveNormalSpd.mockResolvedValue(1.5);
 
       await expect(service.botGetValue(dto)).resolves.toEqual({
         vcn: "1000957",
@@ -470,30 +467,13 @@ describe("ClientApiService", () => {
         spd: 1.5,
       });
       expect(voiceReconcile.getTimbreForCharacter).toHaveBeenCalledWith("elly");
-      expect(voiceReconcile.resolveSpd).toHaveBeenCalledWith("fast");
-      expect(voiceReconcile.readDesired).toHaveBeenCalledWith("device-uuid-1");
+      expect(voiceReconcile.resolveNormalSpd).toHaveBeenCalled();
     });
 
     it("normalizes the id the same way loginMac does", async () => {
       await expect(
         service.botGetValue({ id: "AA:BB-CC-DD-EE-FF", nickname: NICKNAME }),
       ).resolves.toEqual({ vcn: "1000957", vol: 1, spd: 1.2 });
-    });
-
-    it("falls back to the default speech-rate key when none is set", async () => {
-      voiceReconcile.readDesired.mockResolvedValue({
-        vcn: null,
-        speechRate: null,
-      });
-
-      await service.botGetValue(dto);
-      expect(voiceReconcile.resolveSpd).toHaveBeenCalledWith("normal");
-    });
-
-    it("falls back to the base spd when the rate map cannot resolve", async () => {
-      voiceReconcile.resolveSpd.mockReturnValue(null);
-
-      await expect(service.botGetValue(dto)).resolves.toMatchObject({ spd: 1 });
     });
 
     it("uses TTS_DEFAULT_VOL when configured", async () => {
@@ -566,9 +546,9 @@ describe("ClientApiService", () => {
       });
 
       await expect(service.botGetValue(dto)).resolves.toMatchObject({
-        spd: SLEEP_MODE_SPEED,
+        spd: 0.5,
       });
-      expect(voiceReconcile.resolveSpd).not.toHaveBeenCalled();
+      expect(voiceReconcile.resolveNormalSpd).not.toHaveBeenCalled();
     });
 
     it("uses rate-map speed when the sleep session is expired", async () => {

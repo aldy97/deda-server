@@ -14,6 +14,9 @@ import {
   parseVoicePayload,
   TTS_SPD_MIN,
   TTS_SPD_MAX,
+  DEFAULT_NORMAL_SPD,
+  DEFAULT_SLEEP_SPD,
+  VOICE_SPEED_CONFIG_ID,
 } from "./baidu-agent.types";
 import { buildTtsConfig } from "./tts-config.util";
 import {
@@ -98,16 +101,26 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     };
   }
 
-  /** 语速档位 → spd 倍数；DB 无该档位行或越界时返回 null（不猜默认倍数）。 */
-  async resolveSpd(speechRate: string | null): Promise<number | null> {
-    if (!speechRate) return null;
-    const row = await this.prisma.speechRateConfig.findUnique({
-      where: { tier: speechRate },
+  /** 非哄睡语速倍数；DB 无行或越界时回落 DEFAULT_NORMAL_SPD（不猜）。 */
+  async resolveNormalSpd(): Promise<number> {
+    const row = await this.prisma.voiceSpeedConfig.findUnique({
+      where: { id: VOICE_SPEED_CONFIG_ID },
     });
-    if (!row) return null;
-    const spd = row.spd;
+    const spd = row?.normalSpd;
     if (!Number.isFinite(spd) || spd < TTS_SPD_MIN || spd > TTS_SPD_MAX) {
-      return null;
+      return DEFAULT_NORMAL_SPD;
+    }
+    return spd;
+  }
+
+  /** 哄睡语速倍数；DB 无行或越界时回落 DEFAULT_SLEEP_SPD（不猜）。 */
+  async resolveSleepSpd(): Promise<number> {
+    const row = await this.prisma.voiceSpeedConfig.findUnique({
+      where: { id: VOICE_SPEED_CONFIG_ID },
+    });
+    const spd = row?.sleepSpd;
+    if (!Number.isFinite(spd) || spd < TTS_SPD_MIN || spd > TTS_SPD_MAX) {
+      return DEFAULT_SLEEP_SPD;
     }
     return spd;
   }
@@ -133,7 +146,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     mac: string,
     desired: DesiredVoiceState,
   ): Promise<VoiceApplyOutcome> {
-    if (desired.vcn === null && desired.speechRate === null) {
+    if (desired.vcn === null) {
       return { applied: "noop" };
     }
 
@@ -266,7 +279,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     instanceId: string,
     desired: DesiredVoiceState,
   ): Promise<VoiceApplyOutcome> {
-    if (desired.vcn === null && desired.speechRate === null) {
+    if (desired.vcn === null) {
       return { applied: "noop" };
     }
 
@@ -303,26 +316,15 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       }
     }
 
-    let spd: number | null = null;
-    if (desired.speechRate !== null) {
-      spd = await this.resolveSpd(desired.speechRate);
-      if (spd === null) {
-        this.logger.warn(
-          `Voice reconcile deferred: speech rate map missing, mac=${mac}, instanceId=${instanceId}, speechRate=${desired.speechRate}`,
-        );
-        return { applied: "deferred", reason: "speech_rate_map_missing" };
-      }
-    }
-
-    // TODO(Q9): 只传 spd 不传 vcn 时百度侧是否沿用当前音色，官方文档未定义；
-    // 确认前要求 vcn 与 spd 同时齐备才下发，缺一律记 incomplete_tts_target。
+    // per-device 语速档位已被全局两值取代：这里只切音色，spd 恒用全局非哄睡语速。
     const vcn = desired.vcn;
-    if (!vcn || spd === null) {
+    if (!vcn) {
       this.logger.warn(
         `Voice reconcile deferred: incomplete tts target, mac=${mac}, instanceId=${instanceId}`,
       );
       return { applied: "deferred", reason: "incomplete_tts_target" };
     }
+    const spd = await this.resolveNormalSpd();
 
     let tts: string;
     try {

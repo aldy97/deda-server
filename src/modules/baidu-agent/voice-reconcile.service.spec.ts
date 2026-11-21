@@ -45,7 +45,7 @@ describe("VoiceReconcileService", () => {
   let prisma: {
     device: { findUnique: jest.Mock };
     deviceConfig: { findFirst: jest.Mock };
-    speechRateConfig: { findUnique: jest.Mock };
+    voiceSpeedConfig: { findUnique: jest.Mock };
   };
   let redis: { getValue: jest.Mock };
   let configValues: Record<string, string | undefined>;
@@ -82,7 +82,7 @@ describe("VoiceReconcileService", () => {
     prisma = {
       device: { findUnique: jest.fn().mockResolvedValue(null) },
       deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
-      speechRateConfig: { findUnique: jest.fn().mockResolvedValue(null) },
+      voiceSpeedConfig: { findUnique: jest.fn().mockResolvedValue(null) },
     };
     redis = { getValue: jest.fn().mockResolvedValue(null) };
     configValues = {};
@@ -103,64 +103,54 @@ describe("VoiceReconcileService", () => {
   });
 
   // ==========================================================================
-  // resolveSpd
+  // resolveNormalSpd / resolveSleepSpd
   // ==========================================================================
-  describe("resolveSpd", () => {
-    it("should return null when speechRate is null", async () => {
-      await expect(service.resolveSpd(null)).resolves.toBeNull();
-    });
-
-    it("should return null when DB has no row for the tier", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue(null);
-      await expect(service.resolveSpd("normal")).resolves.toBeNull();
-    });
-
-    it("should return the mapped spd for a valid tier", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "slow",
-        spd: 0.8,
+  describe("resolveNormalSpd / resolveSleepSpd", () => {
+    it("should return the stored normal spd", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.8,
+        sleepSpd: 0.5,
       });
-      await expect(service.resolveSpd("slow")).resolves.toBe(0.8);
+      await expect(service.resolveNormalSpd()).resolves.toBe(0.8);
     });
 
-    it("should return null when spd is not a finite number", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "normal",
-        spd: NaN,
+    it("should return the stored sleep spd", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.7,
+        sleepSpd: 0.6,
       });
-      await expect(service.resolveSpd("normal")).resolves.toBeNull();
+      await expect(service.resolveSleepSpd()).resolves.toBe(0.6);
     });
 
-    it("should return null when spd is below TTS_SPD_MIN", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "slow",
-        spd: 0.3,
-      });
-      await expect(service.resolveSpd("slow")).resolves.toBeNull();
+    it("should fall back to default when the row is missing", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue(null);
+      await expect(service.resolveNormalSpd()).resolves.toBe(0.7);
+      await expect(service.resolveSleepSpd()).resolves.toBe(0.5);
     });
 
-    it("should return null when spd is above TTS_SPD_MAX", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "fast",
-        spd: 2.5,
+    it("should fall back to default when normal spd is below TTS_SPD_MIN", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.3,
+        sleepSpd: 0.5,
       });
-      await expect(service.resolveSpd("fast")).resolves.toBeNull();
+      await expect(service.resolveNormalSpd()).resolves.toBe(0.7);
     });
 
-    it("should accept spd exactly at TTS_SPD_MIN", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "slow",
-        spd: 0.5,
+    it("should fall back to default when sleep spd is above TTS_SPD_MAX", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.7,
+        sleepSpd: 2.5,
       });
-      await expect(service.resolveSpd("slow")).resolves.toBe(0.5);
+      await expect(service.resolveSleepSpd()).resolves.toBe(0.5);
     });
 
-    it("should accept spd exactly at TTS_SPD_MAX", async () => {
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "fast",
-        spd: 2,
+    it("should accept boundary values", async () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.5,
+        sleepSpd: 2,
       });
-      await expect(service.resolveSpd("fast")).resolves.toBe(2);
+      await expect(service.resolveNormalSpd()).resolves.toBe(0.5);
+      await expect(service.resolveSleepSpd()).resolves.toBe(2);
     });
   });
 
@@ -383,67 +373,14 @@ describe("VoiceReconcileService", () => {
       });
     });
 
-    describe("step 8: speechRate map missing", () => {
-      it("should return speech_rate_map_missing deferred", async () => {
+    describe("step 8: no vcn → noop even when speechRate is set", () => {
+      it("should return noop without touching the client", async () => {
         setupActiveInstance();
-        mockCatalog.available = true;
-        mockCatalog.find.mockReturnValue({
-          timbreId: "1000063",
-          name: "度小熊",
-          status: "TRAINED",
-          language: "chinese",
-        });
-        const result = await service.applyToActiveInstance(MAC, {
-          vcn: "1000063",
-          speechRate: "normal",
-        });
-        expect(result).toEqual({
-          applied: "deferred",
-          reason: "speech_rate_map_missing",
-        });
-        expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
-      });
-    });
-
-    describe("step 9: incomplete tts target (only vcn, spd missing)", () => {
-      it("should return incomplete_tts_target deferred", async () => {
-        setupActiveInstance();
-        mockCatalog.available = true;
-        mockCatalog.find.mockReturnValue({
-          timbreId: "1000063",
-          name: "度小熊",
-          status: "TRAINED",
-          language: "chinese",
-        });
-        // vcn provided but spd not (and speechRate null means resolveSpd returns null)
-        const result = await service.applyToActiveInstance(MAC, {
-          vcn: "1000063",
-          speechRate: null,
-        });
-        expect(result).toEqual({
-          applied: "deferred",
-          reason: "incomplete_tts_target",
-        });
-        expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
-      });
-    });
-
-    describe("step 9b: incomplete tts target (only spd, vcn missing)", () => {
-      it("should return incomplete_tts_target deferred", async () => {
-        prisma.speechRateConfig.findUnique.mockResolvedValue({
-          tier: "normal",
-          spd: 1,
-        });
-        setupActiveInstance();
-        mockCatalog.available = true;
         const result = await service.applyToActiveInstance(MAC, {
           vcn: null,
           speechRate: "normal",
         });
-        expect(result).toEqual({
-          applied: "deferred",
-          reason: "incomplete_tts_target",
-        });
+        expect(result).toEqual({ applied: "noop" });
         expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
       });
     });
@@ -464,9 +401,9 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        prisma.speechRateConfig.findUnique.mockResolvedValue({
-          tier: "normal",
-          spd: 1,
+        prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+          normalSpd: 1,
+          sleepSpd: 0.5,
         });
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
@@ -497,9 +434,9 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        prisma.speechRateConfig.findUnique.mockResolvedValue({
-          tier: "normal",
-          spd: 1,
+        prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+          normalSpd: 1,
+          sleepSpd: 0.5,
         });
 
         const result = await service.applyToActiveInstance(MAC, {
@@ -541,9 +478,9 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        prisma.speechRateConfig.findUnique.mockResolvedValue({
-          tier: "normal",
-          spd: 1,
+        prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+          normalSpd: 1,
+          sleepSpd: 0.5,
         });
 
         const result = await service.applyToActiveInstance(MAC, {
@@ -581,9 +518,9 @@ describe("VoiceReconcileService", () => {
           status: "TRAINED",
           language: "chinese",
         });
-        prisma.speechRateConfig.findUnique.mockResolvedValue({
-          tier: "normal",
-          spd: 1,
+        prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+          normalSpd: 1,
+          sleepSpd: 0.5,
         });
 
         await service.applyToActiveInstance(MAC, {
@@ -650,9 +587,9 @@ describe("VoiceReconcileService", () => {
         status: "TRAINED",
         language: "chinese",
       });
-      prisma.speechRateConfig.findUnique.mockResolvedValue({
-        tier: "normal",
-        spd: 1,
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 1,
+        sleepSpd: 0.5,
       });
       (buildTtsConfig as jest.Mock).mockReturnValue(
         'DEFAULT{"vcn":"1000063","spd":1}',
