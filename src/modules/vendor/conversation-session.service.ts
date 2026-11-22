@@ -11,6 +11,7 @@ import {
 } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
+import { FILLER_EMOTIONS, type FillerEmotion } from "@/modules/llm/filler-bank";
 
 export type ConversationIntent =
   | "free_chat"
@@ -71,6 +72,8 @@ export type IntentSource =
 export interface IntentDecision {
   intent: ConversationIntent;
   source: IntentSource;
+  /** 与 intent 同一次小模型调用产出的粗粒度情绪；缺省 = 未评估 */
+  emotion?: FillerEmotion;
 }
 
 /**
@@ -244,7 +247,11 @@ export class ConversationSessionService {
     if (decision.intent === "free_chat") {
       // 故事作答、二选一和普通接话默认留在当前模式，并滑动续期。
       await this.activate(deviceId, activeMode);
-      return { intent: activeMode, source: "session_sticky" };
+      return {
+        intent: activeMode,
+        source: "session_sticky",
+        emotion: decision.emotion,
+      };
     }
     return this.applyDecision(deviceId, decision, true, sleepTime);
   }
@@ -279,7 +286,11 @@ export class ConversationSessionService {
   ): IntentDecision {
     if (decision.intent !== "sleep_story") return decision;
     if (isInSleepWindow(new Date(), sleepTime)) return decision;
-    return { intent: "free_chat", source: "sleep_window_closed" };
+    return {
+      ...decision,
+      intent: "free_chat",
+      source: "sleep_window_closed",
+    };
   }
 
   /**
@@ -324,7 +335,7 @@ export class ConversationSessionService {
         turnId,
         model: this.llmService.smallModelName,
         temperature: 0,
-        maxTokens: 10,
+        maxTokens: 16,
         messages: [
           {
             role: "system",
@@ -334,11 +345,17 @@ export class ConversationSessionService {
         ],
       });
       const text = result.text.trim().toLowerCase();
-      const matched = CONVERSATION_INTENTS.find((intent) =>
-        text.includes(intent),
-      );
+      const [intentPart, emotionPart] = text
+        .split("|")
+        .map((part) => part.trim());
+      const matched =
+        CONVERSATION_INTENTS.find((intent) => intentPart === intent) ??
+        CONVERSATION_INTENTS.find((intent) => text.includes(intent));
       if (matched) {
-        return { intent: matched, source: "model" };
+        const emotion = FILLER_EMOTIONS.find((value) => value === emotionPart);
+        return emotion
+          ? { intent: matched, source: "model", emotion }
+          : { intent: matched, source: "model" };
       }
       // 模型有响应但标签不在七标签契约内：走关键词兜底并单独标记，
       // 这样「模型判错」和「模型没响应」在看板上不会混成同一种 fallback。

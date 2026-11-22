@@ -595,6 +595,7 @@ export class LlmAdapterService {
         intent,
         adventureDeclined,
         turnId,
+        emotion: intentDecision.emotion,
       });
       fillerText = picked.text;
       fillerBucket = picked.bucket;

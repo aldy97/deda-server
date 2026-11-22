@@ -839,6 +839,30 @@ describe("LlmAdapterModule", () => {
       expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
     });
 
+    it("intent 小模型给的情绪标签会传给 filler 选桶", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+        emotion: "sad",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["我陪着你"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "我没事" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.comfort).toContain(chunks[0]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        fillerBucket: "comfort",
+        fillerEmotion: "sad",
+      });
+    });
+
     it("主模型失败时 filler 已播，仍走兜底文案", async () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);

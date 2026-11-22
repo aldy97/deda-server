@@ -8,6 +8,14 @@
 
 export type FillerEmotion = "neutral" | "happy" | "sad" | "angry" | "scared";
 
+export const FILLER_EMOTIONS: readonly FillerEmotion[] = [
+  "neutral",
+  "happy",
+  "sad",
+  "angry",
+  "scared",
+];
+
 export type FillerBucket =
   | "neutral"
   | "question"

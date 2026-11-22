@@ -179,6 +179,36 @@ describe("ConversationSessionService", () => {
     expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
   });
 
+  it("parses intent and emotion from the same classifier call", async () => {
+    llmService.complete.mockResolvedValue({
+      text: "free_chat|sad",
+    } as Awaited<ReturnType<LlmService["complete"]>>);
+
+    await expect(
+      service.resolveWithSource("device-1", "我没事"),
+    ).resolves.toEqual({
+      intent: "free_chat",
+      source: "model",
+      emotion: "sad",
+    });
+  });
+
+  it("keeps single-label compatibility and drops invalid emotion", async () => {
+    llmService.complete.mockResolvedValue({
+      text: "free_chat",
+    } as Awaited<ReturnType<LlmService["complete"]>>);
+    await expect(
+      service.resolveWithSource("device-1", "今天天气怎么样"),
+    ).resolves.toEqual({ intent: "free_chat", source: "model" });
+
+    llmService.complete.mockResolvedValue({
+      text: "free_chat|confused",
+    } as Awaited<ReturnType<LlmService["complete"]>>);
+    await expect(
+      service.resolveWithSource("device-1", "今天天气怎么样"),
+    ).resolves.toEqual({ intent: "free_chat", source: "model" });
+  });
+
   it("routes sleep-config modification speech to sleep_config without a persistent session", async () => {
     llmService.complete.mockResolvedValue({
       text: "sleep_config",
@@ -505,6 +535,24 @@ describe("ConversationSessionService", () => {
       expect(llmService.complete).toHaveBeenCalledTimes(1);
     });
 
+    it("session_sticky 保留模型给的情绪标签", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("sleep_story"),
+      );
+      mockModel("free_chat|sad");
+
+      const decision = await service.resolveWithSource(
+        "device-1",
+        "我没事，你继续讲",
+      );
+
+      expect(decision).toEqual({
+        intent: "sleep_story",
+        source: "session_sticky",
+        emotion: "sad",
+      });
+    });
+
     it("explicit_exit：显式退出重置会话且不调模型", async () => {
       prisma.conversationSession.findUnique.mockResolvedValue(
         activeSession("english_story"),
@@ -777,6 +825,21 @@ describe("ConversationSessionService", () => {
       ).resolves.toEqual({
         intent: "free_chat",
         source: "sleep_window_closed",
+      });
+    });
+
+    it("时段门禁降级时保留情绪标签", async () => {
+      sleepConfigs.getByDeviceId.mockResolvedValue(
+        sleepConfig({ sleepTime: "21:30" }),
+      );
+      mockModel("sleep_story|sad");
+
+      await expect(
+        service.resolveWithSource("device-1", "我困了"),
+      ).resolves.toEqual({
+        intent: "free_chat",
+        source: "sleep_window_closed",
+        emotion: "sad",
       });
     });
 

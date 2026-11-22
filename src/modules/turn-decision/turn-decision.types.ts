@@ -6,6 +6,7 @@ import type {
   ConversationIntent,
   IntentSource,
 } from "@/modules/vendor/conversation-session.service";
+import type { FillerEmotion } from "@/modules/llm/filler-bank";
 
 export type { SafetySource, SafetyVerdict, ConversationIntent, IntentSource };
 
@@ -64,6 +65,8 @@ export const ASR_TEXT_MAX_LENGTH = 200;
 export interface TurnIntentDecision {
   intent: ConversationIntent;
   source: TurnIntentSource;
+  /** 与 intent 同一次小模型调用产出的粗粒度情绪；缺省 = 未评估 */
+  emotion?: FillerEmotion;
 }
 
 export interface TurnDecisionRecord {
