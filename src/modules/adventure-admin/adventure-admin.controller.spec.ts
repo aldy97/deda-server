@@ -211,6 +211,12 @@ const EXPECTED_ROUTES: RouteExpectation[] = [
     readOnlyExempt: false,
   },
   {
+    handler: "listDeviceTestAssignments",
+    method: RequestMethod.GET,
+    path: "device-test/assignments",
+    readOnlyExempt: false,
+  },
+  {
     handler: "deviceTestAssignment",
     method: RequestMethod.GET,
     path: "device-test/assignment/:deviceId",
@@ -323,6 +329,7 @@ describe("AdventureAdminController", () => {
     };
     testAssign = {
       assignment: jest.fn(),
+      listByCharacter: jest.fn(),
       assign: jest.fn(),
       clear: jest.fn(),
     };
@@ -1179,6 +1186,25 @@ describe("AdventureAdminController", () => {
   });
 
   describe("test story assign routes", () => {
+    it("forwards the per-IP assignment list without an actor", async () => {
+      testAssign.listByCharacter.mockResolvedValue({
+        enabled: true,
+        characterKey: "elly",
+        total: 0,
+        devices: [],
+      });
+
+      await expect(
+        controller.listDeviceTestAssignments({ characterKey: "elly" } as never),
+      ).resolves.toEqual({
+        enabled: true,
+        characterKey: "elly",
+        total: 0,
+        devices: [],
+      });
+      expect(testAssign.listByCharacter).toHaveBeenCalledWith("elly");
+    });
+
     it("forwards the assignment read without an actor", async () => {
       testAssign.assignment.mockResolvedValue({
         enabled: true,
