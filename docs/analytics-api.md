@@ -949,6 +949,26 @@ body { deviceId, reason }
 → { ok, audited }
    // 清除设备当前下发；仅当它正是这一集（否则 409）。审计写失败只返回 audited=false。
 
+GET /analytics/adventure-admin/device-test/assignments?characterKey=elly
+→ {
+    enabled,
+    characterKey,
+    total,
+    devices: [{
+      deviceId, deviceCode,
+      episode: { id, businessKey, title, characterKey, season, episodeNumber, retiredAt },
+      version: { id, version, status } | null,
+      followsCurrent, stale, lastAssignedAt
+    }]
+  }
+   // 按 IP 列出当前所有被下发的样机（每台设备同时只记一集）。真相是 device 字段，
+   // 不是审计流水——下发会覆盖、清除会清空，拿历史推导会列出早已换走的设备。
+   // followsCurrent=true：未锁快照，播放跟随该集 currentVersionId。
+   // stale=true：锁的快照已不是「现在重新下发会选的版本」（最新草稿优先，否则当前发布版）。
+   // lastAssignedAt：该设备最近一条 device_test_assign 审计；审计写失败（audited=false）时可能为 null。
+   // prod（未启用）返回 { enabled: false, characterKey, total: 0, devices: [] }，不暴露明细。
+   // 最多返回 500 台；total 是实际总数，用于提示截断。
+
 GET /analytics/adventure-admin/device-test/assignment/:deviceId
 → { enabled, assignment: { device, episode, episodeVersion } | null }
    // 读设备当前下发；prod（未启用）返回 { enabled: false, assignment: null }，不暴露明细。

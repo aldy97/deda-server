@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { ADVENTURE_TEST_ENV } from "@/modules/adventure/adventure.constants";
 import { assertReason } from "./adventure-content.service";
@@ -32,6 +33,34 @@ interface ResolvedDevice {
   testAdventureEpisodeId: string | null;
   testAdventureEpisodeVersionId: string | null;
 }
+
+export interface CharacterTestDevice {
+  deviceId: string;
+  deviceCode: string | null;
+  episode: {
+    id: string;
+    businessKey: string;
+    title: string;
+    characterKey: string;
+    season: number;
+    episodeNumber: number;
+    retiredAt: string | null;
+  };
+  version: { id: string; version: number; status: string } | null;
+  followsCurrent: boolean;
+  stale: boolean;
+  lastAssignedAt: string | null;
+}
+
+export interface CharacterTestDevicesResult {
+  enabled: boolean;
+  characterKey: string;
+  total: number;
+  devices: CharacterTestDevice[];
+}
+
+/** 一个 IP 下的样机数量是量级很小的运营集合，500 足够且能挡住异常数据把响应撑爆。 */
+const CHARACTER_DEVICE_LIST_LIMIT = 500;
 
 @Injectable()
 export class AdventureTestAssignService {
@@ -146,6 +175,152 @@ export class AdventureTestAssignService {
       { clearedEpisodeId: episodeId },
     );
     return { ok: true, audited };
+  }
+
+  /**
+   * 按 IP 列出所有「当前被下发」的样机。只读，不改任何状态。
+   *
+   * 真相是 device 上的一对字段（每台设备同时只记一集），不是审计流水：
+   * 下发会覆盖、清除会把字段清空，拿历史推导会列出早已换走的设备。
+   * 审计只用来补一个展示字段 lastAssignedAt——取该设备最近一条
+   * device_test_assign 的时间；若那次审计写失败（audited=false），这里为 null。
+   *
+   * stale 的口径与 assign 的选版规则一致：有草稿锁最新草稿，否则锁当前发布版。
+   * 设备锁的是旧快照时 stale=true，但播放仍按它自己锁的快照走——这只是提醒
+   * 「重新下发才会换到新版本」，不是错误。
+   */
+  async listByCharacter(
+    characterKey: string,
+  ): Promise<CharacterTestDevicesResult> {
+    if (!this.isEnabled()) {
+      return { enabled: false, characterKey, total: 0, devices: [] };
+    }
+
+    const where: Prisma.DeviceWhereInput = {
+      testAdventureEpisode: { is: { characterKey } },
+    };
+    const [devices, total] = await Promise.all([
+      this.prisma.device.findMany({
+        where,
+        select: {
+          deviceId: true,
+          deviceCode: true,
+          testAdventureEpisodeId: true,
+          testAdventureEpisodeVersionId: true,
+          testAdventureEpisode: {
+            select: {
+              id: true,
+              title: true,
+              characterKey: true,
+              season: true,
+              episodeNumber: true,
+              retiredAt: true,
+              currentVersionId: true,
+            },
+          },
+          testAdventureEpisodeVersion: {
+            select: { id: true, version: true, status: true },
+          },
+        },
+        orderBy: { deviceId: "asc" },
+        take: CHARACTER_DEVICE_LIST_LIMIT,
+      }),
+      this.prisma.device.count({ where }),
+    ]);
+
+    const episodeIds = [
+      ...new Set(
+        devices
+          .map((device) => device.testAdventureEpisode?.id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const deviceIds = devices.map((device) => device.deviceId);
+
+    const [drafts, assignments] = await Promise.all([
+      episodeIds.length > 0
+        ? this.prisma.adventureEpisodeVersion.findMany({
+            where: { episodeId: { in: episodeIds }, status: "draft" },
+            orderBy: { version: "desc" },
+            select: { id: true, episodeId: true },
+          })
+        : Promise.resolve([]),
+      deviceIds.length > 0
+        ? this.prisma.adventureContentAuditLog.findMany({
+            where: {
+              action: "device_test_assign",
+              businessKey: { in: deviceIds },
+            },
+            orderBy: { createdAt: "desc" },
+            select: { businessKey: true, createdAt: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const latestDraftByEpisode = new Map<string, string>();
+    for (const draft of drafts) {
+      if (!latestDraftByEpisode.has(draft.episodeId)) {
+        latestDraftByEpisode.set(draft.episodeId, draft.id);
+      }
+    }
+    const lastAssignedByDevice = new Map<string, Date>();
+    for (const row of assignments) {
+      if (!lastAssignedByDevice.has(row.businessKey)) {
+        lastAssignedByDevice.set(row.businessKey, row.createdAt);
+      }
+    }
+
+    const rows = devices.flatMap((device): CharacterTestDevice[] => {
+      const episode = device.testAdventureEpisode;
+      if (!episode) {
+        return [];
+      }
+      const expectedVersionId =
+        latestDraftByEpisode.get(episode.id) ??
+        episode.currentVersionId ??
+        null;
+      const followsCurrent = device.testAdventureEpisodeVersionId === null;
+      const pinned = device.testAdventureEpisodeVersion;
+      return [
+        {
+          deviceId: device.deviceId,
+          deviceCode: device.deviceCode,
+          episode: {
+            id: episode.id,
+            businessKey: `${episode.characterKey}/${episode.season}/${episode.episodeNumber}`,
+            title: episode.title,
+            characterKey: episode.characterKey,
+            season: episode.season,
+            episodeNumber: episode.episodeNumber,
+            retiredAt: episode.retiredAt
+              ? episode.retiredAt.toISOString()
+              : null,
+          },
+          version: pinned
+            ? {
+                id: pinned.id,
+                version: pinned.version,
+                status: pinned.status,
+              }
+            : null,
+          followsCurrent,
+          stale:
+            !followsCurrent &&
+            device.testAdventureEpisodeVersionId !== expectedVersionId,
+          lastAssignedAt:
+            lastAssignedByDevice.get(device.deviceId)?.toISOString() ?? null,
+        },
+      ];
+    });
+
+    rows.sort(
+      (a, b) =>
+        a.episode.season - b.episode.season ||
+        a.episode.episodeNumber - b.episode.episodeNumber ||
+        a.deviceId.localeCompare(b.deviceId),
+    );
+
+    return { enabled: true, characterKey, total, devices: rows };
   }
 
   /** 读设备当前下发（dashboard 展示用；未启用时返回 enabled=false，不暴露明细）。 */
