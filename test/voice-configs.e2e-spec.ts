@@ -23,7 +23,6 @@ import {
   BAIDU_AGENT_CLIENT_PORT,
   VOICE_CATALOG_PORT,
   VOICE_RECONCILE_PORT,
-  DesiredVoiceState,
   VoiceApplyBlockReason,
   VoiceApplyOutcome,
   VoiceCatalogEntry,
@@ -174,10 +173,6 @@ describe("VoiceConfigs (e2e)", () => {
   };
 
   const mockVoiceReconcile = {
-    readDesired: jest.fn(async (): Promise<DesiredVoiceState> => ({
-      vcn: null,
-      speechRate: null,
-    })),
     applyToActiveInstance: jest.fn(
       async (): Promise<VoiceApplyOutcome> => applyOutcome,
     ),
@@ -186,6 +181,8 @@ describe("VoiceConfigs (e2e)", () => {
     })),
     resolveNormalSpd: jest.fn(async (): Promise<number> => normalSpd),
     resolveSleepSpd: jest.fn(async (): Promise<number> => 0.5),
+    resolveActiveSpd: jest.fn(async (): Promise<number> => normalSpd),
+    noteApplied: jest.fn(async (): Promise<void> => undefined),
   };
 
   const mockBaiduAgentClient = {
@@ -370,7 +367,8 @@ describe("VoiceConfigs (e2e)", () => {
           });
           expect(mockVoiceReconcile.applyToActiveInstance).toHaveBeenCalledWith(
             DEVICE_MAC,
-            { vcn: null, speechRate: "slow" },
+            { vcn: null },
+            DEVICE_INTERNAL_ID,
           );
         }));
 
