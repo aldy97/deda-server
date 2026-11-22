@@ -126,6 +126,7 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 > 退出词表 `ADVENTURE_EXIT_KEYWORDS` 与粘滞会话的显式退出判定（`ConversationSessionService.isExplicitExit`）**共用同一份**，此前两边各有一份导致同一句话在两条链路上结论不同。
 
 > `ADVENTURE_CHOICE_LLM_ENABLED` 默认 `false`（开关关）时，行为与旧版完全一致。开关打开后，二选一确定性匹配不中时会追加一次小模型 LLM 兜底判定。
+> 该键已加入 `docker/docker-compose.yml` 的 app environment 白名单；staging 可设 `true` 做冒烟，prod 观察后再开。
 
 **LLM 二选一三层降级**（模型输出不合契约时保护孩子不听到原始模型文字）：
 
@@ -234,7 +235,7 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 2. 禁止续写、改写或剧透主线；
 3. 禁止连续追问、禁止批评纠正孩子；
 4. 跑题引回时先接住孩子话题一句，再引回交互问题；
-5. 内容不适宜时输出固定安全话术。
+5. 安全判定不在本 prompt 内：L2 明确拦截时由代码直接返回 `ADVENTURE_UNSAFE_LINE`；L2 不可用时注入谨慎指令；情绪宣泄注入共情指令。
 
 模型走 `SMALL_LLM_*`（qwen-flash）；分类失败走关键词兜底，接话失败走 `fallbackText`。
 

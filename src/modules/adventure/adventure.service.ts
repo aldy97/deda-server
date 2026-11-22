@@ -10,13 +10,18 @@ import { LlmService } from "@/modules/llm/llm.service";
 import {
   ADVENTURE_CHOICE_LLM_DEFAULTS,
   ADVENTURE_CHOICE_LLM_ENV,
+  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   ADVENTURE_EXIT_TEXT,
+  ADVENTURE_SAFETY_CAUTION,
   ADVENTURE_TEST_ENV,
   ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT,
   ADVENTURE_TEST_STORY_TRIGGER,
+  ADVENTURE_UNSAFE_LINE,
   AdventureFailurePhase,
   AdventureFailureReport,
+  AdventureSafetyProvider,
+  AdventureSafetySignal,
   isAdventureExitRequest,
 } from "./adventure.constants";
 import { adventureDateKey } from "./adventure-date.util";
@@ -35,8 +40,9 @@ import {
   withInteractionMeta,
 } from "./adventure-reply";
 import {
-  matchChoiceDeterministic,
+  diagnoseChoiceMatch,
   parseChoiceVerdict,
+  type ChoiceMatchReason,
 } from "./adventure-match";
 import {
   AdventureDailyRecord,
@@ -51,6 +57,13 @@ export interface AdventureReply {
   action: "narrate" | "await_reply" | "completed" | "exit";
   /** 本轮交互处置结果；开集/续播等非交互回复为 undefined。 */
   result?: "answered" | "off_topic" | "fallback" | "exit" | "timeout";
+  /**
+   * 二选一未命中时的原因：no_hit / multi_hit / negation_guard 等。
+   * 只用于 result 事件的内部归因，不暴露给设备端。
+   */
+  matchReason?: ChoiceMatchReason;
+  /** 本轮被 L2 安全判定拦截（由代码直接返回固定安全话术） */
+  safetyBlocked?: boolean;
   /**
    * 本轮处置发生在哪个交互点：类型 + 段 order。
    * result 事件由四种交互类型共用（two_choice / open_question /
@@ -73,6 +86,14 @@ export interface AdventureReply {
     /** progress.episodeVersionId；为空表示走 segments 物化表而非版本快照 */
     episodeVersionId: string | null;
   };
+}
+
+/**
+ * 冒险接话的可选上下文。getSafety 是惰性安全判定：只有真正要调接话层/
+ * 二选一 LLM 时才会被调用，避免确定性命中/跟读/退出等路径多付一次小模型调用。
+ */
+export interface HandleChildReplyOptions {
+  getSafety?: AdventureSafetyProvider;
 }
 
 interface InteractionChoice {
@@ -897,14 +918,22 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   /**
    * 孩子回话：明确拒绝在任何阶段都接管（见 exitAdventure），其余四类处置只在
    * 交互等待态生效；非等待态返回 null（不接管上行）。
+   *
+   * 生产调用方应传 `options.getSafety`：接话层/二选一 LLM 路径用它惰性触发 L2；
+   * 不传时这些路径不再自带安全判定（仅测试/历史链路使用）。
    */
   /** 孩子回话入口。兜底口径同 startToday。 */
   async handleChildReply(
     deviceInternalId: string,
     asrText: string,
+    options?: HandleChildReplyOptions,
   ): Promise<AdventureReply | null> {
     try {
-      return await this.handleChildReplyInternal(deviceInternalId, asrText);
+      return await this.handleChildReplyInternal(
+        deviceInternalId,
+        asrText,
+        options,
+      );
     } catch (error) {
       return this.handleEngineFailure(deviceInternalId, "handle_reply", error);
     }
@@ -913,6 +942,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   private async handleChildReplyInternal(
     deviceInternalId: string,
     asrText: string,
+    options?: HandleChildReplyOptions,
   ): Promise<AdventureReply | null> {
     const current = await this.findCurrentAdventure(deviceInternalId);
     if (!current) {
@@ -947,6 +977,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           segments,
           interaction,
           asrText,
+          options,
         ),
         interaction,
       );
@@ -955,21 +986,36 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       // 跟读以鼓励为主、完全不判定：孩子说任何话——漏词、发音不准、甚至完全无关——
       // 都算成功，一律播 praise 并推进主线。刻意不比对目标句：跟读的目标是让孩子
       // 开口，不是考发音；判失败只会打击孩子，且跟读没有剧情约束要求它必须命中。
-      const options = interaction.options as unknown as {
+      const interactionOptions = interaction.options as unknown as {
         praise?: string;
       } | null;
-      const praise = options?.praise || "说得真好！给你鼓掌！";
+      const praise = interactionOptions?.praise || "说得真好！给你鼓掌！";
       const reply = await this.playFrom(progress, segments, [praise], daily);
       return withInteractionMeta({ ...reply, result: "answered" }, interaction);
     }
     // open_question：小模型接话（含正常/跑题/超前发挥），失败降级兜底
-    const bridge = await this.generateBridge(
-      deviceInternalId,
-      interaction,
-      asrText,
-      "open_question",
+    const { safety, result: bridge } = await this.withSafety(options, () =>
+      this.generateBridge(
+        deviceInternalId,
+        interaction,
+        asrText,
+        "open_question",
+      ),
     );
-    const reply = await this.playFrom(progress, segments, [bridge], daily);
+    if (safety?.blocked) {
+      return withInteractionMeta(this.blockedReply(), interaction);
+    }
+    const safetyInstruction = this.safetyInstruction(safety);
+    const bridgeText = safetyInstruction
+      ? await this.generateBridge(
+          deviceInternalId,
+          interaction,
+          asrText,
+          "open_question",
+          safetyInstruction,
+        )
+      : bridge;
+    const reply = await this.playFrom(progress, segments, [bridgeText], daily);
     return withInteractionMeta({ ...reply, result: "answered" }, interaction);
   }
 
@@ -1014,27 +1060,99 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * 并行执行「惰性安全判定」与「生成/判定」：
+   * - 安全判定只在调用方真正需要 LLM 时才被触发；
+   * - 两者并行，正常轮次不增加串行延迟；
+   * - 安全判定异常返回 null（fail-open），由 safetyInstruction 注入谨慎指令。
+   */
+  private async withSafety<T>(
+    options: HandleChildReplyOptions | undefined,
+    run: () => Promise<T>,
+  ): Promise<{
+    safety: AdventureSafetySignal | null | undefined;
+    result: T;
+  }> {
+    const [safety, result] = await Promise.all([
+      this.resolveSafety(options?.getSafety),
+      run(),
+    ]);
+    return { safety, result };
+  }
+
+  /** undefined = 调用方没提供；null = 提供了但异常/未给出结论（fail-open） */
+  private async resolveSafety(
+    provider?: AdventureSafetyProvider,
+  ): Promise<AdventureSafetySignal | null | undefined> {
+    if (!provider) {
+      return undefined;
+    }
+    try {
+      return await provider();
+    } catch (error) {
+      this.logger.warn(
+        `Adventure safety provider failed, fail-open: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /** 安全结论对应的附加指令；safe/未提供返回 undefined */
+  private safetyInstruction(
+    safety: AdventureSafetySignal | null | undefined,
+  ): string | undefined {
+    if (
+      safety === null ||
+      safety?.source === "l2_fail_open" ||
+      safety?.source === "l2_invalid_label"
+    ) {
+      return ADVENTURE_SAFETY_CAUTION;
+    }
+    if (safety?.category === "emotional_harm") {
+      return ADVENTURE_EMOTIONAL_HARM_GUIDANCE;
+    }
+    return undefined;
+  }
+
+  /** L2 明确拦截：代码直接返回固定话术，丢弃乐观并发生成的接话，不推进进度 */
+  private blockedReply(): AdventureReply {
+    return {
+      texts: [ADVENTURE_UNSAFE_LINE],
+      action: "await_reply",
+      result: "off_topic",
+      safetyBlocked: true,
+    };
+  }
+
   /** 小模型二选一兜底判定，失败返回 index=null 降级给上层走旧跑题逻辑 */
   private async judgeAndRedirect(
     deviceInternalId: string,
     interaction: PlayableSegment,
     asrText: string,
     choices: InteractionChoice[],
+    safetyInstruction?: string,
   ): Promise<{ index: number | null; redirectText: string }> {
     try {
       const characterKey = await this.getCharacterKey(deviceInternalId);
       const characterPersona =
         CHARACTER_PERSONAS[characterKey] || CHARACTER_PERSONAS.elly;
+      const messages = this.llmService.buildAdventureChoiceMatchPrompt({
+        characterPersona,
+        segmentText: interaction.text,
+        choiceA: choices[0]?.text ?? "",
+        choiceB: choices[1]?.text ?? "",
+        childReply: asrText,
+      });
+      if (safetyInstruction) {
+        messages.splice(1, 0, { role: "system", content: safetyInstruction });
+      }
       const result = await this.llmService.complete({
         scene: "adventure_interaction",
         deviceId: deviceInternalId,
-        messages: this.llmService.buildAdventureChoiceMatchPrompt({
-          characterPersona,
-          segmentText: interaction.text,
-          choiceA: choices[0]?.text ?? "",
-          choiceB: choices[1]?.text ?? "",
-          childReply: asrText,
-        }),
+        temperature: 0,
+        messages,
         model: this.llmService.smallModelName,
         maxTokens: 160,
         timeoutMs: 3500,
@@ -1057,12 +1175,14 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     segments: PlayableSegment[],
     interaction: PlayableSegment,
     asrText: string,
+    handleOptions?: HandleChildReplyOptions,
   ): Promise<AdventureReply> {
-    const options = interaction.options as unknown as {
+    const interactionOptions = interaction.options as unknown as {
       choices?: InteractionChoice[];
     } | null;
-    const choices = options?.choices || [];
-    const hitIndex = matchChoiceDeterministic(choices, asrText);
+    const choices = interactionOptions?.choices || [];
+    const diagnosis = diagnoseChoiceMatch(choices, asrText);
+    const hitIndex = diagnosis.index;
     const matched = hitIndex !== null ? choices[hitIndex] : undefined;
 
     if (matched) {
@@ -1090,12 +1210,29 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
     // LLM 兜底判定（开关打开时）：确定性匹配未命中，调一次小模型再试
     if (this.isChoiceLlmEnabled()) {
-      const verdict = await this.judgeAndRedirect(
-        deviceInternalId,
-        interaction,
-        asrText,
-        choices,
+      const { safety, result: optimisticVerdict } = await this.withSafety(
+        handleOptions,
+        () =>
+          this.judgeAndRedirect(
+            deviceInternalId,
+            interaction,
+            asrText,
+            choices,
+          ),
       );
+      if (safety?.blocked) {
+        return this.blockedReply();
+      }
+      const safetyInstruction = this.safetyInstruction(safety);
+      const verdict = safetyInstruction
+        ? await this.judgeAndRedirect(
+            deviceInternalId,
+            interaction,
+            asrText,
+            choices,
+            safetyInstruction,
+          )
+        : optimisticVerdict;
 
       if (verdict.index !== null) {
         const matchedChoice = choices[verdict.index];
@@ -1134,6 +1271,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           texts: [redirect],
           action: "await_reply",
           result: "off_topic",
+          matchReason: diagnosis.reason,
         };
       }
 
@@ -1143,22 +1281,44 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         [interaction.fallbackText || "没关系，我们继续吧。"],
         daily,
       );
-      return { ...reply, result: "fallback" };
+      return { ...reply, result: "fallback", matchReason: diagnosis.reason };
     }
 
     // 首次跑题（开关关闭时）：小模型接住 + 轻引回一次，仍停在该交互点，不推进主线
     if (progress.offTopicCount === 0) {
-      const redirect = await this.generateBridge(
-        deviceInternalId,
-        interaction,
-        asrText,
-        "redirect",
+      const { safety, result: optimisticRedirect } = await this.withSafety(
+        handleOptions,
+        () =>
+          this.generateBridge(
+            deviceInternalId,
+            interaction,
+            asrText,
+            "redirect",
+          ),
       );
+      if (safety?.blocked) {
+        return this.blockedReply();
+      }
+      const safetyInstruction = this.safetyInstruction(safety);
+      const redirect = safetyInstruction
+        ? await this.generateBridge(
+            deviceInternalId,
+            interaction,
+            asrText,
+            "redirect",
+            safetyInstruction,
+          )
+        : optimisticRedirect;
       await this.prisma.adventureProgress.update({
         where: { id: progress.id },
         data: { offTopicCount: 1, waitingSince: null },
       });
-      return { texts: [redirect], action: "await_reply", result: "off_topic" };
+      return {
+        texts: [redirect],
+        action: "await_reply",
+        result: "off_topic",
+        matchReason: diagnosis.reason,
+      };
     }
 
     // 第二次跑题（开关关闭时）：预生成兜底话术推进，不再引回、不调 LLM
@@ -1168,7 +1328,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       [interaction.fallbackText || "没关系，我们继续吧。"],
       daily,
     );
-    return { ...reply, result: "fallback" };
+    return { ...reply, result: "fallback", matchReason: diagnosis.reason };
   }
 
   /** 小模型接话；失败降级为兜底话术，保证绝不卡死 */
@@ -1177,20 +1337,26 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     interaction: PlayableSegment,
     asrText: string,
     kind: "open_question" | "redirect",
+    safetyInstruction?: string,
   ): Promise<string> {
     try {
       const characterKey = await this.getCharacterKey(deviceInternalId);
       const characterPersona =
         CHARACTER_PERSONAS[characterKey] || CHARACTER_PERSONAS.elly;
+      const messages = this.llmService.buildAdventureInteractionPrompt({
+        characterPersona,
+        segmentText: interaction.text,
+        childReply: asrText,
+        kind,
+      });
+      if (safetyInstruction) {
+        messages.splice(1, 0, { role: "system", content: safetyInstruction });
+      }
       const result = await this.llmService.complete({
         scene: "adventure_interaction",
         deviceId: deviceInternalId,
-        messages: this.llmService.buildAdventureInteractionPrompt({
-          characterPersona,
-          segmentText: interaction.text,
-          childReply: asrText,
-          kind,
-        }),
+        temperature: 0.3,
+        messages,
         model: this.llmService.smallModelName,
         maxTokens: 80,
       });
@@ -1429,7 +1595,15 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           // 「二选一兜底率」的分母从开放提问里摘出来。
           segmentOrder: reply.interaction?.order ?? null,
           ...(reply.interaction
-            ? { payload: { interactionType: reply.interaction.type } }
+            ? {
+                payload: {
+                  interactionType: reply.interaction.type,
+                  ...(reply.matchReason
+                    ? { matchReason: reply.matchReason }
+                    : {}),
+                  ...(reply.safetyBlocked ? { safetyBlocked: true } : {}),
+                },
+              }
             : {}),
         },
       });
