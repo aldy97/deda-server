@@ -11,9 +11,21 @@ describe("VoiceSpeedAdminController", () => {
     get: jest.fn().mockResolvedValue({ normalSpd: 0.7, sleepSpd: 0.5 }),
     update: jest.fn().mockResolvedValue({ normalSpd: 0.8, sleepSpd: 0.6 }),
   };
-  const controller = new VoiceSpeedAdminController(service as never);
+  const broadcast = {
+    apply: jest.fn().mockResolvedValue({
+      targeted: 1,
+      live: 1,
+      deferred: 0,
+      skipped: 0,
+      results: [],
+    }),
+  };
+  const controller = new VoiceSpeedAdminController(
+    service as never,
+    broadcast as never,
+  );
 
-  it("读写都挂在 SuperAdminGuard 之下", () => {
+  it("读写和下发都挂在 SuperAdminGuard 之下", () => {
     const guards = Reflect.getMetadata(
       "__guards__",
       VoiceSpeedAdminController,
@@ -35,5 +47,17 @@ describe("VoiceSpeedAdminController", () => {
 
     await expect(controller.update(dto)).resolves.toEqual(dto);
     expect(service.update).toHaveBeenCalledWith(dto);
+  });
+
+  it("POST apply 用当前配置触发广播", async () => {
+    const dto = { macs: ["aabbccddeeff"] };
+
+    await controller.apply(dto);
+
+    expect(service.get).toHaveBeenCalled();
+    expect(broadcast.apply).toHaveBeenCalledWith(
+      { normalSpd: 0.7, sleepSpd: 0.5 },
+      dto,
+    );
   });
 });

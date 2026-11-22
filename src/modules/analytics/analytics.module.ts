@@ -45,6 +45,7 @@ import { PromptAdminController } from "./prompt-admin.controller";
 import { PromptAdminService } from "./prompt-admin.service";
 import { VoiceSpeedAdminController } from "./voice-speed-admin.controller";
 import { VoiceSpeedAdminService } from "./voice-speed-admin.service";
+import { VoiceSpeedBroadcastService } from "./voice-speed-broadcast.service";
 import { VoiceTimbreAdminController } from "./voice-timbre-admin.controller";
 import { VoiceTimbreAdminService } from "./voice-timbre-admin.service";
 import { AnalyticsMetaController } from "./analytics-meta.controller";
@@ -112,6 +113,7 @@ import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
     TurnDecisionAnalyticsService,
     PromptAdminService,
     VoiceSpeedAdminService,
+    VoiceSpeedBroadcastService,
     VoiceTimbreAdminService,
   ],
 })
