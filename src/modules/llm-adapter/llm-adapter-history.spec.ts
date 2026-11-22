@@ -16,7 +16,6 @@ describe("buildHistoryFromRows", () => {
       { role: "assistant", content: "回答" },
       { role: "user", content: "你好" },
     ]);
-    expect(built.recentFillers).toEqual(["嗯嗯"]);
   });
 
   it("无边界信息的旧 assistant 行（answer 缺失）跳过", () => {
@@ -26,10 +25,9 @@ describe("buildHistoryFromRows", () => {
     ];
     const built = buildHistoryFromRows(rows);
     expect(built.history).toEqual([{ role: "user", content: "你好" }]);
-    expect(built.recentFillers).toEqual([]);
   });
 
-  it("时间倒序输入正序输出，recentFillers 只留最近 5 轮", () => {
+  it("时间倒序输入正序输出", () => {
     const rows: HistoryRow[] = Array.from({ length: 7 }, (_, i) => ({
       role: "assistant" as const,
       content: `t${i}`,
@@ -39,7 +37,5 @@ describe("buildHistoryFromRows", () => {
     // 输入是倒序（最新的在前），输出正序（最旧的在前）
     expect(built.history[0].content).toBe("a6");
     expect(built.history[6].content).toBe("a0");
-    // fillers 正序（最旧→最新），slice(-5) 取最新 5 轮
-    expect(built.recentFillers).toEqual(["f4", "f3", "f2", "f1", "f0"]);
   });
 });
