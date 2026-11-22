@@ -441,6 +441,26 @@ describe("AdventureService", () => {
     expect(reply.matchReason).toBe("no_hit");
   });
 
+  it("forwards turnId to the bridge LLM call", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+      turnId: "turn-bridge",
+    });
+
+    expect(llm.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scene: "adventure_interaction",
+        turnId: "turn-bridge",
+      }),
+    );
+  });
+
   it("records negation_guard when a negated option mention falls through", async () => {
     prisma.adventureProgress.findFirst.mockResolvedValue({
       ...baseProgress,
@@ -517,6 +537,28 @@ describe("AdventureService", () => {
           scene: "adventure_interaction",
           model: "small-llm",
           temperature: 0,
+        }),
+      );
+    });
+
+    it("forwards turnId to the choice-match LLM call", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0\n好呀，我们去森林吧！" });
+
+      await service.handleChildReply("dev-uuid-1", "我要去大树那边", {
+        turnId: "turn-choice",
+      });
+
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scene: "adventure_interaction",
+          turnId: "turn-choice",
         }),
       );
     });

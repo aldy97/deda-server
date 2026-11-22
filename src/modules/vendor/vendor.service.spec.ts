@@ -1033,7 +1033,10 @@ describe("VendorService", () => {
         expect(sleepVoiceConfigService.handle).toHaveBeenCalledWith(
           "uuid-s1",
           "以后睡前都听儿歌",
+          expect.any(String),
         );
+        const turnId = sleepVoiceConfigService.handle.mock.calls[0][2];
+        expect(prisma.message.create.mock.calls[0][0].data.turnId).toBe(turnId);
         expect(result).toEqual({
           deviceId: "dev-s1",
           responseText: "好呀，以后哄睡时间就放睡前儿歌啦！",
@@ -1545,8 +1548,10 @@ describe("VendorService", () => {
       expect(adventureService.handleChildReply).toHaveBeenCalledWith(
         "uuid-h1",
         "我选第一个",
-        { getSafety: expect.any(Function) },
+        { getSafety: expect.any(Function), turnId: expect.any(String) },
       );
+      const turnId = adventureService.handleChildReply.mock.calls[0][2].turnId;
+      expect(prisma.message.create.mock.calls[0][0].data.turnId).toBe(turnId);
     });
 
     it("should stream an adventure reply in order and persist the full narrated text", async () => {

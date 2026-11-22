@@ -94,6 +94,8 @@ export interface AdventureReply {
  */
 export interface HandleChildReplyOptions {
   getSafety?: AdventureSafetyProvider;
+  /** 本轮对话 ID：与安全/意图/主回答共用，供 llm_usage_logs 串联 */
+  turnId?: string;
 }
 
 interface InteractionChoice {
@@ -949,6 +951,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
     const { daily, progress } = current;
+    const turnId = options?.turnId;
 
     // 明确拒绝优先于一切判定，且与状态机停在哪一格无关：等回答时、旁白还在播时、
     // 甚至已经退出过又喊一次，都只念同一句全局话术。放在最前面是因为它绝不能被
@@ -1000,6 +1003,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
         interaction,
         asrText,
         "open_question",
+        undefined,
+        turnId,
       ),
     );
     if (safety?.blocked) {
@@ -1013,6 +1018,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           asrText,
           "open_question",
           safetyInstruction,
+          turnId,
         )
       : bridge;
     const reply = await this.playFrom(progress, segments, [bridgeText], daily);
@@ -1133,6 +1139,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     asrText: string,
     choices: InteractionChoice[],
     safetyInstruction?: string,
+    turnId?: string,
   ): Promise<{ index: number | null; redirectText: string }> {
     try {
       const characterKey = await this.getCharacterKey(deviceInternalId);
@@ -1151,6 +1158,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       const result = await this.llmService.complete({
         scene: "adventure_interaction",
         deviceId: deviceInternalId,
+        turnId,
         temperature: 0,
         messages,
         model: this.llmService.smallModelName,
@@ -1181,6 +1189,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       choices?: InteractionChoice[];
     } | null;
     const choices = interactionOptions?.choices || [];
+    const turnId = handleOptions?.turnId;
     const diagnosis = diagnoseChoiceMatch(choices, asrText);
     const hitIndex = diagnosis.index;
     const matched = hitIndex !== null ? choices[hitIndex] : undefined;
@@ -1218,6 +1227,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
             interaction,
             asrText,
             choices,
+            undefined,
+            turnId,
           ),
       );
       if (safety?.blocked) {
@@ -1231,6 +1242,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
             asrText,
             choices,
             safetyInstruction,
+            turnId,
           )
         : optimisticVerdict;
 
@@ -1294,6 +1306,8 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
             interaction,
             asrText,
             "redirect",
+            undefined,
+            turnId,
           ),
       );
       if (safety?.blocked) {
@@ -1307,6 +1321,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
             asrText,
             "redirect",
             safetyInstruction,
+            turnId,
           )
         : optimisticRedirect;
       await this.prisma.adventureProgress.update({
@@ -1338,6 +1353,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     asrText: string,
     kind: "open_question" | "redirect",
     safetyInstruction?: string,
+    turnId?: string,
   ): Promise<string> {
     try {
       const characterKey = await this.getCharacterKey(deviceInternalId);
@@ -1355,6 +1371,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       const result = await this.llmService.complete({
         scene: "adventure_interaction",
         deviceId: deviceInternalId,
+        turnId,
         temperature: 0.3,
         messages,
         model: this.llmService.smallModelName,

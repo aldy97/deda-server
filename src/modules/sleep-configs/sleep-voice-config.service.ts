@@ -56,8 +56,9 @@ export class SleepVoiceConfigService {
   async handle(
     deviceInternalId: string,
     asrText: string,
+    turnId?: string,
   ): Promise<SleepVoiceConfigResult> {
-    const extracted = await this.extract(deviceInternalId, asrText);
+    const extracted = await this.extract(deviceInternalId, asrText, turnId);
     if (!extracted) {
       return { replyText: this.fallbackReply(), applied: false };
     }
@@ -92,12 +93,14 @@ export class SleepVoiceConfigService {
   private async extract(
     deviceInternalId: string,
     asrText: string,
+    turnId?: string,
   ): Promise<{ field: SleepConfigField; value: unknown } | null> {
     let text: string;
     try {
       const result = await this.llm.complete({
         scene: "sleep_config_extract",
         deviceId: deviceInternalId,
+        turnId,
         model: this.llm.smallModelName,
         temperature: 0,
         maxTokens: 64,
