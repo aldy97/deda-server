@@ -61,13 +61,14 @@ dashboard 侧的中文名与着色在 `src/pages/Llm/scenes.ts`，新增 scene �
 ## 轮次串联
 
 `turnId` 贯穿一轮问答的全部调用：`safety_l2` / `intent_classify` / `filler` / `chat_main` /
-`memory_extract` 共用同一个 ID，`turn_decision_logs` 也以它为幂等键。
+`memory_extract` / `adventure_interaction` / `sleep_config_extract` 共用同一个 ID，
+`turn_decision_logs` 也以它为幂等键。冒险接管与 sleep_config 短链路的消息落库
+同样复用该 ID，消息明细里能查到完整链路。
 排查单轮问题时用 `/analytics/llm/by-turn?turnId=` 看调用链路，
 用 `/analytics/decisions/review-queue` 看这一轮的安全与意图判定。
 
-> 例外：后台任务（`parent_report` / `sleep_*` 定时触发）无轮次上下文，`turnId` 恒 null。
-> 另：sleep_config 短链路的 `persistTurn` 目前未透传 turnId（既有实现），
-> 故该轮在消息明细里查不到 turnId，但判定记录本身有。
+> 例外：后台任务（`parent_report` / `sleep_*` 定时触发）无轮次上下文，`turnId` 恒 null；
+> 机芯厂 10s 超时推送没有孩子本轮、也不调用 LLM，链路为空属预期。
 
 ## 数据留存
 

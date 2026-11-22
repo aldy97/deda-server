@@ -294,8 +294,11 @@ describe("LlmAdapterModule", () => {
       expect(sleepVoice.handle).toHaveBeenCalledWith(
         "dev-internal-1",
         "哄睡改成二十分钟",
+        expect.any(String),
       );
       expect(llm.completeStream).not.toHaveBeenCalled();
+      const userCall = prisma.message.create.mock.calls[0][0];
+      expect(sleepVoice.handle.mock.calls[0][2]).toBe(userCall.data.turnId);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toMatchObject({
         sleepConfig: "durationMinutes",
@@ -562,6 +565,10 @@ describe("LlmAdapterModule", () => {
         mode: "adventure_story",
       });
       expect(assistantCall.data.turnId).toBe(userCall.data.turnId);
+      // 消息与判定记录必须共用同一外层 turnId（不能另起随机 ID）
+      expect(turnDecisions.record.mock.calls[0][0].turnId).toBe(
+        userCall.data.turnId,
+      );
       // 审计事件落库
       expect(adventure.recordPresented).toHaveBeenCalledWith(
         "dev-internal-1",
@@ -628,6 +635,10 @@ describe("LlmAdapterModule", () => {
       expect(adventure.startToday).toHaveBeenCalledWith("dev-internal-1", true);
       expect(session.reset).toHaveBeenCalledWith("dev-internal-1");
       expect(llm.completeStream).not.toHaveBeenCalled();
+      const userCall = prisma.message.create.mock.calls[0][0];
+      expect(turnDecisions.record.mock.calls[0][0].turnId).toBe(
+        userCall.data.turnId,
+      );
     });
 
     it("blocks entry and records it when today's adventure is completed", async () => {

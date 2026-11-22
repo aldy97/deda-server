@@ -266,7 +266,7 @@ export class VendorService {
       adventureReply = await this.adventureService.handleChildReply(
         device.id,
         dto.asrText,
-        { getSafety },
+        { getSafety, turnId },
       );
     } catch (error) {
       this.logger.error(
@@ -672,6 +672,7 @@ export class VendorService {
     const result = await this.sleepVoiceConfigService.handle(
       device.id,
       asrText,
+      turnId,
     );
     const text = result.replyText;
 

@@ -259,7 +259,12 @@ export class LlmAdapterService {
             intentSource: "adventure_takeover",
             asrText,
           });
-          yield* this.emitAdventureReply(device, testStoryReply, asrText);
+          yield* this.emitAdventureReply(
+            device,
+            testStoryReply,
+            asrText,
+            turnId,
+          );
           return;
         }
       } catch (error) {
@@ -283,7 +288,7 @@ export class LlmAdapterService {
         adventureReply = await this.adventure.handleChildReply(
           device.id,
           asrText,
-          { getSafety },
+          { getSafety, turnId },
         );
       } catch (error) {
         this.logger.error(
@@ -307,7 +312,7 @@ export class LlmAdapterService {
           intentSource: "adventure_takeover",
           asrText,
         });
-        yield* this.emitAdventureReply(device, adventureReply, asrText);
+        yield* this.emitAdventureReply(device, adventureReply, asrText, turnId);
         return;
       }
     }
@@ -378,7 +383,11 @@ export class LlmAdapterService {
 
     // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
     if (device && intent === "sleep_config") {
-      const result = await this.sleepVoiceConfig.handle(device.id, asrText);
+      const result = await this.sleepVoiceConfig.handle(
+        device.id,
+        asrText,
+        turnId,
+      );
       await this.persistTurn(
         device.id,
         asrText,
@@ -389,6 +398,7 @@ export class LlmAdapterService {
           answer: result.replyText,
           sleepConfig: result.applied ? (result.field ?? null) : null,
         },
+        turnId,
       );
       yield result.replyText;
       // 判定审计：短链路也是一轮完整判定，intentSource 透传会话服务的成因
@@ -433,7 +443,12 @@ export class LlmAdapterService {
               intentSource: intentDecision.source,
               asrText,
             });
-            yield* this.emitAdventureReply(device, startedAdventure, asrText);
+            yield* this.emitAdventureReply(
+              device,
+              startedAdventure,
+              asrText,
+              turnId,
+            );
             return;
           }
         }
@@ -769,8 +784,8 @@ export class LlmAdapterService {
     device: { id: string; deviceId: string },
     adventureReply: AdventureReply,
     asrText: string,
+    turnId: string,
   ): AsyncGenerator<string> {
-    const turnId = randomUUID();
     const responseText = adventureReply.texts.join("\n");
 
     // 段落已经生成好了，落库只是审计。首条 create 发生在任何 chunk 之前，
