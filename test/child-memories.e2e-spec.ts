@@ -13,6 +13,7 @@ import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-config
 import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
 import { SleepModeService } from "./../src/modules/sleep-configs/sleep-mode.service";
 import { PROMPT_REGISTRY_PROVIDER } from "./../src/modules/prompt-registry/prompt-registry.testing";
+import { FILLER_POOLS } from "./../src/modules/llm/filler-bank";
 
 const extraction = (value: string, operation = "assert", evidence: string) =>
   JSON.stringify([
@@ -39,7 +40,6 @@ describe("Child memories conversation pipeline (e2e)", () => {
     complete: jest.Mock;
     completeStream: jest.Mock;
     buildEnglishTutorPrompt: jest.Mock;
-    buildFillerPrompt: jest.Mock;
     smallModelName: string;
   };
   let mockReplyUploader: { sendChunk: jest.Mock; sendFullReply: jest.Mock };
@@ -150,15 +150,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
 
     mockLlmService = {
       complete: jest.fn(),
-      completeStream: jest.fn((options) =>
-        options.model === "small-llm"
-          ? streamOf("嗯")
-          : streamOf("I still answer."),
-      ),
+      completeStream: jest.fn(() => streamOf("I still answer.")),
       buildEnglishTutorPrompt: jest.fn((asrText: string) => [
         { role: "user", content: asrText },
       ]),
-      buildFillerPrompt: jest.fn().mockReturnValue([]),
       smallModelName: "small-llm",
     };
     mockReplyUploader = {
@@ -276,12 +271,16 @@ describe("Child memories conversation pipeline (e2e)", () => {
       new Error("extractor unavailable"),
     );
 
-    await expect(
-      vendorService.handleTextIn({
-        deviceId: "device-external",
-        asrText: "Hello",
-      }),
-    ).resolves.toMatchObject({ responseText: "嗯\nI still answer." });
+    const result = await vendorService.handleTextIn({
+      deviceId: "device-external",
+      asrText: "Hello",
+    });
+    const filler = result.responseText.slice(
+      0,
+      result.responseText.length - "I still answer.".length - 1,
+    );
+    expect(FILLER_POOLS.en_neutral).toContain(filler);
+    expect(result.responseText).toBe(`${filler}\nI still answer.`);
 
     expect(
       mockReplyUploader.sendChunk.mock.calls.some(
