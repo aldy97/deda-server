@@ -1384,6 +1384,65 @@ describe("VendorService", () => {
       expect(replyUploader.sendFullReply).toHaveBeenCalledTimes(1);
     });
 
+    it("should skip filler when the first filler chunk upload fails", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockReturnValue(streamOf(["Hi there!"]));
+      replyUploader.sendChunk.mockImplementation((chunk: VendorTextChunkDto) =>
+        chunk.source === "filler"
+          ? Promise.reject(new Error("ws down"))
+          : Promise.resolve(),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      expect(result.responseText).toBe("Hi there!");
+      const chunks = uploadedChunks();
+      expect(chunks[0]).toMatchObject({ source: "filler" });
+      expect(chunks.slice(1).every((chunk) => chunk.source === "answer")).toBe(
+        true,
+      );
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.rawPayload).toEqual({
+        filler: null,
+        answer: "Hi there!",
+      });
+    });
+
+    it("should keep the filler text when only its final chunk upload fails", async () => {
+      setupStreamingBase();
+      llmService.completeStream.mockReturnValue(streamOf(["Hi there!"]));
+      replyUploader.sendChunk.mockImplementation((chunk: VendorTextChunkDto) =>
+        chunk.source === "filler" && chunk.isFinal
+          ? Promise.reject(new Error("ws down"))
+          : Promise.resolve(),
+      );
+
+      const result = await service.handleTextIn({
+        deviceId: "dev-s1",
+        asrText: "hi",
+      });
+
+      const filler = expectBankReply(
+        result.responseText,
+        FILLER_POOLS.en_neutral,
+        "Hi there!",
+      );
+      const chunks = uploadedChunks();
+      expect(chunks[0]).toMatchObject({ source: "filler", delta: filler });
+      const assistantCall = prisma.message.create.mock.calls.find(
+        (call) => call[0].data.role === "assistant",
+      );
+      expect(assistantCall[0].data.rawPayload).toMatchObject({
+        filler,
+        answer: "Hi there!",
+      });
+    });
+
     it("should skip filler and upload answer when LLM_ADAPTER_FILLER=false", async () => {
       setupStreamingBase();
       configService.get.mockImplementation((key: string) =>
