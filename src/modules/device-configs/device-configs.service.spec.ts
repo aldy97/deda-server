@@ -29,9 +29,9 @@ type CatalogMock = {
 };
 
 type ReconcileMock = {
-  readDesired: jest.Mock;
   applyToActiveInstance: jest.Mock;
   onInstanceRegistered: jest.Mock;
+  resolveActiveSpd: jest.Mock;
   resolveNormalSpd: jest.Mock;
 };
 
@@ -49,9 +49,9 @@ describe("DeviceConfigsService", () => {
       available: false,
     };
     mockReconcile = {
-      readDesired: jest.fn(),
       applyToActiveInstance: jest.fn(),
       onInstanceRegistered: jest.fn(),
+      resolveActiveSpd: jest.fn(),
       resolveNormalSpd: jest.fn(),
     };
 
@@ -339,7 +339,7 @@ describe("DeviceConfigsService", () => {
       mockCatalog.available = false;
       mockCatalog.listUsable.mockReturnValue([]);
       prisma.deviceConfig.findFirst.mockResolvedValue(null);
-      mockReconcile.resolveNormalSpd.mockReturnValue(0.7);
+      mockReconcile.resolveActiveSpd.mockReturnValue(0.7);
 
       const result = await service.getVoiceConfig("user-001", "dev-001");
 
@@ -359,7 +359,7 @@ describe("DeviceConfigsService", () => {
       prisma.userDeviceBinding.findFirst.mockResolvedValue(mockBinding);
       mockCatalog.available = true;
       mockCatalog.listUsable.mockReturnValue(voiceCatalogEntries);
-      mockReconcile.resolveNormalSpd.mockReturnValue(1);
+      mockReconcile.resolveActiveSpd.mockReturnValue(1);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         ...baseActiveConfig,
         speechRate: "normal",
@@ -386,7 +386,7 @@ describe("DeviceConfigsService", () => {
       prisma.userDeviceBinding.findFirst.mockResolvedValue(mockBinding);
       mockCatalog.available = true;
       mockCatalog.listUsable.mockReturnValue(voiceCatalogEntries);
-      mockReconcile.resolveNormalSpd.mockReturnValue(0.7);
+      mockReconcile.resolveActiveSpd.mockReturnValue(0.7);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         ...baseActiveConfig,
         speechRate: "fast",
@@ -472,7 +472,7 @@ describe("DeviceConfigsService", () => {
         isActive: true,
         createdAt: new Date(),
       });
-      mockReconcile.resolveNormalSpd.mockReturnValue(0.7);
+      mockReconcile.resolveActiveSpd.mockReturnValue(0.7);
       mockReconcile.applyToActiveInstance.mockResolvedValue({
         applied: "noop",
       });
@@ -517,7 +517,7 @@ describe("DeviceConfigsService", () => {
         isActive: true,
         createdAt: new Date(),
       });
-      mockReconcile.resolveNormalSpd.mockReturnValue(1);
+      mockReconcile.resolveActiveSpd.mockReturnValue(1);
       mockReconcile.applyToActiveInstance.mockResolvedValue({
         applied: "live",
       });
@@ -532,6 +532,11 @@ describe("DeviceConfigsService", () => {
       expect(result.spd).toBe(1);
       expect(result.applied).toBe("live");
       expect(result.reason).toBeNull();
+      expect(mockReconcile.applyToActiveInstance).toHaveBeenCalledWith(
+        "aa:bb:cc:dd:ee:ff",
+        { vcn: "1000063" },
+        "device-uuid-001",
+      );
 
       // Assert old config was deactivated
       expect(prisma.deviceConfig.updateMany).toHaveBeenCalledWith({
@@ -554,7 +559,7 @@ describe("DeviceConfigsService", () => {
         speechRate: "slow",
       });
       prisma.deviceConfig.updateMany.mockResolvedValue({ count: 1 });
-      mockReconcile.resolveNormalSpd.mockReturnValue(0.8);
+      mockReconcile.resolveActiveSpd.mockReturnValue(0.8);
       mockReconcile.applyToActiveInstance.mockResolvedValue({
         applied: "live",
       });
@@ -596,7 +601,7 @@ describe("DeviceConfigsService", () => {
         payload: { someOther: "data" },
       });
       prisma.deviceConfig.updateMany.mockResolvedValue({ count: 1 });
-      mockReconcile.resolveNormalSpd.mockReturnValue(1);
+      mockReconcile.resolveActiveSpd.mockReturnValue(1);
       mockReconcile.applyToActiveInstance.mockResolvedValue({
         applied: "noop",
       });
@@ -641,7 +646,7 @@ describe("DeviceConfigsService", () => {
         isActive: true,
         createdAt: new Date(),
       });
-      mockReconcile.resolveNormalSpd.mockReturnValue(1);
+      mockReconcile.resolveActiveSpd.mockReturnValue(1);
       mockReconcile.applyToActiveInstance.mockResolvedValue({
         applied: "deferred",
         reason: "no_active_instance",
@@ -674,7 +679,7 @@ describe("DeviceConfigsService", () => {
         isActive: true,
         createdAt: new Date(),
       });
-      mockReconcile.resolveNormalSpd.mockReturnValue(1);
+      mockReconcile.resolveActiveSpd.mockReturnValue(1);
       mockReconcile.applyToActiveInstance.mockRejectedValue(
         new Error("network failure"),
       );

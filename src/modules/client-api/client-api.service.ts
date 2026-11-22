@@ -200,18 +200,21 @@ export class ClientApiService {
       throw new InternalServerErrorException("timbre not configured");
     }
 
-    // 哄睡会话内返回哄睡语速，否则返回非哄睡语速（都来自 DB 全局 voice_speed_config）。
+    // 哄睡会话内返回哄睡语速，否则返回非哄睡语速（判定集中在 reconcile）。
     // getvalue 每轮建实例前拉取，定时进入（设备空闲无实例）时下次建实例即生效。
-    const session = await this.prisma.conversationSession.findUnique({
-      where: { deviceId: device.id },
-    });
-    const inSleepMode =
-      session?.currentMode === "sleep_story" &&
-      (!session.expiresAt || session.expiresAt.getTime() > Date.now());
+    const spd = await this.voiceReconcile.resolveActiveSpd(device.id);
 
-    const spd = inSleepMode
-      ? await this.voiceReconcile.resolveSleepSpd()
-      : await this.voiceReconcile.resolveNormalSpd();
+    // 记录「已交付」，让紧随其后的 start 追平命中缓存直接跳过，避免重复
+    // switchSceneRole（Q20 音量重置的暴露点）。失败不影响 getvalue 响应。
+    try {
+      await this.voiceReconcile.noteApplied(mac, vcn, spd);
+    } catch (error) {
+      this.logger.warn(
+        `getvalue noteApplied failed, mac=${mac}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
 
     return { vcn, vol: this.ttsDefaultVol, spd };
   }
@@ -280,7 +283,10 @@ export class ClientApiService {
     // 不 await：出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS（默认 5000ms），
     // 而 v1.4 §5.2 要求本接口幂等快速返回 {"code":200}。等追平完成再响应会把
     // 一次慢调用放大成设备的多轮重试（v1.4 §7.2）。
-    void this.reconcileVoice(mac, dto.instanceid, device.id);
+    void this.reconcileVoice(mac, dto.instanceid, {
+      id: device.id,
+      characterKey: device.characterKey,
+    });
   }
 
   /**
@@ -300,14 +306,10 @@ export class ClientApiService {
   private async reconcileVoice(
     mac: string,
     instanceId: string,
-    deviceInternalId: string,
+    device: { id: string; characterKey: string | null },
   ): Promise<void> {
     try {
-      await this.voiceReconcile.onInstanceRegistered(
-        mac,
-        instanceId,
-        deviceInternalId,
-      );
+      await this.voiceReconcile.onInstanceRegistered(mac, instanceId, device);
     } catch (error) {
       this.logger.warn(
         `voice reconcile hook failed, mac=${mac}, instanceId=${instanceId}, error=${

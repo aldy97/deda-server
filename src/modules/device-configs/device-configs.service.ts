@@ -134,7 +134,7 @@ export class DeviceConfigsService {
     userId: string,
     deviceId: string,
   ): Promise<VoiceConfigResponseDto> {
-    await this.ensureDeviceOwnership(userId, deviceId);
+    const deviceInternalId = await this.ensureDeviceOwnership(userId, deviceId);
 
     const config = await this.prisma.deviceConfig.findFirst({
       where: {
@@ -157,7 +157,7 @@ export class DeviceConfigsService {
     let canApplyLive = false;
     let reason: string | null = null;
 
-    const spd = await this.reconcile.resolveNormalSpd();
+    const spd = await this.reconcile.resolveActiveSpd(deviceInternalId);
 
     if (!available) {
       reason = "empty_catalog";
@@ -261,16 +261,17 @@ export class DeviceConfigsService {
 
     // 下发：mac 口径与 devices.service.ts 一致
     const mac = device.macAddress ?? device.deviceId;
-    const spd = await this.reconcile.resolveNormalSpd();
+    const spd = await this.reconcile.resolveActiveSpd(deviceInternalId);
 
     let applied: string;
     let reason: string | null;
 
     try {
-      const outcome = await this.reconcile.applyToActiveInstance(mac, {
-        vcn: newVcn,
-        speechRate: newSpeechRate,
-      });
+      const outcome = await this.reconcile.applyToActiveInstance(
+        mac,
+        { vcn: newVcn },
+        deviceInternalId,
+      );
       applied = outcome.applied;
       reason = outcome.reason ?? null;
     } catch {

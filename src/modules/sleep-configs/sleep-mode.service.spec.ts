@@ -31,8 +31,7 @@ describe("SleepModeService", () => {
   };
   const voiceReconcile = {
     getTimbreForCharacter: jest.fn(),
-    applySpd: jest.fn(),
-    readDesired: jest.fn(),
+    applySpd: jest.fn().mockResolvedValue({ applied: "live" }),
     resolveNormalSpd: jest.fn(),
     resolveSleepSpd: jest.fn(),
   };
@@ -118,6 +117,73 @@ describe("SleepModeService", () => {
       expect(voiceReconcile.applySpd).not.toHaveBeenCalled();
     });
 
+    it("进入哄睡时使用最新的 sleepSpd", async () => {
+      deviceLink.getStatus.mockResolvedValue({ volume: 80 });
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveSleepSpd.mockResolvedValue(0.45);
+
+      await service.enter(DEVICE_ID);
+
+      expect(voiceReconcile.applySpd).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        "1000957",
+        0.45,
+      );
+    });
+
+    it("重复进入哄睡不覆盖已有音量快照", async () => {
+      redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
+      deviceLink.getStatus.mockResolvedValue({ volume: 50 });
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue(null);
+
+      await service.enter(DEVICE_ID);
+
+      expect(redis.setValue).not.toHaveBeenCalledWith(
+        expect.stringContaining("volume-snapshot"),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 50);
+    });
+
+    it("语速实时下发成功后再次断言音量上限（Q20 保护）", async () => {
+      deviceLink.getStatus.mockResolvedValue({ volume: 80 });
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveSleepSpd.mockResolvedValue(0.5);
+      voiceReconcile.applySpd.mockResolvedValue({ applied: "live" });
+
+      await service.enter(DEVICE_ID);
+
+      expect(deviceLink.setVolume).toHaveBeenCalledTimes(2);
+      expect(deviceLink.setVolume).toHaveBeenNthCalledWith(
+        1,
+        "AABBCCDDEEFF",
+        50,
+      );
+      expect(deviceLink.setVolume).toHaveBeenNthCalledWith(
+        2,
+        "AABBCCDDEEFF",
+        50,
+      );
+      expect(voiceReconcile.applySpd.mock.invocationCallOrder[0]).toBeLessThan(
+        deviceLink.setVolume.mock.invocationCallOrder[1],
+      );
+    });
+
+    it("语速下发 deferred 时不再重复断言音量", async () => {
+      deviceLink.getStatus.mockResolvedValue({ volume: 80 });
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveSleepSpd.mockResolvedValue(0.5);
+      voiceReconcile.applySpd.mockResolvedValue({
+        applied: "deferred",
+        reason: "no_active_instance",
+      });
+
+      await service.enter(DEVICE_ID);
+
+      expect(deviceLink.setVolume).toHaveBeenCalledTimes(1);
+    });
+
     it("设备不存在时静默返回", async () => {
       prisma.device.findUnique.mockResolvedValue(null);
 
@@ -187,6 +253,48 @@ describe("SleepModeService", () => {
         "1000957",
         0.8,
       );
+    });
+
+    it("退出时使用哄睡期间修改后的最新 normalSpd", async () => {
+      redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveNormalSpd.mockResolvedValue(0.9);
+
+      await service.exit(DEVICE_ID);
+
+      expect(voiceReconcile.applySpd).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        "1000957",
+        0.9,
+      );
+    });
+
+    it("先恢复语速再恢复音量，避免 Q20 把音量重置掉", async () => {
+      redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveNormalSpd.mockResolvedValue(0.8);
+      voiceReconcile.applySpd.mockResolvedValue({ applied: "live" });
+
+      await service.exit(DEVICE_ID);
+
+      expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 80);
+      expect(voiceReconcile.applySpd.mock.invocationCallOrder[0]).toBeLessThan(
+        deviceLink.setVolume.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("语速下发 deferred 时仍然恢复音量", async () => {
+      redis.getValue.mockResolvedValue(JSON.stringify({ volume: 80 }));
+      voiceReconcile.getTimbreForCharacter.mockResolvedValue("1000957");
+      voiceReconcile.resolveNormalSpd.mockResolvedValue(0.8);
+      voiceReconcile.applySpd.mockResolvedValue({
+        applied: "deferred",
+        reason: "no_active_instance",
+      });
+
+      await service.exit(DEVICE_ID);
+
+      expect(deviceLink.setVolume).toHaveBeenCalledWith("AABBCCDDEEFF", 80);
     });
 
     it("无音色时不切音速，但仍删快照", async () => {

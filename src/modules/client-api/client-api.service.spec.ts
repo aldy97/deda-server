@@ -41,10 +41,11 @@ describe("ClientApiService", () => {
   let configValues: Record<string, string | undefined>;
   let voiceReconcile: {
     onInstanceRegistered: jest.Mock;
-    readDesired: jest.Mock;
     getTimbreForCharacter: jest.Mock;
+    resolveActiveSpd: jest.Mock;
     resolveNormalSpd: jest.Mock;
     resolveSleepSpd: jest.Mock;
+    noteApplied: jest.Mock;
   };
 
   const createService = async () => {
@@ -96,10 +97,11 @@ describe("ClientApiService", () => {
     };
     voiceReconcile = {
       onInstanceRegistered: jest.fn().mockResolvedValue({ applied: "noop" }),
-      readDesired: jest.fn().mockResolvedValue({ vcn: null, speechRate: null }),
       getTimbreForCharacter: jest.fn().mockResolvedValue("1000957"),
+      resolveActiveSpd: jest.fn().mockResolvedValue(1.2),
       resolveNormalSpd: jest.fn().mockResolvedValue(1.2),
       resolveSleepSpd: jest.fn().mockResolvedValue(0.5),
+      noteApplied: jest.fn().mockResolvedValue(undefined),
     };
     service = await createService();
   });
@@ -295,11 +297,11 @@ describe("ClientApiService", () => {
       await service.botStart(startDto);
 
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledTimes(1);
-      // 第三个参数是 bot/start 401 校验时已经查到的 Device.id，避免重复查询
+      // 第三个参数是 bot/start 401 校验时已经查到的设备，避免重复查询
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
-        "device-uuid-1",
+        { id: "device-uuid-1", characterKey: "elly" },
       );
       expect(prisma.device.findUnique).toHaveBeenCalledTimes(1);
     });
@@ -310,7 +312,7 @@ describe("ClientApiService", () => {
       expect(voiceReconcile.onInstanceRegistered).toHaveBeenCalledWith(
         MAC,
         startDto.instanceid,
-        "device-uuid-1",
+        { id: "device-uuid-1", characterKey: "elly" },
       );
     });
 
@@ -459,7 +461,7 @@ describe("ClientApiService", () => {
     const dto = { id: MAC, nickname: NICKNAME };
 
     it("returns vcn/vol/spd for a registered device", async () => {
-      voiceReconcile.resolveNormalSpd.mockResolvedValue(1.5);
+      voiceReconcile.resolveActiveSpd.mockResolvedValue(1.5);
 
       await expect(service.botGetValue(dto)).resolves.toEqual({
         vcn: "1000957",
@@ -467,7 +469,7 @@ describe("ClientApiService", () => {
         spd: 1.5,
       });
       expect(voiceReconcile.getTimbreForCharacter).toHaveBeenCalledWith("elly");
-      expect(voiceReconcile.resolveNormalSpd).toHaveBeenCalled();
+      expect(voiceReconcile.resolveActiveSpd).toHaveBeenCalled();
     });
 
     it("normalizes the id the same way loginMac does", async () => {
@@ -527,46 +529,41 @@ describe("ClientApiService", () => {
       );
     });
 
-    it("ignores an operator-set vcn so the character table stays authoritative", async () => {
-      voiceReconcile.readDesired.mockResolvedValue({
-        vcn: "9999999",
-        speechRate: "slow",
-      });
-
-      await expect(service.botGetValue(dto)).resolves.toMatchObject({
-        vcn: "1000957",
-      });
-    });
-
-    it("returns sleep speed when the device is in an active sleep_story session", async () => {
-      prisma.conversationSession.findUnique.mockResolvedValue({
-        deviceId: "device-uuid-1",
-        currentMode: "sleep_story",
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-      });
+    it("returns sleep speed when the session is in an active sleep_story", async () => {
+      voiceReconcile.resolveActiveSpd.mockResolvedValue(0.5);
 
       await expect(service.botGetValue(dto)).resolves.toMatchObject({
         spd: 0.5,
       });
-      expect(voiceReconcile.resolveNormalSpd).not.toHaveBeenCalled();
+      expect(voiceReconcile.resolveActiveSpd).toHaveBeenCalledWith(
+        "device-uuid-1",
+      );
     });
 
-    it("uses rate-map speed when the sleep session is expired", async () => {
-      prisma.conversationSession.findUnique.mockResolvedValue({
-        deviceId: "device-uuid-1",
-        currentMode: "sleep_story",
-        expiresAt: new Date(Date.now() - 1000),
-      });
+    it("uses normal speed when the session is not sleeping", async () => {
+      voiceReconcile.resolveActiveSpd.mockResolvedValue(1.2);
 
       await expect(service.botGetValue(dto)).resolves.toMatchObject({
         spd: 1.2,
       });
     });
 
-    it("uses rate-map speed when no sleep session exists", async () => {
-      prisma.conversationSession.findUnique.mockResolvedValue(null);
+    it("notes the delivered vcn/spd for the start reconcile cache", async () => {
+      await service.botGetValue(dto);
 
-      await expect(service.botGetValue(dto)).resolves.toMatchObject({
+      expect(voiceReconcile.noteApplied).toHaveBeenCalledWith(
+        MAC,
+        "1000957",
+        1.2,
+      );
+    });
+
+    it("still returns 200 when noteApplied fails", async () => {
+      voiceReconcile.noteApplied.mockRejectedValue(new Error("redis down"));
+
+      await expect(service.botGetValue(dto)).resolves.toEqual({
+        vcn: "1000957",
+        vol: 1,
         spd: 1.2,
       });
     });

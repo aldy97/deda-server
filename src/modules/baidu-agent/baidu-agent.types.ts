@@ -223,40 +223,44 @@ export interface CharacterTimbrePort {
 /** 设备当前期望的音色/语速（App 落库值） */
 export interface DesiredVoiceState {
   vcn: string | null;
-  /** 档位键，取值见 SPEECH_RATES */
-  speechRate: string | null;
 }
 
 export type VoiceApplyStatus = "live" | "deferred" | "noop";
 
 export interface VoiceApplyOutcome {
-  /** live=已对活跃实例生效；deferred=已落库待下一轮追平；noop=无期望值 */
+  /**
+   * live=已对活跃实例生效；deferred=已落库待下一轮追平；
+   * noop=无期望值，或与 voice:applied 缓存一致（无需重复下发）
+   */
   applied: VoiceApplyStatus;
   reason?: VoiceApplyBlockReason;
 }
 
 export const VOICE_RECONCILE_PORT = "VOICE_RECONCILE";
 
+/** 已下发的 TTS 状态缓存：避免 getvalue 与 start 追平重复出站 */
+export const VOICE_APPLIED_KEY_PREFIX = "voice:applied:";
+export const VOICE_APPLIED_TTL_SECONDS = 7 * 24 * 3600;
+
 export interface VoiceReconcilePort {
-  /** 读取设备当前生效配置里的音色/语速期望值 */
-  readDesired(deviceInternalId: string): Promise<DesiredVoiceState>;
   /** 对设备当前活跃实例下发期望值；永不抛错 */
   applyToActiveInstance(
     mac: string,
     desired: DesiredVoiceState,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome>;
   /**
    * 设备 start 登记成功后的追平入口；永不抛错。
    * 协议 4.2 要求 start 幂等返回 {"code":200}，追平失败绝不能影响该响应，
    * 否则设备会按协议 6.2 做无意义重试。
    *
-   * @param deviceInternalId 可选。调用方（bot/start）已经查过 Device，
-   *   传入即免去本方法内的重复查询；不传则自行按 mac 查。
+   * @param device 可选。调用方（bot/start）已经查过 Device，传入即免去
+   *   本方法内的重复查询；不传则自行按 mac 查 id + characterKey。
    */
   onInstanceRegistered(
     mac: string,
     instanceId: string,
-    deviceInternalId?: string,
+    device?: { id: string; characterKey: string | null },
   ): Promise<VoiceApplyOutcome>;
   /**
    * IP/角色 → timbreId 权威映射查表；纯读，不出网、永不抛错。
@@ -279,12 +283,25 @@ export interface VoiceReconcilePort {
   resolveNormalSpd(): Promise<number>;
   /** 哄睡语速倍数；DB 无行或越界时回落 DEFAULT_SLEEP_SPD */
   resolveSleepSpd(): Promise<number>;
+  /** 当前会话应生效的语速：哄睡中 sleepSpd，否则 normalSpd */
+  resolveActiveSpd(deviceInternalId: string): Promise<number>;
   /**
    * 对设备当前活跃实例实时下发指定语速倍数 spd（不改变音色，vcn 沿用权威映射）。
    * 用于哄睡模式这类「临时降速、退出恢复」的场景：直接给倍数，不走语速档位映射。
+   * 默认与 voice:applied 缓存比对，一致则 noop；force=true 跳过缓存（手动下发）。
    * 永不抛错；无活跃实例 / client 未启用时返回 deferred，由 getvalue 兜底。
    */
-  applySpd(mac: string, vcn: string, spd: number): Promise<VoiceApplyOutcome>;
+  applySpd(
+    mac: string,
+    vcn: string,
+    spd: number,
+    options?: { force?: boolean },
+  ): Promise<VoiceApplyOutcome>;
+  /**
+   * 记录「该 vcn/spd 已交付设备」。getvalue 成功后调用，让紧随其后的 start
+   * 追平命中缓存直接跳过；永不抛错。
+   */
+  noteApplied(mac: string, vcn: string, spd: number): Promise<void>;
 }
 
 /**
