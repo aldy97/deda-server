@@ -631,8 +631,28 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 | --- | --- | --- |
 | GET | `/analytics/voice-speed` | 返回 `{ normalSpd, sleepSpd }`；DB 无行回落 0.7/0.5 |
 | PATCH | `/analytics/voice-speed` | body `{ normalSpd, sleepSpd }`（两者必填，`[0.5, 2.0]`）；返回更新后的 `{ normalSpd, sleepSpd }` |
+| POST | `/analytics/voice-speed/apply` | 把**当前 DB 配置**立即下发到有活跃实例的设备；body 可选 `{ macs?: string[] }`（最多 50 个，用于只测指定样机） |
 
-校验失败（非数字 / 越界 / 缺字段）→ 400。
+`PATCH` 只落库：设备的下一轮由 `getvalue` 拉取，或由 `bot/start` 追平（与 `voice:applied` 缓存不一致时才出站）。`POST apply` 是运维/联调的加速器，只影响「当前有活跃百度实例」的设备；离线设备仍走下一轮。
+
+`POST apply` 返回：
+
+```json
+{
+  "targeted": 2,
+  "live": 1,
+  "deferred": 1,
+  "skipped": 3,
+  "results": [
+    { "deviceId": "aabbccddeeff", "mac": "aabbccddeeff", "applied": "live" },
+    { "deviceId": "112233445566", "mac": "112233445566", "applied": "deferred", "reason": "no_active_instance" }
+  ]
+}
+```
+
+`skipped` 包含无活跃实例、角色表无该 `characterKey` 音色两类；`deferred` 带 `reason`（取值见 `VoiceApplyBlockReason`）。手动下发强制跳过 `voice:applied` 缓存。
+
+校验失败（非数字 / 越界 / 缺字段 / mac 格式非法）→ 400。
 
 ## 角色音色映射（admin）
 

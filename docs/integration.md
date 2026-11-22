@@ -107,8 +107,8 @@
 | -------------- | ------------------ | ------------------------------------------------------------ |
 | deviceId       | string             | 设备业务 ID                                                  |
 | vcn            | string \| null     | 当前期望音色 timbreId；未设置时为 null                       |
-| speechRate     | string \| null     | 当前期望语速档位（`slow` / `normal` / `fast`）；未设置时为 null |
-| spd            | number \| null     | speechRate 对应的 spd 倍数；未设置或映射缺失时为 null        |
+| speechRate     | string \| null     | 兼容字段（`slow` / `normal` / `fast`）；**不再驱动实时下发**，未设置时为 null |
+| spd            | number \| null     | 当前生效语速倍数：哄睡会话内为 `sleepSpd`，否则为 `normalSpd` |
 | catalog        | array              | 可用音色列表，每项 `{ timbreId, name, language }`；目录为空时返回 `[]` |
 | available      | boolean            | 音色切换是否可用（`VOICE_CATALOG_JSON` 非空 且 目录内有至少一个 TRAINED 音色） |
 | canApplyLive   | boolean            | 当前能否实时下发到活跃实例；false 时 POST 必然返回 `applied="deferred"` |
@@ -136,7 +136,7 @@
 | deviceId   | string             | 设备业务 ID                                                  |
 | vcn        | string \| null     | 设置的音色 ID（与入参一致）                                  |
 | speechRate | string \| null     | 设置的语速档位（与入参一致）                                 |
-| spd        | number \| null     | speechRate 映射后的 spd 倍数                                 |
+| spd        | number \| null     | 当前会话实际生效的语速倍数（哄睡 sleepSpd / 非哄睡 normalSpd） |
 | applied    | string             | `live` / `deferred` / `noop`（见下方语义）                   |
 | reason     | string \| null     | `applied !== "live"` 时的原因（取值见 `VoiceApplyBlockReason`） |
 
@@ -159,8 +159,8 @@
 ### 前端对齐
 
 - **产品定义**（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色。因此**家长端不展示音色选择**，`vcn` 不由小程序设置；音色的权威来源是服务端 DB 表 `character_timbre`（IP → timbreId，管理端 `/analytics/voice-timbres`），设备侧按《设备端接口文档》v1.4 的 `POST /client/bot/bot/getvalue` 每轮创建实例前拉取（不缓存）。本组接口保留为运维与联调的可观测/可干预入口（看 `applied` 与 `reason` 归因）。
-- **这里写入的 `vcn` 不会改变设备下一轮的音色**：设备每轮的 `vcn` 只来自 `character_timbre` 表（按设备 IP 查表，见 `docs/voice-switching.md` §2.5）。本接口写入的 `vcn` 只对**当前正在进行的实例**做一次实时修正（`applied="live"`），下一轮新建实例仍回到该 IP 的专属音色。语速不同——`speechRate` 会被下一轮继承。
-- 语速是否在家长端开放由前端产品决定；后端两个字段都支持。若开放：`GET` 用 `speechRate` 回填当前档位，`POST` 传 `speechRate`（`slow`/`normal`/`fast`）。
+- **这里写入的 `vcn` 不会改变设备下一轮的音色**：设备每轮的 `vcn` 只来自 `character_timbre` 表（按设备 IP 查表，见 `docs/voice-switching.md` §2.5）。本接口写入的 `vcn` 只对**当前正在进行的实例**做一次实时修正（`applied="live"`），下一轮新建实例仍回到该 IP 的专属音色。
+- **语速已收敛为全局两值**（`voice_speed_config` 的 `normalSpd` / `sleepSpd`）。`speechRate` 字段保留兼容，但不再驱动实时下发；本接口的 `spd` 返回当前会话实际生效值。运维需要立即改在线设备语速时用 `POST /analytics/voice-speed/apply`（见 `docs/analytics-api.md`「语速配置（admin）」）。
 - `applied="deferred"` 且 `reason` 非空时，应展示文案提示用户「将在下次对话开始时生效」。
 - `available=false` 表示音色目录未填充（`VOICE_CATALOG_JSON=[]`），此时任何 `vcn` 都会被 400 拒绝。
 - 剧情内按角色切音色（多 IP 同剧）是服务端内部行为，不需前端参与；尚未接入，见 `docs/voice-switching.md` 的 Q16。
