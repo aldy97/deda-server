@@ -78,7 +78,7 @@
 | 来源                 | 含义                                                                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `not_routed`         | 被 L1/L2 拦截，直接播兜底话术，`intent` 为 null                                                                                       |
-| `adventure_takeover` | 冒险状态机在编排顺序上早于 L2，命中即返回；本轮 `safetySource=not_evaluated`（**已知盲区**，见 `docs/analytics-api.md` 判定质量监控） |
+| `adventure_takeover` | 冒险状态机在编排顺序上早于常规 L2；接话层/二选一 LLM 路径会惰性触发 L2（结论记 `l2_model`/`l2_fail_open`），确定性匹配/跟读/退出等路径记 `not_evaluated`（见 `docs/analytics-api.md` 判定质量监控） |
 | `no_device`          | 请求未带设备标识（匿名链路），无会话状态可依赖，恒定 `free_chat`                                                                      |
 
 > `resolve()` 保留原签名（返回裸 intent）并委托 `resolveWithSource()`，

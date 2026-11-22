@@ -356,10 +356,11 @@ POST /analytics/llm/cost/sync
 | `l2_fail_open`     | 小模型调用异常 → 放行，靠 L3 大模型 prompt 兜底   | 是       | **静默降级**，升高=模型不可用  |
 | `not_evaluated`    | 本轮根本没做 L2（冒险状态机在编排上早于 L2 接管） | 是       | **已知盲区**，见下方警示       |
 
-> ⚠️ 盲区警示：编排顺序是 L1 → 冒险接管 → `Promise.all([L2, intent])`，
-> 所以**冒险互动轮次完全绕过 L2**，只有 L1 正则兜着，而 L1 刻意不收「杀/打/揍/枪/刀/去死」
-> 这类孩子的气话（见 `child-safety.service.ts` 头部校准原则）。本期按熊总决定**只监控不改行为**：
-> `not_evaluated` + `adventure_takeover` 的占比就是这块盲区的暴露面。
+> ⚠️ 盲区警示：冒险接管仍早于常规 L2，但接话层/二选一 LLM 路径现在会**惰性触发 L2**：
+> 触发并判出结论 → `l2_model`；触发但分类器异常 → `l2_fail_open`；
+> 确定性匹配/跟读/退出等不调 LLM 的路径才记 `not_evaluated`。
+> 因此 `not_evaluated` + `adventure_takeover` 的占比只代表「冒险接管且未触发 L2」的轮次，
+> 不再等于全部冒险轮次。
 
 > 口径警示：埋点在每个 `return` 之前而非 `finally`——`streamReply` 是 async generator，
 > 消费方直接丢弃迭代器时 `finally` 不保证执行。代价是未捕获异常中断的轮次没有判定记录，
@@ -390,7 +391,7 @@ GET /analytics/decisions/intent-summary?startDate=&endDate=
     modelInvokedCount, modelInvokedRate,    // source=model 的占比，跌了说明小模型在失效
     fallbackCount, fallbackRate,            // fallback_invalid_label + fallback_error
     notRoutedCount,                         // 被 L1/L2 拦截，未分类
-    adventureTakeoverCount,                 // 冒险接管，未分类（与 not_evaluated 同一批轮次）
+    adventureTakeoverCount,                 // 冒险接管且未触发 L2 的轮次（not_evaluated 同一批）
     matrix: [{ intent, source, count }] }   // intent × source 交叉，排查「说要听故事却在闲聊」用这张表
    // intentSource 枚举：model / fallback_invalid_label / fallback_error / pre_filter_skip（已停用，仅历史数据）/
    //   continuation / session_sticky / explicit_exit / force_sleep / sleep_window_closed /

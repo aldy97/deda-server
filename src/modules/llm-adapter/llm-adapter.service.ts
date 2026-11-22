@@ -30,6 +30,7 @@ import {
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
+  SafetyVerdict,
 } from "@/modules/vendor/child-safety.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
@@ -271,12 +272,18 @@ export class LlmAdapterService {
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
+    // 惰性安全判定：冒险接话层真正要调 LLM 时才会触发 L2；未接管时同一个
+    // promise 直接复用给下面的常规 L2，不重复调用。
+    let adventureSafety: Promise<SafetyVerdict | null> | null = null;
     if (device) {
       let adventureReply: AdventureReply | null = null;
+      const getSafety = () =>
+        (adventureSafety ??= this.safeClassifyL2(asrText, device.id, turnId));
       try {
         adventureReply = await this.adventure.handleChildReply(
           device.id,
           asrText,
+          { getSafety },
         );
       } catch (error) {
         this.logger.error(
@@ -284,15 +291,18 @@ export class LlmAdapterService {
         );
       }
       if (adventureReply) {
-        // 编排顺序上冒险状态机早于 L2：本轮既没做语义安全审查、也没做意图分类，
-        // 只有上面的 L1 正则兜着（L1 刻意不收「杀/打/去死」这类气话）。
-        // 如实记 not_evaluated / adventure_takeover 让看板暴露这块盲区，
-        // 而不是伪装成「L2 判 safe」。
+        // 冒险接管：安全判定已按需执行（接话层/二选一 LLM 路径）。
+        // 未触发的路径如实记 not_evaluated，触发但失败记 l2_fail_open。
+        const safety = adventureSafety ? await adventureSafety : null;
         this.turnDecisions.record({
           turnId,
           deviceId: device.id,
-          safety: null,
-          safetySource: "not_evaluated",
+          safety,
+          safetySource: adventureSafety
+            ? safety
+              ? undefined
+              : ("l2_fail_open" as const)
+            : "not_evaluated",
           intent: null,
           intentSource: "adventure_takeover",
           asrText,
@@ -306,7 +316,7 @@ export class LlmAdapterService {
     // L2 补 L1 字面盲区，分类异常 fail-open 由 L3 兜底；
     // 意图路由依赖按设备的会话状态，匿名链路跳过、固定 free_chat。
     const [l2, intentDecision] = await Promise.all([
-      this.safeClassifyL2(asrText, device?.id, turnId),
+      adventureSafety ?? this.safeClassifyL2(asrText, device?.id, turnId),
       device
         ? this.safeResolveIntent(device.id, asrText, turnId)
         : // 匿名链路没有会话状态可依赖，恒定 free_chat；来源单独标记，

@@ -1526,6 +1526,29 @@ describe("VendorService", () => {
       });
     });
 
+    it("passes a lazy safety provider to the adventure engine", async () => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: "uuid-h1",
+        deviceId: "dev-h1",
+      });
+      prisma.message.create.mockResolvedValue({ id: "msg-h1" });
+      adventureService.handleChildReply.mockResolvedValue({
+        texts: ["段落一"],
+        action: "await_reply",
+      });
+
+      await service.handleTextIn({
+        deviceId: "dev-h1",
+        asrText: "我选第一个",
+      });
+
+      expect(adventureService.handleChildReply).toHaveBeenCalledWith(
+        "uuid-h1",
+        "我选第一个",
+        { getSafety: expect.any(Function) },
+      );
+    });
+
     it("should stream an adventure reply in order and persist the full narrated text", async () => {
       prisma.device.findUnique.mockResolvedValue({
         id: "uuid-h1",
