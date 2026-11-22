@@ -147,7 +147,8 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 - 运维变更前务必在 test DB 推演至少 5 个边缘输入；
 - 改坏 → `reset-to-default` 是唯一逃生门（纯判定 prompt，回退不会丢任何已发布内容）；
 - 灰度验证通过前，`ADVENTURE_CHOICE_LLM_ENABLED` 环境变量保持 `false`，
-  此开关是唯一能不发版就关闭 LLM 判定链路的手段。
+  此开关是唯一能不发版就关闭 LLM 判定链路的手段；该键已加入 compose app
+  environment 白名单，写在 `env/.env.staging` 才会真正进入容器。
 
 ## 永久硬编码红线（不开放后台编辑）
 

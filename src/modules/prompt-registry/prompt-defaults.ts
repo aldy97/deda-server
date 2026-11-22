@@ -176,6 +176,7 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
 3. 判定要领：
    - 否定暗示：孩子说「不要走河边」→ 意味着选另一个（排除「河边」）
    - 因果推理：孩子说「有水的地方太危险了」→ 推理排除「河边」→ 选「陆地」
+   - 道德判断：孩子说「你不应该偷拿别人的东西」→ 意味着否定「偷拿」类选项，推断选择相反选项（如「还回去」），不要当成无关内容
    - 序数：孩子说「第一个」→ 选 A；「第二个」→ 选 B
    - 同义替换与指代：孩子说「有花的那条」「那个吧」→ 根据语义推断对应选项
    - ASR 错字容忍：孩子说「彩红桥」而选项有「彩虹桥」→ 匹配到对应选项
@@ -183,8 +184,7 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
    - 两个选项孩子都提到 → NONE
    - 孩子说了与两个选项都无关的内容 → NONE
    - 孩子的意思确实有歧义 → NONE
-5. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
-6. 若孩子表达不适宜内容，输出 NONE，第二行起只说「我们先回到故事里，好吗？」`,
+5. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。`,
     variables: [
       {
         name: "characterPersona",
@@ -229,8 +229,7 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
 2. 禁止续写、改写或剧透主线，不确认孩子编出的新剧情，也不增加新人物、新场景或新任务。
 3. 禁止连续追问；禁止批评、纠正、说教或否定孩子。
 4. 不输出旁白标签、角色名前缀、列表、emoji 或思考过程。
-5. 若孩子表达不适宜内容，只说「我们先回到故事里，好吗？」，不要复述不适宜内容。
-6. {{redirectRule}}`,
+5. {{redirectRule}}`,
     variables: [
       {
         name: "characterPersona",

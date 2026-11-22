@@ -253,11 +253,20 @@ export class VendorService {
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
+    // 惰性安全判定：只在冒险接话层真正调 LLM 时触发 L2；未接管时复用给常规链路。
+    let adventureSafety: Promise<SafetyVerdict> | null = null;
     let adventureReply: AdventureReply | null = null;
+    const getSafety = () =>
+      (adventureSafety ??= this.childSafetyService.classifyL2(
+        dto.asrText,
+        device.id,
+        turnId,
+      ));
     try {
       adventureReply = await this.adventureService.handleChildReply(
         device.id,
         dto.asrText,
+        { getSafety },
       );
     } catch (error) {
       this.logger.error(
@@ -276,7 +285,8 @@ export class VendorService {
     // L2 安全分类与意图路由并行：小模型一次调用，补 L1 语义盲区
     const [storyIntent, l2Verdict] = await Promise.all([
       this.conversationSessionService.resolve(device.id, dto.asrText, turnId),
-      this.childSafetyService.classifyL2(dto.asrText, device.id, turnId),
+      adventureSafety ??
+        this.childSafetyService.classifyL2(dto.asrText, device.id, turnId),
     ]);
     if (l2Verdict.blocked) {
       return this.sendSafetyReply(

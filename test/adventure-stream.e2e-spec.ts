@@ -261,7 +261,16 @@ describe("Adventure streaming pipeline (e2e)", () => {
       { role: "system", content: JSON.stringify(params) },
       { role: "user", content: params.childReply },
     ]),
-    complete: jest.fn().mockResolvedValue({ text: "这个想法真温柔呀！" }),
+    complete: jest.fn(
+      (options: {
+        scene?: string;
+        messages?: Array<{ content?: string }>;
+        maxTokens?: number;
+      }) =>
+        Promise.resolve({
+          text: options.scene === "safety_l2" ? "safe" : "这个想法真温柔呀！",
+        }),
+    ),
     completeStream: jest.fn(),
     buildFillerPrompt: jest.fn(),
     buildEnglishTutorPrompt: jest.fn(),
@@ -387,8 +396,7 @@ describe("Adventure streaming pipeline (e2e)", () => {
       nextSegmentOrder: 4,
       stars: 1,
     });
-    // 开集意图分类调用一次；二选一命中本身不调用互动小模型。
-    // （每轮另有设计内的 L2 安全分类调用，maxTokens=10，不计入此锁定）
+    // 开集意图分类调用一次；二选一命中本身不调用互动小模型，也不触发 L2。
     const intentClassifyCalls = () =>
       mockLlmService.complete.mock.calls.filter(([options]) =>
         options.messages?.[0]?.content?.includes("对话意图分类器"),

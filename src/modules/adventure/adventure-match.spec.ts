@@ -1,4 +1,5 @@
 import {
+  diagnoseChoiceMatch,
   matchChoiceDeterministic,
   parseChoiceVerdict,
   MatchableChoice,
@@ -110,6 +111,73 @@ describe("matchChoiceDeterministic", () => {
     expect(
       matchChoiceDeterministic([{ text: "" }, { text: "陆地" }], "我要去陆地"),
     ).toBe(1);
+  });
+});
+
+describe("diagnoseChoiceMatch", () => {
+  const riverLand: MatchableChoice[] = [{ text: "河边" }, { text: "陆地" }];
+
+  it("reports empty_text for blank input", () => {
+    expect(diagnoseChoiceMatch(riverLand, "   ")).toEqual({
+      index: null,
+      reason: "empty_text",
+      hitIndices: [],
+    });
+  });
+
+  it("reports no_choices for an empty or non-array choices list", () => {
+    expect(diagnoseChoiceMatch([], "河边")).toEqual({
+      index: null,
+      reason: "no_choices",
+      hitIndices: [],
+    });
+    expect(diagnoseChoiceMatch(null as any, "河边")).toEqual({
+      index: null,
+      reason: "no_choices",
+      hitIndices: [],
+    });
+  });
+
+  it("reports no_hit when no option text appears", () => {
+    expect(diagnoseChoiceMatch(riverLand, "有水的地方太危险了")).toEqual({
+      index: null,
+      reason: "no_hit",
+      hitIndices: [],
+    });
+  });
+
+  it("reports multi_hit when both option texts appear", () => {
+    expect(
+      diagnoseChoiceMatch(
+        [{ text: "小路" }, { text: "小桥" }],
+        "先走小路再走小桥",
+      ),
+    ).toEqual({
+      index: null,
+      reason: "multi_hit",
+      hitIndices: [0, 1],
+    });
+  });
+
+  it("reports negation_guard for a negated mention", () => {
+    expect(diagnoseChoiceMatch(riverLand, "你不应该偷拿别人的东西")).toEqual({
+      index: null,
+      reason: "no_hit",
+      hitIndices: [],
+    });
+    expect(diagnoseChoiceMatch(riverLand, "不要走河边")).toEqual({
+      index: null,
+      reason: "negation_guard",
+      hitIndices: [0],
+    });
+  });
+
+  it("reports matched with the winning index", () => {
+    expect(diagnoseChoiceMatch(riverLand, "我们去陆地吧")).toEqual({
+      index: 1,
+      reason: "matched",
+      hitIndices: [1],
+    });
   });
 });
 

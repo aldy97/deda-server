@@ -2213,6 +2213,45 @@ describe("LlmAdapterModule", () => {
       expect(childSafety.classifyL2).not.toHaveBeenCalled();
     });
 
+    it("冒险接管且接话层触发 L2：记录真实 safety 结论，不再记盲区", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return { texts: ["段落一"], action: "await_reply" };
+        },
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: "safe",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      await collect(service.streamReply(boundReq("我选第一个")));
+
+      expect(childSafety.classifyL2).toHaveBeenCalledWith(
+        "我选第一个",
+        "dev-internal-1",
+        expect.any(String),
+      );
+      expect(recorded()).toMatchObject({
+        deviceId: "dev-internal-1",
+        safety: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+        },
+        intent: null,
+        intentSource: "adventure_takeover",
+      });
+    });
+
     it("L2 拦截：记 l2_model 与类别，intent 记 not_routed，原话交给 recorder 判定是否留存", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       childSafety.classifyL2.mockResolvedValue({
