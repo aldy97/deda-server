@@ -234,17 +234,6 @@ describe("PromptRegistryService", () => {
         PromptRenderError,
       );
     });
-
-    it("可选变量缺省时渲染为空串而非报错", () => {
-      const rendered = service.render("filler_system");
-      expect(rendered).toBe(
-        PROMPT_DEFAULTS.filler_system.template.replace(
-          /{{(contextSection|bannedSection)}}/g,
-          "",
-        ),
-      );
-      expect(rendered).not.toContain("{{");
-    });
   });
 
   describe("getPersona", () => {

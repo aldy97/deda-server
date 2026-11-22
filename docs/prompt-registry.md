@@ -35,8 +35,8 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 
 ### 为什么对外只有同步方法
 
-`LlmService` 的三个 prompt builder（`buildFillerPrompt`、
-`buildAdventureInteractionPrompt`、`buildEnglishTutorPrompt`）都是同步的，
+`LlmService` 的 prompt builder（`buildAdventureInteractionPrompt`、
+`buildEnglishTutorPrompt`）都是同步的，
 改成 async 会波及全部调用点与 160+ 既有测试。因此注册表用
 **启动预载（`onModuleInit`）+ 内存缓存 + 后台刷新**换取热路径零 `await`、零 DB 往返：
 
@@ -76,8 +76,6 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 | small_model | `intent_classify_system` | intent_classify | 对话意图分类器 | - |
 | small_model | `memory_extract_system` | memory_extract | 长期记忆提取器 | - |
 | small_model | `sleep_config_extract_system` | sleep_config_extract | 哄睡配置解析器 | - |
-| small_model | `filler_system` | filler | 首响承接层（打哈哈） | `contextSection?`, `bannedSection?` |
-| small_model | `filler_retry_instruction` | filler | filler 头部违规重试指令 | - |
 | small_model | `adventure_interaction_system` | adventure_interaction | 冒险故事接话层 | `characterPersona*`, `segmentText*`, `redirectRule*` |
 | small_model | `adventure_choice_match_system` | adventure_interaction | 冒险二选一 LLM 判定 | `characterPersona*`, `segmentText*`, `choiceA*`, `choiceB*` |
 | main_rules | `main_english_tutor_rules` | chat_main | 英语陪练规则段 | - |
@@ -159,7 +157,7 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 - L1 敏感词表；
 - `CANNED_REPLIES`、`EMOTIONAL_HARM_GUIDANCE`；
 - filler 静态模板池、`UPSTREAM_FALLBACK_TEXTS`、`buildFillerHandoffMessage`；
-- `buildChildProfileSection`、`buildFillerContextSection`（含真实儿童档案拼接逻辑）；
+- `buildChildProfileSection`（含真实儿童档案拼接逻辑）；
 - 冒险链路的本地 `CHARACTER_PERSONAS`（`adventure.service.ts`）。
 
 判据：**这段文本一旦写错会不会直接造成儿童安全风险或身份漂移**。

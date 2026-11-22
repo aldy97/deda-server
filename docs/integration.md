@@ -199,7 +199,7 @@
 | 意图路由/模式切换/会话 TTL | ✅ | ✅ | 共享 ConversationSessionService |
 | 哄睡语音配置 | ✅ | ✅ | 共享 SleepVoiceConfigService 确定性短链路 |
 | 冒险状态机/每日门禁/审计事件 | ✅ | ✅ | 共享 AdventureService 单例 |
-| filler 打哈哈首响 | ✅ | ✅ | SSE 前导 chunk，LLM_ADAPTER_FILLER=false 可关 |
+| filler 打哈哈首响 | ✅ | ✅ | 确定性模板池（复用 intent 选桶 + 10 轮轮转），LLM_ADAPTER_FILLER=false 可关 |
 | 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
 | 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
 | 哄睡定时家长服务通知 | ❌ | ✅ | 一次性订阅消息额度池，到点全推绑定家长，见「哄睡服务通知推送」节 |
@@ -215,7 +215,7 @@
 
 语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端双模型流式生成 → **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
 
-**首响加速**：后端并行调用小模型（filler，打哈哈承接话题，如"原来你喜欢上海的天气呀"）与大模型（answer，正式回答）。两者均为 `stream: true`；filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
+**首响加速**：filler 由后端确定性模板池即时产出（复用 intent 选桶 + 最近 10 轮轮转，不调小模型）；主模型（answer）并行生成。filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
 
 **上传保序**：后端对每个 chunk 的发送等待机芯厂 WS ack 后再发下一个（`src/modules/vendor/vendor-reply.uploader.ts`），因此 WS 接口调用顺序与 `seq` 严格一致；单个 chunk 上传失败只记日志、不阻断本轮剩余回复。上传地址走 `VENDOR_WS_UPLOAD_URL`，未配置时不连真实云服务（内部编排照常运行，发送仅记 debug 日志）；鉴权接入时在 uploader 内补充。
 

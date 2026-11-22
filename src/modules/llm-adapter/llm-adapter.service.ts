@@ -642,7 +642,10 @@ export class LlmAdapterService {
       messages.splice(
         messages.length - 1,
         0,
-        this.llmService.buildFillerHandoffMessage(fillerText),
+        this.llmService.buildFillerHandoffMessage(
+          fillerText,
+          LlmService.extractRecentAnswerOpeners(history),
+        ),
       );
     }
 
