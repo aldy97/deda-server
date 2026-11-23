@@ -29,10 +29,12 @@ import {
   SafetyVerdict,
 } from "@/modules/vendor/child-safety.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
+import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import {
-  SafetyReply,
-  TurnIntentDecision,
-} from "@/modules/turn-decision/turn-decision.types";
+  buildSafetySnapshot,
+  resolveSafetyReply,
+} from "@/modules/safety/safety-policy";
+import type { SafetySnapshot } from "@/modules/safety/safety.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 import {
   extractRecentFillers,
@@ -62,64 +64,6 @@ function resolveUpstreamFallbackText(characterKey?: string | null): string {
   );
 }
 
-const FAIL_OPEN_SOURCES = new Set(["l2_fail_open", "l2_invalid_label"]);
-
-type MessageSafetySnapshot = Prisma.InputJsonObject & {
-  layer: string | null;
-  category: string | null;
-  blocked: boolean;
-  source: string;
-  matched: string | null;
-  reply: SafetyReply;
-  inferred: boolean;
-};
-
-/**
- * 本轮是否值得在消息 rawPayload 留安全快照。
- * safe / 未评估且未触发安全话术 → null，避免每条正常消息膨胀。
- */
-function buildSafetySnapshot(
-  safety: SafetyVerdict | null | undefined,
-  reply: SafetyReply,
-): MessageSafetySnapshot | null {
-  if (!safety) {
-    if (reply === "none") return null;
-    // 没有判定行但 AI 实际说了安全话术：构造退化快照，保证消息详情
-    // 与复核队列看到同一件事；inferred=true 明示不是模型原始判定。
-    return {
-      layer: null,
-      category: null,
-      blocked: reply === "canned_block",
-      source:
-        reply === "unsafe_line_echo" ? "inferred_from_reply" : "not_evaluated",
-      matched: null,
-      reply,
-      inferred: true,
-    };
-  }
-  const caught =
-    safety.blocked ||
-    (safety.category !== null && safety.category !== "safe") ||
-    FAIL_OPEN_SOURCES.has(safety.source ?? "") ||
-    reply !== "none";
-  if (!caught) return null;
-  return {
-    layer: safety.layer ?? null,
-    category: safety.category ?? null,
-    blocked: safety.blocked,
-    source: safety.source ?? "not_evaluated",
-    matched: safety.matched ?? null,
-    reply,
-    inferred: false,
-  };
-}
-
-/**
- * 冒险回复的安全处置：
- * - 代码固定话术 → canned_block
- * - 模型输出含固定安全句 → unsafe_line_echo
- * - L2 不可用时注入过谨慎指令 → caution_injected
- */
 function extractSafetyFromPayload(
   payload: Prisma.InputJsonValue,
 ): Prisma.InputJsonValue | undefined {
@@ -131,20 +75,6 @@ function extractSafetyFromPayload(
     return undefined;
   }
   return (payload as Record<string, Prisma.InputJsonValue | undefined>).safety;
-}
-
-function resolveAdventureSafetyReply(
-  reply: AdventureReply,
-  safety: SafetyVerdict | null | undefined,
-): SafetyReply {
-  if (reply.safetyBlocked || safety?.blocked) return "canned_block";
-  if (reply.texts.some((text) => text.includes(ADVENTURE_UNSAFE_LINE))) {
-    return "unsafe_line_echo";
-  }
-  if (safety && FAIL_OPEN_SOURCES.has(safety.source ?? "")) {
-    return "caution_injected";
-  }
-  return "none";
 }
 
 /** 落库历史条数上限：与老链路 getRecentHistory 口径一致（12 条 ≈ 6 轮） */
@@ -387,7 +317,12 @@ export class LlmAdapterService {
         // 冒险接管：安全判定已按需执行（接话层/二选一 LLM 路径）。
         // 未触发的路径如实记 not_evaluated，触发但失败记 l2_fail_open。
         const safety = adventureSafety ? await adventureSafety : null;
-        const safetyReply = resolveAdventureSafetyReply(adventureReply, safety);
+        const safetyReply = resolveSafetyReply({
+          texts: adventureReply.texts,
+          safetyBlocked: adventureReply.safetyBlocked,
+          verdict: safety,
+          unsafeLine: ADVENTURE_UNSAFE_LINE,
+        });
         this.turnDecisions.record({
           turnId,
           deviceId: device.id,
@@ -903,7 +838,7 @@ export class LlmAdapterService {
     adventureReply: AdventureReply,
     asrText: string,
     turnId: string,
-    safety: MessageSafetySnapshot | null,
+    safety: SafetySnapshot | null,
   ): AsyncGenerator<string> {
     const responseText = adventureReply.texts.join("\n");
 
