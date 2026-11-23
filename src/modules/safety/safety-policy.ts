@@ -1,7 +1,17 @@
-import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
+import type {
+  BlockedSafetyCategory,
+  SafetyVerdict,
+} from "@/modules/vendor/child-safety.service";
 import type { SafetyReply, SafetySnapshot } from "./safety.types";
 
 const FAIL_OPEN_SOURCES = new Set(["l2_fail_open", "l2_invalid_label"]);
+
+/** 会真正阻断对话的类别；emotional_harm 不在此列。 */
+export const BLOCKED_SAFETY_CATEGORIES: readonly BlockedSafetyCategory[] = [
+  "sexual",
+  "violence",
+  "self_harm",
+];
 
 /**
  * 单谓词：本轮是否存在需要人工复核/消息快照的安全事件。

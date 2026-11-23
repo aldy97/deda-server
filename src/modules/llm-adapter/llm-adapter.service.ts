@@ -31,10 +31,18 @@ import {
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import {
+  BLOCKED_SAFETY_CATEGORIES,
   buildSafetySnapshot,
   resolveSafetyReply,
 } from "@/modules/safety/safety-policy";
-import type { SafetySnapshot } from "@/modules/safety/safety.types";
+import {
+  SafetyGateService,
+  diffSafetyEvaluations,
+} from "@/modules/safety/safety-gate.service";
+import type {
+  SafetyEvaluation,
+  SafetySnapshot,
+} from "@/modules/safety/safety.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 import {
   extractRecentFillers,
@@ -79,12 +87,6 @@ function extractSafetyFromPayload(
 
 /** 落库历史条数上限：与老链路 getRecentHistory 口径一致（12 条 ≈ 6 轮） */
 const DB_HISTORY_LIMIT = 12;
-
-const BLOCKED_CATEGORIES: BlockedSafetyCategory[] = [
-  "sexual",
-  "violence",
-  "self_harm",
-];
 
 const MAC_PATTERN =
   /^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$/;
@@ -150,6 +152,7 @@ export class LlmAdapterService {
     private readonly turnDecisions: TurnDecisionRecorder,
     private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
+    private readonly safetyGate: SafetyGateService,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -157,6 +160,12 @@ export class LlmAdapterService {
         "LLM_ADAPTER_API_KEY is not configured; all adapter requests will be rejected",
       );
     }
+  }
+
+  /** Phase 2：普通聊天 gate 开关；默认 off，staging 验证用 shadow。 */
+  private safetyGateMode(): "off" | "shadow" | "on" {
+    const raw = this.configService.get<string>("SAFETY_GATE_NORMAL");
+    return raw === "shadow" || raw === "on" ? raw : "off";
   }
 
   /**
@@ -217,7 +226,9 @@ export class LlmAdapterService {
     if (
       verdict.blocked &&
       verdict.category &&
-      BLOCKED_CATEGORIES.includes(verdict.category as BlockedSafetyCategory)
+      BLOCKED_SAFETY_CATEGORIES.includes(
+        verdict.category as BlockedSafetyCategory,
+      )
     ) {
       this.logger.warn(
         `L1 blocked category=${verdict.category} matched=${verdict.matched ?? ""}`,
@@ -366,29 +377,75 @@ export class LlmAdapterService {
     // safeClassifyL2 的外层 catch 连 verdict 都拿不到，此时记 l2_fail_open，
     // 与「本轮根本没做 L2」的 not_evaluated 严格区分
     const l2SourceOverride = l2 ? undefined : ("l2_fail_open" as const);
-    const safetySnapshot = buildSafetySnapshot(l2, "none");
+    const gateMode = this.safetyGateMode();
+    const gateEligible =
+      intent === "free_chat" ||
+      intent === "english_story" ||
+      intent === "idiom_story";
+    const gateDecision =
+      gateMode !== "off" && gateEligible
+        ? this.safetyGate.interpret({ verdict: l2, intent })
+        : null;
 
-    if (
+    const legacyBlocked = Boolean(
       l2?.blocked &&
       l2.category &&
-      BLOCKED_CATEGORIES.includes(l2.category as BlockedSafetyCategory)
-    ) {
-      this.logger.warn(`L2 blocked category=${l2.category}`);
-      const canned = this.childSafety.cannedReply(
-        l2.category as BlockedSafetyCategory,
-      );
+      BLOCKED_SAFETY_CATEGORIES.includes(l2.category as BlockedSafetyCategory),
+    );
+    const legacySafetyReply = legacyBlocked ? "canned_block" : "none";
+    const legacyCanned = legacyBlocked
+      ? this.childSafety.cannedReply(l2!.category as BlockedSafetyCategory)
+      : undefined;
+    const legacyPromptInstruction =
+      l2?.category === "emotional_harm"
+        ? ChildSafetyService.EMOTIONAL_HARM_GUIDANCE
+        : undefined;
+    const legacySnapshot = buildSafetySnapshot(l2, legacySafetyReply);
+
+    if (gateMode === "shadow" && gateDecision) {
+      const legacyEvaluation: SafetyEvaluation = {
+        profile: "default",
+        verdict: l2,
+        blocked: legacyBlocked,
+        safetyReply: legacySafetyReply,
+        cannedReply: legacyCanned,
+        promptInstruction: legacyPromptInstruction,
+        snapshot: legacySnapshot,
+      };
+      const diffs = diffSafetyEvaluations(legacyEvaluation, gateDecision);
+      if (diffs.length > 0) {
+        this.logger.warn(
+          `SAFETY_GATE_SHADOW_MISMATCH intent=${intent} fields=${diffs.join(",")}`,
+        );
+      }
+    }
+
+    const useGate = gateMode === "on" && gateDecision;
+    const blocked = useGate ? gateDecision.blocked : legacyBlocked;
+    const canned = useGate ? gateDecision.cannedReply : legacyCanned;
+    const safetyReply = useGate ? gateDecision.safetyReply : legacySafetyReply;
+    const safetySnapshot = useGate ? gateDecision.snapshot : legacySnapshot;
+    const promptInstruction = useGate
+      ? gateDecision.promptInstruction
+      : legacyPromptInstruction;
+
+    if (blocked) {
+      this.logger.warn(`L2 blocked category=${l2?.category ?? "unknown"}`);
+      const replyText =
+        canned ??
+        this.childSafety.cannedReply(l2!.category as BlockedSafetyCategory);
       if (device) {
         await this.persistTurn(
           device.id,
           asrText,
-          canned,
+          replyText,
           "completed",
           {
             filler: null,
-            answer: canned,
-            safetyCategory: l2.category,
-            safetyLayer: "L2",
-            safety: buildSafetySnapshot(l2, "canned_block"),
+            answer: replyText,
+            safetyCategory: l2?.category ?? null,
+            safetyLayer: l2?.layer ?? "L2",
+            safety: safetySnapshot,
           },
           turnId,
         );
@@ -398,22 +455,21 @@ export class LlmAdapterService {
         turnId,
         deviceId: device?.id ?? null,
         safety: l2,
-        safetyReply: "canned_block",
+        safetyReply,
         intent: null,
         intentSource: "not_routed",
         asrText,
       });
-      yield canned;
+      yield replyText;
       return;
     }
     // emotional_harm（攻击性气话）不拦截：注入共情引导 system 消息
-    const emotionalHarmGuidance: LlmMessage | null =
-      l2?.category === "emotional_harm"
-        ? {
-            role: "system",
-            content: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
-          }
-        : null;
+    const emotionalHarmGuidance: LlmMessage | null = promptInstruction
+      ? {
+          role: "system",
+          content: promptInstruction,
+        }
+      : null;
 
     // 修改哄睡设置：独立短链路，确定性话术确认，不进冒险门禁与大模型主链路
     if (device && intent === "sleep_config") {
@@ -805,7 +861,7 @@ export class LlmAdapterService {
       deviceId: device?.id ?? null,
       safety: l2,
       safetySource: l2SourceOverride,
-      safetyReply: "none",
+      safetyReply,
       intent,
       intentSource: intentDecision.source,
       asrText,

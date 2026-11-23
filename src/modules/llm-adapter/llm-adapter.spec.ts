@@ -21,6 +21,7 @@ import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
+import { SafetyGateService } from "@/modules/safety/safety-gate.service";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
@@ -62,6 +63,7 @@ describe("LlmAdapterModule", () => {
   };
   let session: { resolveWithSource: jest.Mock; reset: jest.Mock };
   let turnDecisions: { record: jest.Mock };
+  let safetyGate: { interpret: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
@@ -152,6 +154,7 @@ describe("LlmAdapterModule", () => {
       reset: jest.fn().mockResolvedValue(undefined),
     };
     turnDecisions = { record: jest.fn() };
+    safetyGate = { interpret: jest.fn() };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -190,6 +193,7 @@ describe("LlmAdapterModule", () => {
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
+        { provide: SafetyGateService, useValue: safetyGate },
         {
           provide: ConfigService,
           useValue: { get: configGet },
@@ -1810,6 +1814,7 @@ describe("LlmAdapterModule", () => {
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
+          { provide: SafetyGateService, useValue: safetyGate },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
       }).compile();
@@ -2170,6 +2175,110 @@ describe("LlmAdapterModule", () => {
         intent: "free_chat",
         intentSource: "model",
       });
+    });
+
+    it("SAFETY_GATE_NORMAL=off：不调用 gate，保持旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+    });
+
+    it("SAFETY_GATE_NORMAL=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "unsafe_line_echo",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(
+        service.streamReply(boundReq("今天天气不错")),
+      );
+
+      expect(chunks).toEqual(["好的呀"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(childSafety.classifyL2).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_NORMAL=on：普通聊天由 gate 决策接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: true,
+          category: "violence",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked",
+        promptInstruction: undefined,
+        snapshot: {
+          layer: "L2",
+          category: "violence",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("假数据-暴力表达")),
+      );
+
+      expect(chunks).toEqual(["gate blocked"]);
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
     });
 
     it("哄睡设置短链路：intent 记 sleep_config 并透传会话服务给出的 source", async () => {
