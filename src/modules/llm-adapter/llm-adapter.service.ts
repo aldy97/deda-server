@@ -71,7 +71,7 @@ type MessageSafetySnapshot = Prisma.InputJsonObject & {
   source: string;
   matched: string | null;
   reply: SafetyReply;
-  inferred: false;
+  inferred: boolean;
 };
 
 /**
@@ -82,7 +82,21 @@ function buildSafetySnapshot(
   safety: SafetyVerdict | null | undefined,
   reply: SafetyReply,
 ): MessageSafetySnapshot | null {
-  if (!safety) return null;
+  if (!safety) {
+    if (reply === "none") return null;
+    // 没有判定行但 AI 实际说了安全话术：构造退化快照，保证消息详情
+    // 与复核队列看到同一件事；inferred=true 明示不是模型原始判定。
+    return {
+      layer: null,
+      category: null,
+      blocked: reply === "canned_block",
+      source:
+        reply === "unsafe_line_echo" ? "inferred_from_reply" : "not_evaluated",
+      matched: null,
+      reply,
+      inferred: true,
+    };
+  }
   const caught =
     safety.blocked ||
     (safety.category !== null && safety.category !== "safe") ||

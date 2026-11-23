@@ -2393,6 +2393,84 @@ describe("LlmAdapterModule", () => {
       });
     });
 
+    it("冒险未评估但模型回抄安全句：消息也写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "unsafe_line_echo",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      for (const call of [userCall, assistantCall]) {
+        expect(call.data.rawPayload.safety).toMatchObject({
+          layer: null,
+          category: null,
+          blocked: false,
+          source: "inferred_from_reply",
+          reply: "unsafe_line_echo",
+          inferred: true,
+        });
+      }
+    });
+
+    it("冒险未评估且未触发安全话术：不写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["我们继续去森林吧。"],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("我觉得他会害怕")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "none",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload).not.toHaveProperty("safety");
+      expect(assistantCall.data.rawPayload).not.toHaveProperty("safety");
+    });
+
+    it("防御：无 verdict 但代码返回安全话术，仍写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "off_topic",
+        safetyBlocked: true,
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetyReply: "canned_block",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: true,
+        source: "not_evaluated",
+        reply: "canned_block",
+        inferred: true,
+      });
+    });
+
     it("冒险 fail-open 未回抄：记录 caution_injected 与原文", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       childSafety.classifyL2.mockResolvedValue({
