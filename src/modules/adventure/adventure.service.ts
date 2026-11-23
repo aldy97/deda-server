@@ -22,9 +22,9 @@ import {
   AdventureFailurePhase,
   AdventureFailureReport,
   AdventureSafetyProvider,
-  AdventureSafetySignal,
   isAdventureExitRequest,
 } from "./adventure.constants";
+import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
 import { adventureDateKey } from "./adventure-date.util";
 import {
   buildClosedEpisodeIds,
@@ -1088,7 +1088,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     options: HandleChildReplyOptions | undefined,
     run: () => Promise<T>,
   ): Promise<{
-    safety: AdventureSafetySignal | null | undefined;
+    safety: SafetyVerdict | null | undefined;
     result: T;
   }> {
     const [safety, result] = await Promise.all([
@@ -1101,7 +1101,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
   /** undefined = 调用方没提供；null = 提供了但异常/未给出结论（fail-open） */
   private async resolveSafety(
     provider?: AdventureSafetyProvider,
-  ): Promise<AdventureSafetySignal | null | undefined> {
+  ): Promise<SafetyVerdict | null | undefined> {
     if (!provider) {
       return undefined;
     }
@@ -1119,7 +1119,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
 
   /** 安全结论对应的附加指令；safe/未提供返回 undefined */
   private safetyInstruction(
-    safety: AdventureSafetySignal | null | undefined,
+    safety: SafetyVerdict | null | undefined,
   ): string | undefined {
     if (
       safety === null ||
