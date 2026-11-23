@@ -12,7 +12,6 @@ import { ChildSafetyService } from "./../src/modules/vendor/child-safety.service
 import { SleepConfigsService } from "./../src/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-voice-config.service";
 import { SleepModeService } from "./../src/modules/sleep-configs/sleep-mode.service";
-import { DeviceTestAccessService } from "./../src/modules/device-test-access/device-test-access.service";
 import { PROMPT_REGISTRY_PROVIDER } from "./../src/modules/prompt-registry/prompt-registry.testing";
 import { FILLER_POOLS } from "./../src/modules/llm/filler-bank";
 
@@ -200,11 +199,6 @@ describe("Child memories conversation pipeline (e2e)", () => {
         {
           provide: SleepModeService,
           useValue: { enter: jest.fn(), exit: jest.fn() },
-        },
-        // 本链路不触发测试模式：白名单恒 false，保证行为与改造前一致
-        {
-          provide: DeviceTestAccessService,
-          useValue: { isAllowed: jest.fn().mockResolvedValue(false) },
         },
         // prompt 注册表：DB 恒空的替身，全部 prompt 走代码默认值，
         // 即聚合重构前各 service 内硬编码字面量的行为

@@ -3,7 +3,6 @@ import { LlmModule } from "@/modules/llm/llm.module";
 import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
 import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
-import { DeviceTestAccessModule } from "@/modules/device-test-access/device-test-access.module";
 import { TurnDecisionModule } from "@/modules/turn-decision/turn-decision.module";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
@@ -28,7 +27,6 @@ import { LlmAdapterService } from "./llm-adapter.service";
     ChildMemoriesModule,
     SleepConfigsModule,
     AdventureModule,
-    DeviceTestAccessModule,
     TurnDecisionModule,
   ],
   controllers: [LlmAdapterController],

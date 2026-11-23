@@ -1,15 +1,9 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
-import {
-  SLEEP_TEST_MODE_ENV,
-  SLEEP_TEST_MODE_TRIGGER,
-  SleepModeService,
-} from "@/modules/sleep-configs/sleep-mode.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { ConversationSessionService } from "./conversation-session.service";
-import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import {
   PROMPT_REGISTRY_PROVIDER,
   makePromptRegistry,
@@ -38,8 +32,6 @@ describe("ConversationSessionService", () => {
   let llmService: jest.Mocked<LlmService>;
   let sleepConfigs: SleepConfigsMock;
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
-  let testAccess: { isAllowed: jest.Mock };
-  let configValues: Record<string, string | undefined>;
 
   const activeSession = (
     currentMode: "english_story" | "idiom_story" | "sleep_story",
@@ -75,7 +67,6 @@ describe("ConversationSessionService", () => {
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(now);
-    configValues = {};
     sleepMode = { enter: jest.fn(), exit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -105,15 +96,7 @@ describe("ConversationSessionService", () => {
             getByDeviceId: jest.fn().mockResolvedValue(sleepConfig()),
           },
         },
-        {
-          provide: ConfigService,
-          useValue: { get: (key: string) => configValues[key] },
-        },
         { provide: SleepModeService, useValue: sleepMode },
-        {
-          provide: DeviceTestAccessService,
-          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
-        },
       ],
     }).compile();
 
@@ -123,9 +106,6 @@ describe("ConversationSessionService", () => {
     sleepConfigs = module.get(
       SleepConfigsService,
     ) as unknown as SleepConfigsMock;
-    testAccess = module.get(DeviceTestAccessService) as unknown as {
-      isAllowed: jest.Mock;
-    };
   });
 
   afterEach(() => {
@@ -383,9 +363,7 @@ describe("ConversationSessionService", () => {
       llmService,
       sleepConfigs as unknown as SleepConfigsService,
       makePromptRegistry(),
-      { get: (key: string) => configValues[key] } as unknown as ConfigService,
       sleepMode as unknown as SleepModeService,
-      testAccess as unknown as DeviceTestAccessService,
     );
 
     await expect(
@@ -623,7 +601,7 @@ describe("ConversationSessionService", () => {
       expect(plain).toBe("sleep_config");
     });
 
-    it("九种 source 互不相同，可在看板上分桶", async () => {
+    it("八种 source 互不相同，可在看板上分桶", async () => {
       const sources = new Set<string>();
 
       mockModel("free_chat");
@@ -661,11 +639,6 @@ describe("ConversationSessionService", () => {
       mockModel("sleep_story");
       sources.add((await service.resolveWithSource("d", "我困了")).source);
 
-      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
-      sources.add(
-        (await service.resolveWithSource("d", SLEEP_TEST_MODE_TRIGGER)).source,
-      );
-
       expect(sources).toEqual(
         new Set([
           "model",
@@ -676,7 +649,6 @@ describe("ConversationSessionService", () => {
           "explicit_exit",
           "force_sleep",
           "sleep_window_closed",
-          "test_sleep",
         ]),
       );
     });
@@ -1057,67 +1029,17 @@ describe("ConversationSessionService", () => {
     });
   });
 
-  describe("测试哄睡模式触发词（仅 staging）", () => {
-    it("开关开启 + 触发词命中 + 设备在白名单 → 直接 sleep_story（test_sleep），不调模型", async () => {
-      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
-
-      await expect(
-        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
-      ).resolves.toEqual({ intent: "sleep_story", source: "test_sleep" });
-
-      expect(testAccess.isAllowed).toHaveBeenCalledWith("device-1");
-      expect(llmService.complete).not.toHaveBeenCalled();
-    });
-
-    it("开关开启 + 触发词命中但设备不在白名单 → 走正常分类", async () => {
-      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
-      testAccess.isAllowed.mockResolvedValue(false);
+  describe("「测试哄睡模式」口令已下线", () => {
+    it("按普通话语走正常分类", async () => {
       llmService.complete.mockResolvedValue({
         text: "free_chat",
       } as Awaited<ReturnType<LlmService["complete"]>>);
 
       await expect(
-        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
+        service.resolveWithSource("device-1", "测试哄睡模式"),
       ).resolves.toEqual({ intent: "free_chat", source: "model" });
 
-      expect(testAccess.isAllowed).toHaveBeenCalledWith("device-1");
-    });
-
-    it("白名单查询失败时按不在白名单处理，走正常分类", async () => {
-      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
-      testAccess.isAllowed.mockRejectedValue(new Error("db down"));
-      llmService.complete.mockResolvedValue({
-        text: "free_chat",
-      } as Awaited<ReturnType<LlmService["complete"]>>);
-
-      await expect(
-        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
-      ).resolves.toEqual({ intent: "free_chat", source: "model" });
-    });
-
-    it("开关未开启 → 触发词不特殊处理，走正常分类，也不查白名单", async () => {
-      llmService.complete.mockResolvedValue({
-        text: "sleep_story",
-      } as Awaited<ReturnType<LlmService["complete"]>>);
-
-      await expect(
-        service.resolveWithSource("device-1", SLEEP_TEST_MODE_TRIGGER),
-      ).resolves.toEqual({ intent: "sleep_story", source: "model" });
-
-      expect(testAccess.isAllowed).not.toHaveBeenCalled();
-    });
-
-    it("开关开启但非触发词 → 走正常分类，也不查白名单", async () => {
-      configValues = { [SLEEP_TEST_MODE_ENV.enabled]: "true" };
-      llmService.complete.mockResolvedValue({
-        text: "free_chat",
-      } as Awaited<ReturnType<LlmService["complete"]>>);
-
-      await expect(
-        service.resolveWithSource("device-1", "我困了"),
-      ).resolves.toEqual({ intent: "free_chat", source: "model" });
-
-      expect(testAccess.isAllowed).not.toHaveBeenCalled();
+      expect(llmService.complete).toHaveBeenCalled();
     });
   });
 
