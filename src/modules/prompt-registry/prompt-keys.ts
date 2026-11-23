@@ -5,9 +5,7 @@ export const PROMPT_KEYS = [
   "intent_classify_system",
   "memory_extract_system",
   "sleep_config_extract_system",
-  // 小模型：首响承接与冒险接话
-  "filler_system",
-  "filler_retry_instruction",
+  // 小模型：冒险接话
   "adventure_interaction_system",
   "adventure_choice_match_system",
   // 主模型规则段。以下两类刻意不在此列、永久硬编码：

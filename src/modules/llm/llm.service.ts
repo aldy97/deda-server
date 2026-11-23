@@ -518,111 +518,47 @@ export class LlmService {
   };
 
   /**
-   * 构建首响「打哈哈」prompt（小模型用，中文撰写——输出以中文为主，
-   * 指令与目标语言对齐可减少跨语言指令遵循滑移，也便于团队维护）。
-   * 要点：明确角色定位（只为正式回答争取时间）、语言跟随用户、
-   * 15-20 字（音频覆盖主模型首包，实测 gap P90=2.36s）、禁止实质回答、
-   * 禁止以孩子名字开头、禁止自称/人设名、禁止新增意象（filler 越抒情，
-   * 主模型越有东西可复读）、措辞多样化，并给达标的 few-shot 示例。
-   * 不带教材上下文与历史，避免小模型展开真正回答。
-   * @param recentFillers 最近若干轮本方用过的 filler 原文，
-   * 进入禁用清单，保证跨轮次措辞多样性（首轮/无数据时省略该段）
-   * @param turnContext 本轮只读情境（意图/门禁结论/角色人设/孩子档案），
-   * 让 filler 的拖延话术与主回答同向，杜绝"预告冒险启动但主模型婉拒"、
-   * "filler 自称小星但主模型是 Elly"这类矛盾播报
+   * 串行链路 handoff：filler 原文已在主模型生成前播报完毕，
+   * 产出独立 system 消息，由调用方 splice 到本轮 user 消息前注入。
+   * 注入前清洗：去换行/多余空白、截断 100 字，防模板文案污染指令位。
    */
-  buildFillerPrompt(
-    asrText: string,
-    recentFillers?: string[],
-    turnContext?: {
-      intent?: string;
-      adventureDeclined?: boolean;
-      persona?: string;
-      childBrief?: string;
-    },
-  ): LlmMessage[] {
-    const contextSection = this.buildFillerContextSection(turnContext);
-
-    const bannedSection =
-      recentFillers && recentFillers.length > 0
-        ? `\n\n最近用过的承接语（不要复用或近似模仿其中任何一句）：\n${recentFillers
-            .map((filler) => `- 「${filler}」`)
-            .join("\n")}`
-        : "";
-
-    return [
-      {
-        role: "system",
-        content: this.promptRegistry.render("filler_system", {
-          contextSection,
-          bannedSection,
-        }),
-      },
-      { role: "user", content: asrText },
-    ];
-  }
-
-  /** filler 本轮情境段：仅声明自身身份与主回答走向，filler 不得复述细节 */
-  private buildFillerContextSection(turnContext?: {
-    intent?: string;
-    adventureDeclined?: boolean;
-    persona?: string;
-    childBrief?: string;
-  }): string {
-    const parts: string[] = [];
-    if (turnContext?.persona) {
-      // 身份兜底：filler 被问名字/身份时不得编造（否则与主回答人设矛盾）
-      parts.push(
-        `你的身份：${turnContext.persona} 绝不给自己编造别的名字或身份。`,
-      );
-    }
-    if (turnContext?.childBrief) {
-      // 与主模型共享同一份孩子档案摘要，称呼保持一致（大小模型不像两个人）。
-      // 但本句不要用名字称呼（实机事故：每句 filler 都以孩子名开头）
-      parts.push(
-        `你正在和这个孩子说话：${turnContext.childBrief}。你知道 TA 的名字，但这句话里不要用名字称呼 TA，也不要编造此处之外的事实。`,
-      );
-    }
-    if (turnContext?.adventureDeclined) {
-      parts.push(
-        `本轮背景（绝不明说）：孩子想玩每日冒险，但今天的冒险已经结束——主回答会温柔说明并提议别的话题。不要宣告、承诺或预告冒险，只给中性温暖的承接。`,
-      );
-    } else if (
-      turnContext?.intent &&
-      [
-        "english_story",
-        "idiom_story",
-        "sleep_story",
-        "adventure_story",
-        "free_story",
-      ].includes(turnContext.intent)
-    ) {
-      parts.push(
-        `本轮背景（绝不明说）：主回答会讲一个故事。一句温暖的引导语没问题（如「好呀，故事时间到啦，把耳朵竖起来咯……」），但绝不自己开始或预告故事内容。`,
-      );
-    }
-    return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
-  }
-
-  /**
-   * 串行链路 handoff（方案 B）：filler 原文已在主模型生成前播报完毕，
-   * 产出独立 system 消息，由调用方 splice 到本轮 user 消息前注入——
-   * 离生成点最近，recency 最强（实机事故：埋在长 system prompt 中段的
-   * 一句英文禁令压不住人设段/档案段对「语气词+孩子名开场」的诱导，
-   * 主回答屡屡以「呀，贝果……」再承接开场）。
-   * 注入前清洗：去换行/多余空白、截断 100 字，防小模型产出污染指令位。
-   */
-  buildFillerHandoffMessage(fillerText: string): LlmMessage {
+  buildFillerHandoffMessage(
+    fillerText: string,
+    recentOpeners: string[] = [],
+  ): LlmMessage {
     const sanitized = fillerText.replace(/\s+/g, " ").trim().slice(0, 100);
+    const openerSection =
+      recentOpeners.length > 0
+        ? `\n6. 最近几轮你的开场是：${recentOpeners
+            .map((opener) => `「${opener}」`)
+            .join("")}；不要再用相同开头。`
+        : "";
     return {
       role: "system",
       content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。请从它自然接续：
-1. 直接从实质内容起句——第一句话就必须回应孩子说的事本身。
-2. 不要以「呀」「嗯」「哦」等语气词加再承接开场，也不要以孩子的名字开头。
-3. 不要重复或换写承接语已经表达过的意象、情绪或内容。
-好例（承接语是「去公园玩啦，听起来就让人觉得好开心呀……」）：「公园里最好玩的是什么呀？滑梯还是秋千？」
-坏例：「呀，去公园玩听起来好开心呢」——语气词开场加复述承接语，全踩。`,
+1. 第一句必须是实质内容：直接回答/共情/开始故事，≤20 个中文字或 ≤12 个英文词；不要用「好问题」「让我想想」「你知道吗」「我给你讲」开场。
+2. 第一个词用具体名词或动作，不要用「呀」「嗯」「哦」等语气词，也不要以孩子的名字开头。
+3. 不要重复或换写承接语里的词、情绪或内容；不要用「真棒」「真聪明」「真温柔」评价孩子。
+4. 可以最多加一句简单的追问，但不要每轮都问，也不要把回答变成考试。
+5. 如果孩子问的是问题，第一句先回答，不要用反问。${openerSection}`,
     };
+  }
+
+  /** 取最近若干轮主回答的开场，供 handoff 避免重复。 */
+  static extractRecentAnswerOpeners(
+    history?: Array<{ role: "user" | "assistant"; content: string }>,
+    limit = 5,
+  ): string[] {
+    if (!history) return [];
+    const openers: string[] = [];
+    for (const message of history) {
+      if (message.role !== "assistant") continue;
+      const opener = message.content
+        .replace(/[\s\p{P}\p{S}]/gu, "")
+        .slice(0, 6);
+      if (opener) openers.push(opener);
+    }
+    return openers.slice(-limit);
   }
 
   /**

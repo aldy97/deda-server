@@ -3,6 +3,12 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import {
+  extractRecentFillers,
+  pickFillerLine,
+  type FillerBucket,
+  type FillerEmotion,
+} from "@/modules/llm/filler-bank";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { VendorTextInDto } from "./dto/vendor-text-in.dto";
@@ -150,8 +156,7 @@ export class VendorService {
    * 落库口径（边界方案 3）：assistant 行 content = filler+"\n"+answer 播报全文，
    * 边界结构化存 rawPayload { filler, answer }。
    * - 大模型历史只取 answer 部分，filler 话术不进上下文；
-   * - 无边界信息的旧 assistant 行整条跳过；
-   * - recentFillers 返回最近 5 轮 filler 原文（时间正序），供小模型禁用清单。
+   * - 无边界信息的旧 assistant 行整条跳过。
    */
   private async getRecentHistory(
     deviceInternalId: string,
@@ -159,7 +164,6 @@ export class VendorService {
     limit = 12, // 消息条数，约 6 轮问答
   ): Promise<{
     history: Array<{ role: "user" | "assistant"; content: string }>;
-    recentFillers: string[];
   }> {
     const rows = await this.prisma.message.findMany({
       where: { deviceId: deviceInternalId, mode },
@@ -172,7 +176,6 @@ export class VendorService {
     const chronological = rows.reverse();
 
     const history: Array<{ role: "user" | "assistant"; content: string }> = [];
-    const fillers: string[] = [];
     for (const row of chronological) {
       if (row.role === "user") {
         history.push({ role: "user", content: row.content });
@@ -184,13 +187,20 @@ export class VendorService {
         continue;
       }
       history.push({ role: "assistant", content: answer });
-      const filler = (row.rawPayload as { filler?: unknown } | null)?.filler;
-      if (typeof filler === "string" && filler.length > 0) {
-        fillers.push(filler);
-      }
     }
 
-    return { history, recentFillers: fillers.slice(-5) };
+    return { history };
+  }
+
+  /** 跨 mode 取最近 10 轮 filler：模式切换后也不重复上一轮承接语。 */
+  private async getRecentFillers(deviceInternalId: string): Promise<string[]> {
+    const rows = await this.prisma.message.findMany({
+      where: { deviceId: deviceInternalId, role: "assistant" },
+      orderBy: { spokeAt: "desc" },
+      take: 20,
+      select: { rawPayload: true },
+    });
+    return extractRecentFillers(rows, 10);
   }
 
   /** 故事意图话术：与 llm-adapter.service.ts 共用注册表实现，不再各存一份副本 */
@@ -362,10 +372,8 @@ export class VendorService {
     }
 
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
-    const { history, recentFillers } = await this.getRecentHistory(
-      device.id,
-      mode,
-    );
+    const { history } = await this.getRecentHistory(device.id, mode);
+    const recentFillers = await this.getRecentFillers(device.id);
 
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）。
     // turnId 复用函数顶部生成的轮次 ID（安全/意图日志已带上同一 ID）。
@@ -474,16 +482,25 @@ export class VendorService {
     let llmFailed = false;
     // 落库边界（方案 3）：rawPayload { filler, answer }；非流式路径 filler=null
     let filler: string | null = null;
+    let fillerBucket: FillerBucket | undefined;
+    let fillerEmotion: FillerEmotion | undefined;
     let answer = "";
     if (streamEnabled) {
-      ({ responseText, llmFailed, filler, answer } =
-        await this.generateStreamReply(
-          dto,
-          turnId,
-          messages,
-          recentFillers,
-          device.id,
-        ));
+      ({
+        responseText,
+        llmFailed,
+        filler,
+        answer,
+        fillerBucket,
+        fillerEmotion,
+      } = await this.generateStreamReply(
+        dto,
+        turnId,
+        messages,
+        recentFillers,
+        device.id,
+        mode,
+      ));
     } else {
       try {
         const llmResult = await this.llmService.complete({
@@ -538,7 +555,13 @@ export class VendorService {
         mode,
         // 边界标注（方案 3）：content 保持播报全文纯净，
         // filler/answer 边界结构化存 rawPayload，供历史剥离与多样性统计
-        rawPayload: { filler, answer },
+        rawPayload: {
+          filler,
+          answer,
+          ...(filler
+            ? { fillerSource: "bank", fillerBucket, fillerEmotion }
+            : {}),
+        },
         spokeAt: new Date(),
       },
     });
@@ -1000,11 +1023,14 @@ export class VendorService {
     messages: LlmMessage[],
     recentFillers: string[] = [],
     deviceInternalId?: string,
+    mode = "free_chat",
   ): Promise<{
     responseText: string;
     llmFailed: boolean;
     filler: string | null;
     answer: string;
+    fillerBucket?: FillerBucket;
+    fillerEmotion?: FillerEmotion;
   }> {
     let seq = 0;
     const emit = async (
@@ -1053,32 +1079,43 @@ export class VendorService {
       }
     })();
 
-    // 小模型 filler 阶段：失败（含上传失败）只记日志并跳过，不影响正式回答
+    // 确定性 filler：复用当前 mode 选桶，不调小模型；上传失败只记日志并跳过
     let fillerEmitted = 0;
     let fillerText = "";
-    try {
-      const fillerStream = this.llmService.completeStream({
-        scene: "filler",
-        deviceId: deviceInternalId,
+    let fillerBucket: FillerBucket | undefined;
+    let fillerEmotion: FillerEmotion | undefined;
+    const fillerEnabled =
+      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
+    if (fillerEnabled) {
+      const picked = pickFillerLine({
+        asrText: dto.asrText,
+        intent: mode,
+        recentFillers,
         turnId,
-        messages: this.llmService.buildFillerPrompt(dto.asrText, recentFillers),
-        model: this.llmService.smallModelName,
-        maxTokens: 60,
       });
-      for await (const delta of fillerStream) {
-        await emit("filler", delta, false);
-        fillerText += delta;
-        fillerEmitted += 1;
-      }
-      if (fillerEmitted > 0) {
+      fillerText = picked.text;
+      fillerBucket = picked.bucket;
+      fillerEmotion = picked.emotion;
+      let textSent = false;
+      try {
+        await emit("filler", fillerText, false);
+        textSent = true;
         // filler 阶段显式收尾，机芯厂据此切换到 answer 流
         await emit("filler", "", true);
+        fillerEmitted = 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Filler chunk upload failed for deviceId=${dto.deviceId}: ${message}`,
+        );
+        if (!textSent) {
+          fillerText = "";
+          fillerBucket = undefined;
+          fillerEmotion = undefined;
+        } else {
+          fillerEmitted = 1;
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(
-        `Filler stream failed for deviceId=${dto.deviceId}: ${message}`,
-      );
     }
 
     // drain：先吐缓冲，再边到边发；单 chunk 上传失败不阻断后续
@@ -1142,6 +1179,8 @@ export class VendorService {
       llmFailed,
       filler: fillerText || null,
       answer: answerText,
+      fillerBucket,
+      fillerEmotion,
     };
   }
 

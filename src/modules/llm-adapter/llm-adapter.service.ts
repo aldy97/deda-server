@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  UnauthorizedException,
-} from "@nestjs/common";
+import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { Prisma } from "@prisma/client";
@@ -36,11 +31,11 @@ import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-reco
 import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 import {
-  checkFillerHead,
-  fillerFallback,
-  fillerTemplateFor,
-  logFillerPostChecks,
-} from "./llm-adapter-filler";
+  extractRecentFillers,
+  pickFillerLine,
+  type FillerBucket,
+  type FillerEmotion,
+} from "@/modules/llm/filler-bank";
 import {
   describeError,
   extractHistory,
@@ -586,27 +581,26 @@ export class LlmAdapterService {
     // 孩子档案：主模型 prompt 与 filler 情境共用，提前于串行 filler 取
     const childProfile = device ? await this.getChildProfile(device.id) : null;
 
-    // 流式 filler：小模型流式生成，头部缓冲校验通过立即外发（首音提前到
-    // TTFT，不再等整句生成完），原文注入主模型 handoff，从结构上杜绝
-    // 「主模型重复 filler 已说的内容」。身份/偏好问句走确定性模板；
-    // 头部违规（孩子名开头/人设名出现）重试一次，仍违规或失败回落模板池
-    // （不再静默无 filler——缺失轮完全没有防死空气缓冲）。
+    // 确定性 filler：复用已算好的 intent 选桶，桶内按最近 10 轮 + turnId
+    // 轮转，全程不调 LLM。原文注入主模型 handoff，避免主回答重复承接语。
     const fillerEnabled =
       this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
     let fillerText = "";
+    let fillerBucket: FillerBucket | undefined;
+    let fillerEmotion: FillerEmotion | undefined;
     if (fillerEnabled) {
-      for await (const chunk of this.streamFiller({
+      const picked = pickFillerLine({
         asrText,
         recentFillers,
         intent,
         adventureDeclined,
-        device,
-        childProfile,
         turnId,
-      })) {
-        fillerText += chunk;
-        yield chunk;
-      }
+        emotion: intentDecision.emotion,
+      });
+      fillerText = picked.text;
+      fillerBucket = picked.bucket;
+      fillerEmotion = picked.emotion;
+      yield fillerText;
     }
 
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
@@ -649,7 +643,10 @@ export class LlmAdapterService {
       messages.splice(
         messages.length - 1,
         0,
-        this.llmService.buildFillerHandoffMessage(fillerText),
+        this.llmService.buildFillerHandoffMessage(
+          fillerText,
+          LlmService.extractRecentAnswerOpeners(history),
+        ),
       );
     }
 
@@ -725,6 +722,13 @@ export class LlmAdapterService {
           rawPayload: {
             filler: fillerText || null,
             answer: answerText,
+            ...(fillerText
+              ? {
+                  fillerSource: "bank",
+                  fillerBucket,
+                  fillerEmotion,
+                }
+              : {}),
             ...(sleepContentDegraded ? { sleepContentDegraded } : {}),
           },
           spokeAt: new Date(),
@@ -1036,10 +1040,8 @@ export class LlmAdapterService {
   }
 
   /**
-   * 取设备最近消息历史（时间正序，按模式过滤），剥离 filler 只留
-   * answer；无边界信息的旧 assistant 行跳过。口径同老链路
-   * getRecentHistory；recentFillers 返回最近 5 轮 filler 原文
-   * （时间正序），供小模型禁用清单。
+   * 取设备最近消息历史（时间正序，按模式过滤），剥离 filler 只留 answer。
+   * recentFillers 跨 mode 取最近 10 条：模式切换后也不重复上一轮 filler。
    */
   private async getDbHistory(
     deviceInternalId: string,
@@ -1054,151 +1056,18 @@ export class LlmAdapterService {
       take: DB_HISTORY_LIMIT,
       select: { role: true, content: true, rawPayload: true },
     });
+    const { history } = buildHistoryFromRows(rows);
 
-    return buildHistoryFromRows(rows);
-  }
+    // 20 条 assistant 行里通常能取到 10 轮 filler；旧行没有 rawPayload.filler
+    // 时 extractRecentFillers 会自动跳过。
+    const fillerRows = await this.prisma.message.findMany({
+      where: { deviceId: deviceInternalId, role: "assistant" },
+      orderBy: { spokeAt: "desc" },
+      take: 20,
+      select: { rawPayload: true },
+    });
 
-  /**
-   * 流式 filler（3s 超时）：小模型流式生成，头部缓冲 8 字做确定性校验
-   * （孩子名开头 / 人设名出现——两类实机事故均为头部现象），通过后立即
-   * 外发、后续 chunk 直通，首音从「整句生成完」提前到「头部定论」。
-   * 头部违规则中止本条流（未外发任何内容），带强禁令重试一次；重试仍
-   * 违规或生成失败 → 回落兜底模板池，保证过渡音覆盖不缺席（不再静默
-   * 无 filler——dashboard 实测 filler 缺失轮完全没有防死空气缓冲）。
-   * 权衡声明：全文复读/长度下限退化为事后告警（已播不可撤回），
-   * prompt 禁用清单与示例是主防线。
-   */
-  private async *streamFiller(params: {
-    asrText: string;
-    recentFillers: string[];
-    intent: ConversationIntent;
-    adventureDeclined: boolean;
-    device: { id: string; characterKey?: string | null } | null;
-    childProfile: {
-      name?: string | null;
-      birthday?: string | null;
-      englishName?: string | null;
-      gender?: string | null;
-    } | null;
-    turnId: string;
-  }): AsyncGenerator<string> {
-    const { asrText, recentFillers } = params;
-
-    const templated = fillerTemplateFor(asrText, recentFillers);
-    if (templated) {
-      yield templated;
-      return;
-    }
-
-    // 人设走注册表：admin 在 dashboard 发布的新版本立即生效；
-    // 未知/缺省 characterKey 一律回落 elly（与既有防匿名行为一致）
-    const persona = this.promptRegistry.getPersona(params.device?.characterKey);
-    // 人设显示名（「小象 Elly」/「小马 Polly」），用于拒绝人设名出现
-    const personaName = persona.split("：")[0];
-    // 孩子名硬禁（优先英文名，与 buildChildBrief 的称呼口径一致）；
-    // 无档案时跳过该校验
-    const childName =
-      params.childProfile?.englishName ??
-      params.childProfile?.name ??
-      undefined;
-
-    const openStream = (extraInstruction?: string) => {
-      const messages = this.llmService.buildFillerPrompt(
-        asrText,
-        recentFillers,
-        {
-          intent: params.intent,
-          adventureDeclined: params.adventureDeclined,
-          persona: params.device ? persona : undefined,
-          childBrief: params.childProfile
-            ? LlmService.buildChildBrief(params.childProfile)
-            : undefined,
-        },
-      );
-      if (extraInstruction) {
-        messages.push({ role: "user", content: extraInstruction });
-      }
-      return this.llmService.completeStream({
-        scene: "filler",
-        deviceId: params.device?.id,
-        turnId: params.turnId,
-        messages,
-        model: this.llmService.smallModelName,
-        maxTokens: 60,
-        timeoutMs: 3000,
-      });
-    };
-
-    let fullText = "";
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      let buffer = "";
-      let flushed = false;
-      let rejected = false;
-      try {
-        const stream = openStream(
-          attempt === 2
-            ? this.promptRegistry.getTemplate("filler_retry_instruction")
-            : undefined,
-        );
-        for await (const chunk of stream) {
-          buffer += chunk;
-          if (flushed) {
-            // 头部已定论放行，后续 chunk 直通（首音之后零缓冲）
-            fullText += chunk;
-            yield chunk;
-            continue;
-          }
-          const verdict = checkFillerHead(buffer, childName, personaName);
-          if (verdict === "reject") {
-            rejected = true;
-            break; // 头部违规：中止本条流，未外发任何内容
-          }
-          if (verdict === "pass") {
-            flushed = true;
-            fullText += buffer;
-            yield buffer;
-            buffer = "";
-          }
-        }
-        if (!rejected && !flushed) {
-          // 全文不足头部缓冲长度（短句/空响应）：在完整文本上定论
-          if (
-            buffer &&
-            checkFillerHead(buffer, childName, personaName, true) !== "reject"
-          ) {
-            flushed = true;
-            fullText += buffer;
-            yield buffer;
-          } else {
-            rejected = true; // 空响应或违规短句：走重试/兜底
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`Filler stream attempt ${attempt} failed: ${message}`);
-        if (flushed) {
-          // 半截 filler 已播给孩子：不可撤回、不重试（避免孩子听到
-          // 「前半句 + 另一句」的冲突内容），保留已播部分直接结束
-          logFillerPostChecks(
-            this.logger,
-            fullText,
-            recentFillers,
-            personaName,
-          );
-          return;
-        }
-        rejected = true; // 未外发 → 重试或兜底
-      }
-      if (!rejected) {
-        logFillerPostChecks(this.logger, fullText, recentFillers, personaName);
-        return;
-      }
-    }
-
-    // 两次均违规/失败：兜底模板池（dedup-aware），保证过渡音覆盖不缺席
-    const fallback = fillerFallback(asrText, recentFillers);
-    this.logger.warn("Filler fell back to template pool");
-    yield fallback;
+    return { history, recentFillers: extractRecentFillers(fillerRows, 10) };
   }
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */

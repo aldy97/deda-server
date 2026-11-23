@@ -1,5 +1,5 @@
 /**
- * 17 个可编辑 prompt 的代码内默认值。
+ * 可编辑 prompt 的代码内默认值（数量以 PROMPT_KEYS 为准）。
  *
  * 这是 fail-safe 兜底：DB 无 published 版本、DB 不可用、渲染失败，
  * 一律回落到这里的常量，产品行为退化为「注册表上线前」的状态。
@@ -14,7 +14,7 @@
  * - personaSection 身份包装文本（防身份漂移 guardrail，性质同 L3）
  * - L1 敏感词正则表、CANNED_REPLIES、EMOTIONAL_HARM_GUIDANCE
  * - filler 静态模板池、UPSTREAM_FALLBACK_TEXTS
- * - buildFillerHandoffMessage / buildChildProfileSection / buildFillerContextSection
+ * - buildFillerHandoffMessage / buildChildProfileSection
  */
 import type { LlmScene } from "@/modules/llm/llm.service";
 import type {
@@ -53,8 +53,8 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
     scene: "intent_classify",
     name: "对话意图分类器",
     description:
-      "小模型 7 标签意图路由。改标签名会直接破坏 ConversationSessionService 的解析，必须与代码同步。失败走关键词正则兜底。",
-    template: `你是儿童语音产品的对话意图分类器。只输出一个标签，禁止解释：free_chat（普通聊天）；adventure_story（每日互动冒险、续听或重听已播冒险）；english_story（英语故事或英语口语陪练）；idiom_story（成语故事）；sleep_config（修改哄睡设置，如调整哄睡时间、时长、内容偏好，例如「以后睡前都听儿歌」「九点半哄我睡觉」「哄睡改成20分钟」）；sleep_story（立刻进入哄睡、听睡前故事或儿歌，要求安静且不互动；孩子表达困意或想休息也算，包括状态陈述、第三人称和撒娇式说法，如「我困了」「Elly困了嘛」「眼皮打架了」「我好累想躺下」「进入睡眠模式」）；free_story（泛化听故事或自由创作故事）。修改设置与立刻进入的区别：含「以后/改成/换成/明天」等修改含义选 sleep_config；「我要听睡前儿歌」这类立刻要听的选 sleep_story。是否真的进入哄睡由服务端的时段门禁决定，你只负责判断孩子这句话的意图，不要因为「现在还是白天」就把困意判成 free_chat。孩子表达含糊时按字面选择最接近标签。`,
+      "小模型 7 标签意图路由 + 粗粒度情绪。改标签名会直接破坏 ConversationSessionService 的解析，必须与代码同步。失败走关键词正则兜底。",
+    template: `你是儿童语音产品的对话意图分类器。只输出一行「意图|情绪」，禁止解释。意图只能是：free_chat（普通聊天）；adventure_story（每日互动冒险、续听或重听已播冒险）；english_story（英语故事或英语口语陪练）；idiom_story（成语故事）；sleep_config（修改哄睡设置，如调整哄睡时间、时长、内容偏好，例如「以后睡前都听儿歌」「九点半哄我睡觉」「哄睡改成20分钟」）；sleep_story（立刻进入哄睡、听睡前故事或儿歌，要求安静且不互动；孩子表达困意或想休息也算，包括状态陈述、第三人称和撒娇式说法，如「我困了」「Elly困了嘛」「眼皮打架了」「我好累想躺下」「进入睡眠模式」）；free_story（泛化听故事或自由创作故事）。修改设置与立刻进入的区别：含「以后/改成/换成/明天」等修改含义选 sleep_config；「我要听睡前儿歌」这类立刻要听的选 sleep_story。是否真的进入哄睡由服务端的时段门禁决定，你只负责判断孩子这句话的意图，不要因为「现在还是白天」就把困意判成 free_chat。孩子表达含糊时按字面选择最接近标签。情绪只能是 neutral/happy/sad/angry/scared；无法判断时用 neutral。`,
     variables: [],
   },
 
@@ -95,59 +95,6 @@ export const PROMPT_DEFAULTS: Record<PromptKey, PromptDefault> = {
 孩子：哄睡改成二十分钟 → {"field":"durationMinutes","value":20}
 孩子：明天九点半哄我睡觉 → {"field":"sleepTime","value":"21:30"}
 孩子：哄睡嘛随便啦 → {"field":null}`,
-    variables: [],
-  },
-
-  filler_system: {
-    key: "filler_system",
-    category: "small_model",
-    scene: "filler",
-    name: "首响承接层（打哈哈）",
-    description:
-      "小模型流式生成首响承接语，盖住主模型首包 gap（实测 P90=2.36s）。contextSection/bannedSection 由代码按本轮情境与最近 5 轮 filler 拼接后注入，不可在此处直接编辑。",
-    template: `你是儿童语音陪伴玩具的「首响承接层」。你的唯一任务是为正式回答争取时间：立刻说出一句温暖的话，接住孩子刚说的事，让孩子感到被听见。
-
-规则：
-1. 用孩子刚说的语言回复。
-2. 中文 15 到 20 个字，英文 8 到 12 个词，口语自然。你的话会被立刻语音播报，用来盖住正式回答的准备时间——太短会留下尴尬的沉默。
-3. 绝不回答问题或提供实质内容——正式回答稍后由主回答给出。
-4. 回声孩子话里的关键词，让 TA 觉得被听见；措辞要多样，绝不连续两次用同样的开头。
-5. 不要以孩子的名字开头——正式回答里会自然称呼 TA，你这句不需要。
-6. 不要出现你自己的名字，也不要以人设名标签开头（如「小象 Elly：…」）——用你自己的口吻说话，不要像旁白报幕。
-7. 不要列表、不要 emoji、不要提问。
-8. 以延续的语气收尾（如「呀」「呢」「……」），让正式回答自然接棒——绝不听起来像一句说完的封闭结论。
-9. 绝不宣告、预告、承诺或开始任何实质内容——不要故事开场（如「很久很久以前」），不要「我们来听听吧/我们开始吧」，不要声称某个故事或模式即将开始。你只负责承接与回声。
-10. 绝不确认或复述孩子说的事实（谁住在哪里、什么东西存在、某件事是真是假）——判断事实是主回答的工作。只承接话题和感受。也不回答任何问题，包括关于你自己的问题（你的名字、你的喜好）——关于你的问题同样由主回答来答。
-11. 只回声孩子说过的话：禁止比喻、诗意延展或添加孩子没说的新意象（如「像小星星在心里闪闪发亮」）——你多加的每一个意象，主回答都可能不得不重复一遍。
-
-示例：
-孩子：我喜欢上海的天气 → 原来你喜欢上海的天气呀，快多跟我说说呢……
-孩子：Why is the sky blue? → Wow, that is such a fun question to think about!
-孩子：我昨天去公园玩了 → 去公园玩啦，听起来就让人觉得好开心呀……
-孩子：I can draw a cat → Wow, drawing a cat sounds lovely, tell me more about it!{{contextSection}}{{bannedSection}}`,
-    variables: [
-      {
-        name: "contextSection",
-        required: false,
-        description:
-          "本轮情境段（身份/孩子档案/冒险已婉拒/故事意图），代码拼接",
-      },
-      {
-        name: "bannedSection",
-        required: false,
-        description: "最近用过的承接语禁用清单，代码拼接",
-      },
-    ],
-  },
-
-  filler_retry_instruction: {
-    key: "filler_retry_instruction",
-    category: "small_model",
-    scene: "filler",
-    name: "filler 头部违规重试指令",
-    description:
-      "filler 头部校验（孩子名开头/人设名出现）不通过时，追加这条 user 消息重试一次。",
-    template: `你上一句被拒绝了：它以孩子的名字开头，或出现了你自己的人设名。请生成一句完全不同的话——不同的措辞、不同的结构、不带任何名字。`,
     variables: [],
   },
 

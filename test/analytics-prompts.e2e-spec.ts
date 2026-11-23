@@ -20,7 +20,7 @@ const ANALYTICS_SECRET =
 /** 无变量的人设 key：跑完整生命周期 */
 const KEY = "persona_polly";
 /** 带可选变量的 key：验证「DB 正文 + 代码变量契约」协同 */
-const VAR_KEY = "filler_system";
+const VAR_KEY = "story_favorite_type_suffix";
 const WRONG_CODE = "DEFINITELY-NOT-THE-CODE";
 
 /**
@@ -402,7 +402,7 @@ describe("Analytics prompts (e2e)", () => {
         ),
       )
         .send({
-          content: "承接段：{{contextSection}}／禁播段：{{bannedSection}}",
+          content: "题材：{{favoriteStoryType}}",
           expectedRevision: 0,
         })
         .expect(200);
@@ -414,15 +414,9 @@ describe("Analytics prompts (e2e)", () => {
         .send({ revision: 1, changeNote: "验证变量渲染", confirmCode })
         .expect(200);
 
-      expect(
-        registry.render(VAR_KEY, {
-          contextSection: "CTX-A",
-          bannedSection: "BAN-B",
-        }),
-      ).toBe("承接段：CTX-A／禁播段：BAN-B");
-
-      // 可选变量缺省 → 渲染为空串，不报错
-      expect(registry.render(VAR_KEY, {})).toBe("承接段：／禁播段：");
+      expect(registry.render(VAR_KEY, { favoriteStoryType: "恐龙" })).toBe(
+        "题材：恐龙",
+      );
     });
 
     it("DB 正文写了未声明的占位符 → 回落代码默认值，绝不把 {{x}} 发给模型", async () => {
@@ -444,17 +438,19 @@ describe("Analytics prompts (e2e)", () => {
         .send({ revision: 2, changeNote: "误写未声明变量", confirmCode })
         .expect(200);
 
-      const rendered = registry.render(VAR_KEY, {});
+      const rendered = registry.render(VAR_KEY, {
+        favoriteStoryType: "恐龙",
+      });
       // 不变量：既不漏 {{x}} 给模型，也不用那份坏掉的 DB 正文
       expect(rendered).not.toContain("{{");
       expect(rendered).not.toContain("notDeclaredVar");
       expect(rendered).not.toContain("危险正文");
-      // 回落结果 = 代码默认模板按可选变量渲染（占位符→空串）
+      // 回落结果 = 代码默认模板按变量契约渲染
       expect(rendered).toBe(
         renderPrompt(
-          PROMPT_DEFAULTS.filler_system.template,
-          {},
-          PROMPT_DEFAULTS.filler_system.variables,
+          PROMPT_DEFAULTS.story_favorite_type_suffix.template,
+          { favoriteStoryType: "恐龙" },
+          PROMPT_DEFAULTS.story_favorite_type_suffix.variables,
         ),
       );
     });

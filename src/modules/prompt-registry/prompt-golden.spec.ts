@@ -106,71 +106,7 @@ const REGISTRY_PROVIDER = {
 describe("prompt 黄金基线等价性", () => {
   it("基线来自重构前的提交，且用例数未意外减少", () => {
     expect(GOLDENS.meta.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
-    expect(Object.keys(GOLDENS.cases)).toHaveLength(46);
-  });
-
-  describe("filler：首响承接层 prompt", () => {
-    let llm: LlmService;
-
-    beforeAll(async () => {
-      llm = await compile(LlmService, [
-        { provide: ConfigService, useValue: { get: () => undefined } },
-        { provide: PrismaService, useValue: {} },
-        REGISTRY_PROVIDER,
-      ]);
-    });
-
-    const cases: Array<[string, Parameters<LlmService["buildFillerPrompt"]>]> =
-      [
-        ["filler/minimal", ["我喜欢上海的天气", undefined, undefined]],
-        [
-          "filler/persona-and-child",
-          [
-            "我喜欢上海的天气",
-            undefined,
-            {
-              persona: LlmService.CHARACTER_PERSONAS.elly,
-              childBrief: LlmService.buildChildBrief(CHILD_PROFILE),
-            },
-          ],
-        ],
-        [
-          "filler/adventure-declined",
-          ["我想玩冒险", undefined, { adventureDeclined: true }],
-        ],
-        [
-          "filler/story-intent",
-          ["讲个故事", undefined, { intent: "sleep_story" }],
-        ],
-        [
-          "filler/recent-fillers",
-          [
-            "我昨天去公园玩了",
-            ["原来你喜欢上海的天气呀", "去公园玩啦"],
-            undefined,
-          ],
-        ],
-        [
-          "filler/all-combined",
-          [
-            "Why is the sky blue?",
-            ["Wow, that is such a fun question to think about!"],
-            {
-              intent: "english_story",
-              persona: LlmService.CHARACTER_PERSONAS.polly,
-              childBrief: LlmService.buildChildBrief(CHILD_PROFILE),
-            },
-          ],
-        ],
-        [
-          "filler/empty-child-brief",
-          ["你好", undefined, { childBrief: LlmService.buildChildBrief(null) }],
-        ],
-      ];
-
-    it.each(cases)("%s 与基线逐字节一致", (id, args) => {
-      expect(llm.buildFillerPrompt(...args)).toStrictEqual(GOLDENS.cases[id]);
-    });
+    expect(Object.keys(GOLDENS.cases)).toHaveLength(38);
   });
 
   describe("adventure：角色接话层 prompt", () => {
@@ -441,14 +377,8 @@ describe("prompt 黄金基线等价性", () => {
     });
   });
 
-  describe("filler 重试指令 / 人设 / 工具函数", () => {
+  describe("人设 / 工具函数", () => {
     const registry = new PromptRegistryService(makeEmptyPrisma());
-
-    it("filler_retry_instruction 与基线逐字节一致", () => {
-      expect(registry.getTemplate("filler_retry_instruction")).toStrictEqual(
-        GOLDENS.cases["filler/retry_instruction"],
-      );
-    });
 
     it("persona_elly 与基线逐字节一致（静态表与注册表同源）", () => {
       expect(LlmService.CHARACTER_PERSONAS.elly).toStrictEqual(
