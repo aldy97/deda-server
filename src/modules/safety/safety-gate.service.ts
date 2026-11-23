@@ -31,7 +31,8 @@ export class SafetyGateService {
       mode: input.mode,
       intent: input.intent,
     });
-    if (profile !== "default") return null;
+    // Phase 3：default 与 sleep 共用同一套语义；adventure 留给 Phase 4。
+    if (profile === "adventure") return null;
 
     const verdict = input.verdict;
     const blocked = Boolean(

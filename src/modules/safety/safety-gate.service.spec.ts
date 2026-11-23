@@ -88,15 +88,37 @@ describe("SafetyGateService.interpret", () => {
     ).toBeNull();
   });
 
-  it("sleep / adventure profile 在 Phase 2 返回 null，由旧链路继续", () => {
+  it("sleep_story / sleep_config 使用 sleep profile", () => {
     expect(
       gate.interpret({ verdict: verdict(), mode: "sleep_story" }),
-    ).toBeNull();
-    expect(
-      gate.interpret({ verdict: verdict(), mode: "adventure_story" }),
-    ).toBeNull();
+    ).toMatchObject({
+      profile: "sleep",
+      blocked: true,
+      safetyReply: "canned_block",
+      cannedReply: "这个话题不适合小朋友聊哦。",
+    });
     expect(
       gate.interpret({ verdict: verdict(), intent: "sleep_config" }),
+    ).toMatchObject({ profile: "sleep", blocked: true });
+  });
+
+  it("sleep profile 的 emotional_harm 仍注入共情指令", () => {
+    expect(
+      gate.interpret({
+        verdict: verdict({ blocked: false, category: "emotional_harm" }),
+        mode: "sleep_story",
+      }),
+    ).toMatchObject({
+      profile: "sleep",
+      blocked: false,
+      promptInstruction: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
+      snapshot: { category: "emotional_harm" },
+    });
+  });
+
+  it("adventure profile 在 Phase 3 仍返回 null，由旧链路继续", () => {
+    expect(
+      gate.interpret({ verdict: verdict(), mode: "adventure_story" }),
     ).toBeNull();
   });
 });

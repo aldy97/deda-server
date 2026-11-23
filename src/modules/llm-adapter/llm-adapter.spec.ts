@@ -2281,6 +2281,156 @@ describe("LlmAdapterModule", () => {
       expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
     });
 
+    it("SAFETY_GATE_SLEEP=off：哄睡不调用 gate", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("晚安")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+    });
+
+    it("SAFETY_GATE_SLEEP=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "unsafe_line_echo",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["晚安故事来了"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(childSafety.classifyL2).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_SLEEP=on：哄睡故事由 gate 拦截", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: true,
+          category: "violence",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked sleep",
+        promptInstruction: undefined,
+        snapshot: {
+          layer: "L2",
+          category: "violence",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
+      });
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["gate blocked sleep"]);
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+    });
+
+    it("SAFETY_GATE_SLEEP=on：sleep_config 被 gate 拦截时不进短链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_config",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "self_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: true,
+          category: "self_harm",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked config",
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("哄睡改成二十分钟")),
+      );
+
+      expect(chunks).toEqual(["gate blocked config"]);
+      expect(sleepVoice.handle).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+    });
+
     it("哄睡设置短链路：intent 记 sleep_config 并透传会话服务给出的 source", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolveWithSource.mockResolvedValue({

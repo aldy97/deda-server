@@ -39,6 +39,7 @@ import {
   SafetyGateService,
   diffSafetyEvaluations,
 } from "@/modules/safety/safety-gate.service";
+import { resolveSafetyProfile } from "@/modules/safety/safety-profile";
 import type {
   SafetyEvaluation,
   SafetySnapshot,
@@ -163,8 +164,12 @@ export class LlmAdapterService {
   }
 
   /** Phase 2：普通聊天 gate 开关；默认 off，staging 验证用 shadow。 */
-  private safetyGateMode(): "off" | "shadow" | "on" {
-    const raw = this.configService.get<string>("SAFETY_GATE_NORMAL");
+  private safetyGateMode(intent: ConversationIntent): "off" | "shadow" | "on" {
+    const key =
+      intent === "sleep_story" || intent === "sleep_config"
+        ? "SAFETY_GATE_SLEEP"
+        : "SAFETY_GATE_NORMAL";
+    const raw = this.configService.get<string>(key);
     return raw === "shadow" || raw === "on" ? raw : "off";
   }
 
@@ -377,13 +382,15 @@ export class LlmAdapterService {
     // safeClassifyL2 的外层 catch 连 verdict 都拿不到，此时记 l2_fail_open，
     // 与「本轮根本没做 L2」的 not_evaluated 严格区分
     const l2SourceOverride = l2 ? undefined : ("l2_fail_open" as const);
-    const gateMode = this.safetyGateMode();
     const gateEligible =
       intent === "free_chat" ||
       intent === "english_story" ||
-      intent === "idiom_story";
+      intent === "idiom_story" ||
+      intent === "sleep_story" ||
+      intent === "sleep_config";
+    const gateMode = gateEligible ? this.safetyGateMode(intent) : "off";
     const gateDecision =
-      gateMode !== "off" && gateEligible
+      gateMode !== "off"
         ? this.safetyGate.interpret({ verdict: l2, intent })
         : null;
 
@@ -404,7 +411,7 @@ export class LlmAdapterService {
 
     if (gateMode === "shadow" && gateDecision) {
       const legacyEvaluation: SafetyEvaluation = {
-        profile: "default",
+        profile: resolveSafetyProfile({ intent }),
         verdict: l2,
         blocked: legacyBlocked,
         safetyReply: legacySafetyReply,
@@ -499,7 +506,7 @@ export class LlmAdapterService {
         deviceId: device.id,
         safety: l2,
         safetySource: l2SourceOverride,
-        safetyReply: "none",
+        safetyReply,
         intent,
         intentSource: intentDecision.source,
         asrText,
