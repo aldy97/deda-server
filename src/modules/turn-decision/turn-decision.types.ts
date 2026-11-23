@@ -61,6 +61,19 @@ export const DEFAULT_TURN_CHANNEL = "baidu-rtc";
 /** asrText 列宽 VARCHAR(200)，超长截断，避免落库报错反过来打断对话 */
 export const ASR_TEXT_MAX_LENGTH = 200;
 
+/**
+ * 本轮实际安全话术处置（不是分类器结论）。
+ * - canned_block：任一 layer 明确拦截，代码返回固定话术
+ * - unsafe_line_echo：模型输出中包含固定安全句（含 fail-open 回抄）
+ * - caution_injected：注入了 L2 不可用时的谨慎指令，无论模型是否回抄
+ * - none：未触发安全话术
+ *
+ * 只用于 recorder 判断是否留存原文与消息 rawPayload；不新增数据库列，
+ * 避免为一次可观测性修复引入 migration。
+ */
+export type SafetyReply =
+  "canned_block" | "unsafe_line_echo" | "caution_injected" | "none";
+
 /** 编排层的意图决策：会话服务的 IntentDecision 加上编排独有的来源 */
 export interface TurnIntentDecision {
   intent: ConversationIntent;
@@ -90,7 +103,12 @@ export interface TurnDecisionRecord {
   intent?: ConversationIntent | null;
   intentSource?: TurnIntentSource | null;
   /**
-   * 孩子的原话。只在「拦了」或「判成非 safe 类别」时落库，
+   * 本轮实际安全话术处置。只影响原文留存判断与消息快照，不落
+   * turn_decision_logs 列；消息 rawPayload.safety.reply 保存同一份值。
+   */
+  safetyReply?: SafetyReply | null;
+  /**
+   * 孩子的原话。只在「拦了」「判成非 safe 类别」或「触发了安全话术」时落库，
    * 且任何情况下都不进日志——见 recorder 的 PII 纪律。
    */
   asrText?: string | null;

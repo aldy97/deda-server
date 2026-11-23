@@ -2,7 +2,10 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmAdapterService } from "./llm-adapter.service";
 import { LlmAdapterController } from "./llm-adapter.controller";
-import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
+import {
+  ADVENTURE_DEGRADED_REPLIES,
+  ADVENTURE_UNSAFE_LINE,
+} from "@/modules/adventure/adventure.constants";
 import {
   parseChatCompletionRequest,
   ChatCompletionRequest,
@@ -1734,16 +1737,31 @@ describe("LlmAdapterModule", () => {
         blocked: true,
         category: "violence",
         layer: "L1",
+        source: "l1_regex",
         matched: "x",
       });
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
       expect(llm.completeStream).not.toHaveBeenCalled();
       expect(prisma.message.create).toHaveBeenCalledTimes(2);
+      const userCall = prisma.message.create.mock.calls[0][0];
       const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L1",
+        category: "violence",
+        reply: "canned_block",
+      });
       expect(assistantCall.data.rawPayload).toMatchObject({
         safetyCategory: "violence",
         safetyLayer: "L1",
+        safety: {
+          layer: "L1",
+          category: "violence",
+          blocked: true,
+          source: "l1_regex",
+          reply: "canned_block",
+          inferred: false,
+        },
       });
     });
 
@@ -2285,6 +2303,304 @@ describe("LlmAdapterModule", () => {
         intent: "free_chat",
         intentSource: "no_device",
       });
+    });
+
+    it("冒险 L2 拦截：记录 canned_block 与原文，assistant rawPayload 带 safety", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: [ADVENTURE_UNSAFE_LINE],
+            action: "await_reply",
+            result: "off_topic",
+            safetyBlocked: true,
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "canned_block",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "violence",
+        blocked: true,
+        reply: "canned_block",
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "violence",
+        blocked: true,
+        source: "l2_model",
+        reply: "canned_block",
+        inferred: false,
+      });
+    });
+
+    it("冒险 fail-open 且模型回抄安全句：记录 unsafe_line_echo 与原文", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: [`嗯……${ADVENTURE_UNSAFE_LINE}`],
+            action: "await_reply",
+            result: "answered",
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "unsafe_line_echo",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: false,
+        source: "l2_fail_open",
+        reply: "unsafe_line_echo",
+        inferred: false,
+      });
+    });
+
+    it("冒险未评估但模型回抄安全句：消息也写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "unsafe_line_echo",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      for (const call of [userCall, assistantCall]) {
+        expect(call.data.rawPayload.safety).toMatchObject({
+          layer: null,
+          category: null,
+          blocked: false,
+          source: "inferred_from_reply",
+          reply: "unsafe_line_echo",
+          inferred: true,
+        });
+      }
+    });
+
+    it("冒险未评估且未触发安全话术：不写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["我们继续去森林吧。"],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("我觉得他会害怕")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "none",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload).not.toHaveProperty("safety");
+      expect(assistantCall.data.rawPayload).not.toHaveProperty("safety");
+    });
+
+    it("防御：无 verdict 但代码返回安全话术，仍写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "off_topic",
+        safetyBlocked: true,
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetyReply: "canned_block",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: true,
+        source: "not_evaluated",
+        reply: "canned_block",
+        inferred: true,
+      });
+    });
+
+    it("冒险 fail-open 未回抄：记录 caution_injected 与原文", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: ["我们继续去森林吧。"],
+            action: "await_reply",
+            result: "answered",
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("我觉得他会害怕")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "caution_injected",
+        asrText: "我觉得他会害怕",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        source: "l2_fail_open",
+        reply: "caution_injected",
+      });
+    });
+
+    it("普通 L2 拦截：assistant rawPayload 也带 safety 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "self_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      await collect(service.streamReply(boundReq("假数据-自伤表达")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "canned_block",
+        asrText: "假数据-自伤表达",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "self_harm",
+        reply: "canned_block",
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "self_harm",
+        blocked: true,
+        source: "l2_model",
+        reply: "canned_block",
+      });
+    });
+
+    it("普通链路 L2 不可用：assistant rawPayload 记 fail-open 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["我们聊点别的吧"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: false,
+        source: "l2_fail_open",
+        reply: "none",
+      });
+    });
+
+    it("哄睡模式 emotional_harm：assistant rawPayload 带 safety 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: "emotional_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("我要听睡前故事")));
+
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "emotional_harm",
+        blocked: false,
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "emotional_harm",
+        blocked: false,
+        source: "l2_model",
+        reply: "none",
+      });
+    });
+
+    it("正常 safe 轮次不写 safety 快照，避免每条消息膨胀", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).not.toHaveProperty("safety");
     });
   });
 
