@@ -22,13 +22,17 @@ import {
   AdventureReply,
   AdventureService,
 } from "@/modules/adventure/adventure.service";
+import { ADVENTURE_UNSAFE_LINE } from "@/modules/adventure/adventure.constants";
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
   SafetyVerdict,
 } from "@/modules/vendor/child-safety.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
-import { TurnIntentDecision } from "@/modules/turn-decision/turn-decision.types";
+import {
+  SafetyReply,
+  TurnIntentDecision,
+} from "@/modules/turn-decision/turn-decision.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 import {
   extractRecentFillers,
@@ -56,6 +60,77 @@ function resolveUpstreamFallbackText(characterKey?: string | null): string {
     (characterKey != null && UPSTREAM_FALLBACK_TEXTS[characterKey]) ||
     DEFAULT_UPSTREAM_FALLBACK_TEXT
   );
+}
+
+const FAIL_OPEN_SOURCES = new Set(["l2_fail_open", "l2_invalid_label"]);
+
+type MessageSafetySnapshot = Prisma.InputJsonObject & {
+  layer: string | null;
+  category: string | null;
+  blocked: boolean;
+  source: string;
+  matched: string | null;
+  reply: SafetyReply;
+  inferred: false;
+};
+
+/**
+ * 本轮是否值得在消息 rawPayload 留安全快照。
+ * safe / 未评估且未触发安全话术 → null，避免每条正常消息膨胀。
+ */
+function buildSafetySnapshot(
+  safety: SafetyVerdict | null | undefined,
+  reply: SafetyReply,
+): MessageSafetySnapshot | null {
+  if (!safety) return null;
+  const caught =
+    safety.blocked ||
+    (safety.category !== null && safety.category !== "safe") ||
+    FAIL_OPEN_SOURCES.has(safety.source ?? "") ||
+    reply !== "none";
+  if (!caught) return null;
+  return {
+    layer: safety.layer ?? null,
+    category: safety.category ?? null,
+    blocked: safety.blocked,
+    source: safety.source ?? "not_evaluated",
+    matched: safety.matched ?? null,
+    reply,
+    inferred: false,
+  };
+}
+
+/**
+ * 冒险回复的安全处置：
+ * - 代码固定话术 → canned_block
+ * - 模型输出含固定安全句 → unsafe_line_echo
+ * - L2 不可用时注入过谨慎指令 → caution_injected
+ */
+function extractSafetyFromPayload(
+  payload: Prisma.InputJsonValue,
+): Prisma.InputJsonValue | undefined {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return undefined;
+  }
+  return (payload as Record<string, Prisma.InputJsonValue | undefined>).safety;
+}
+
+function resolveAdventureSafetyReply(
+  reply: AdventureReply,
+  safety: SafetyVerdict | null | undefined,
+): SafetyReply {
+  if (reply.safetyBlocked || safety?.blocked) return "canned_block";
+  if (reply.texts.some((text) => text.includes(ADVENTURE_UNSAFE_LINE))) {
+    return "unsafe_line_echo";
+  }
+  if (safety && FAIL_OPEN_SOURCES.has(safety.source ?? "")) {
+    return "caution_injected";
+  }
+  return "none";
 }
 
 /** 落库历史条数上限：与老链路 getRecentHistory 口径一致（12 条 ≈ 6 轮） */
@@ -217,6 +292,7 @@ export class LlmAdapterService {
             answer: canned,
             safetyCategory: verdict.category,
             safetyLayer: "L1",
+            safety: buildSafetySnapshot(verdict, "canned_block"),
           },
           turnId,
         );
@@ -227,6 +303,7 @@ export class LlmAdapterService {
         turnId,
         deviceId: device?.id ?? null,
         safety: verdict,
+        safetyReply: "canned_block",
         intent: null,
         intentSource: "not_routed",
         asrText,
@@ -250,6 +327,7 @@ export class LlmAdapterService {
             deviceId: device.id,
             safety: null,
             safetySource: "not_evaluated",
+            safetyReply: "none",
             intent: null,
             intentSource: "adventure_takeover",
             asrText,
@@ -259,6 +337,7 @@ export class LlmAdapterService {
             testStoryReply,
             asrText,
             turnId,
+            null,
           );
           return;
         }
@@ -294,6 +373,7 @@ export class LlmAdapterService {
         // 冒险接管：安全判定已按需执行（接话层/二选一 LLM 路径）。
         // 未触发的路径如实记 not_evaluated，触发但失败记 l2_fail_open。
         const safety = adventureSafety ? await adventureSafety : null;
+        const safetyReply = resolveAdventureSafetyReply(adventureReply, safety);
         this.turnDecisions.record({
           turnId,
           deviceId: device.id,
@@ -303,11 +383,18 @@ export class LlmAdapterService {
               ? undefined
               : ("l2_fail_open" as const)
             : "not_evaluated",
+          safetyReply,
           intent: null,
           intentSource: "adventure_takeover",
           asrText,
         });
-        yield* this.emitAdventureReply(device, adventureReply, asrText, turnId);
+        yield* this.emitAdventureReply(
+          device,
+          adventureReply,
+          asrText,
+          turnId,
+          buildSafetySnapshot(safety, safetyReply),
+        );
         return;
       }
     }
@@ -330,6 +417,7 @@ export class LlmAdapterService {
     // safeClassifyL2 的外层 catch 连 verdict 都拿不到，此时记 l2_fail_open，
     // 与「本轮根本没做 L2」的 not_evaluated 严格区分
     const l2SourceOverride = l2 ? undefined : ("l2_fail_open" as const);
+    const safetySnapshot = buildSafetySnapshot(l2, "none");
 
     if (
       l2?.blocked &&
@@ -351,6 +439,7 @@ export class LlmAdapterService {
             answer: canned,
             safetyCategory: l2.category,
             safetyLayer: "L2",
+            safety: buildSafetySnapshot(l2, "canned_block"),
           },
           turnId,
         );
@@ -360,6 +449,7 @@ export class LlmAdapterService {
         turnId,
         deviceId: device?.id ?? null,
         safety: l2,
+        safetyReply: "canned_block",
         intent: null,
         intentSource: "not_routed",
         asrText,
@@ -383,6 +473,7 @@ export class LlmAdapterService {
         asrText,
         turnId,
       );
+      const safetySnapshot = buildSafetySnapshot(l2, "none");
       await this.persistTurn(
         device.id,
         asrText,
@@ -392,6 +483,7 @@ export class LlmAdapterService {
           filler: null,
           answer: result.replyText,
           sleepConfig: result.applied ? (result.field ?? null) : null,
+          ...(safetySnapshot ? { safety: safetySnapshot } : {}),
         },
         turnId,
       );
@@ -402,6 +494,7 @@ export class LlmAdapterService {
         deviceId: device.id,
         safety: l2,
         safetySource: l2SourceOverride,
+        safetyReply: "none",
         intent,
         intentSource: intentDecision.source,
         asrText,
@@ -434,6 +527,7 @@ export class LlmAdapterService {
               deviceId: device.id,
               safety: l2,
               safetySource: l2SourceOverride,
+              safetyReply: "none",
               intent,
               intentSource: intentDecision.source,
               asrText,
@@ -443,6 +537,7 @@ export class LlmAdapterService {
               startedAdventure,
               asrText,
               turnId,
+              buildSafetySnapshot(l2, "none"),
             );
             return;
           }
@@ -516,7 +611,10 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode,
-          rawPayload: { channel: "baidu-rtc" },
+          rawPayload: {
+            channel: "baidu-rtc",
+            ...(safetySnapshot ? { safety: safetySnapshot } : {}),
+          },
           spokeAt: sourceOccurredAt,
         },
       });
@@ -729,6 +827,7 @@ export class LlmAdapterService {
                   fillerEmotion,
                 }
               : {}),
+            ...(safetySnapshot ? { safety: safetySnapshot } : {}),
             ...(sleepContentDegraded ? { sleepContentDegraded } : {}),
           },
           spokeAt: new Date(),
@@ -757,6 +856,7 @@ export class LlmAdapterService {
       deviceId: device?.id ?? null,
       safety: l2,
       safetySource: l2SourceOverride,
+      safetyReply: "none",
       intent,
       intentSource: intentDecision.source,
       asrText,
@@ -789,6 +889,7 @@ export class LlmAdapterService {
     adventureReply: AdventureReply,
     asrText: string,
     turnId: string,
+    safety: MessageSafetySnapshot | null,
   ): AsyncGenerator<string> {
     const responseText = adventureReply.texts.join("\n");
 
@@ -805,7 +906,10 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode: "adventure_story",
-          rawPayload: { channel: "baidu-rtc" },
+          rawPayload: {
+            channel: "baidu-rtc",
+            ...(safety ? { safety } : {}),
+          },
           spokeAt: new Date(),
         },
       });
@@ -834,6 +938,7 @@ export class LlmAdapterService {
             answer: responseText,
             interactionResult: adventureReply.result ?? null,
             matchedChoice: adventureReply.matchedChoice ?? null,
+            ...(safety ? { safety } : {}),
           },
           spokeAt: new Date(),
         },
@@ -1079,6 +1184,7 @@ export class LlmAdapterService {
     assistantPayload: Prisma.InputJsonValue,
     turnId: string = randomUUID(),
   ): Promise<void> {
+    const safety = extractSafetyFromPayload(assistantPayload);
     await this.prisma.message.create({
       data: {
         deviceId: deviceInternalId,
@@ -1087,7 +1193,10 @@ export class LlmAdapterService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
-        rawPayload: { channel: "baidu-rtc" },
+        rawPayload: {
+          channel: "baidu-rtc",
+          ...(safety === undefined ? {} : { safety }),
+        },
         spokeAt: new Date(),
       },
     });

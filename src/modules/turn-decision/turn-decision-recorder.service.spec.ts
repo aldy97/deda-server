@@ -238,4 +238,33 @@ describe("TurnDecisionRecorder", () => {
       expect(String(call[0])).not.toContain(secret);
     }
   });
+
+  it.each([
+    ["代码固定话术", "canned_block"],
+    ["模型回抄安全句", "unsafe_line_echo"],
+    ["仅注入谨慎指令", "caution_injected"],
+  ] as const)(
+    "安全话术实际触发（%s）即使 fail-open 也留原文进复核队列",
+    (_name, safetyReply) => {
+      const { service, upsert } = setup();
+      service.record({
+        turnId: "t",
+        safety: l2({ category: null, layer: null, source: "l2_fail_open" }),
+        safetyReply,
+        asrText: "假数据-孩子原话",
+      });
+      expect(createData(upsert).asrText).toBe("假数据-孩子原话");
+    },
+  );
+
+  it("fail-open 但 safetyReply=none 不留原文（未触发任何安全话术）", () => {
+    const { service, upsert } = setup();
+    service.record({
+      turnId: "t",
+      safety: l2({ category: null, layer: null, source: "l2_fail_open" }),
+      safetyReply: "none",
+      asrText: "假数据-正常回答",
+    });
+    expect(createData(upsert).asrText).toBeNull();
+  });
 });
