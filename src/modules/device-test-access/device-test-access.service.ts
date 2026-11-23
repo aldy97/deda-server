@@ -11,14 +11,14 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { ADVENTURE_TEST_ENV } from "@/modules/adventure/adventure.constants";
 
 /**
- * 测试设备白名单：冒险测试与哄睡测试共用的设备级资格闸。
+ * 测试设备白名单：冒险测试的设备级资格闸。
  *
- * 为什么单独成模块：它同时被三条链路消费——冒险播放引擎（触发词）、vendor
- * 对话会话（测试哄睡）、冒险管理台（下发前校验）。放在任何一条链路里都会让另外
- * 两条反向依赖，所以做成只依赖 Prisma 的叶子模块。
+ * 为什么单独成模块：它同时被两条链路消费——冒险播放引擎（触发词）与
+ * 冒险管理台（下发前校验）。放在任何一条链路里都会让另一条反向依赖，所以做成
+ * 只依赖 Prisma 的叶子模块。
  *
  * 安全语义：
- * - 写操作只在任一测试开关打开时放行；prod 两个开关都不在，白名单只读。
+ * - 写操作只在冒险测试开关打开时放行；prod 不转发该开关，白名单只读。
  * - 撤销是软删除并清空该设备的测试冒险下发字段：阻断下一次触发，但不主动中断
  *   已经开始的测试会话（见 2026-11-22 方案确认）。
  * - 外键 ON DELETE CASCADE：设备被 wipe 后资格自动失效，重新入库必须重新添加。
@@ -57,7 +57,7 @@ export interface TestDevicesQuery {
 }
 
 export interface TestDevicesResult {
-  enabled: { adventure: boolean; sleep: boolean };
+  enabled: { adventure: boolean };
   items: TestDeviceView[];
   total: number;
 }
@@ -77,14 +77,9 @@ export interface RevokeTestDeviceInput {
 export const MIN_TEST_DEVICE_REASON_CHARS = 8;
 export const MAX_TEST_DEVICE_REASON_CHARS = 300;
 
-/**
- * 两个测试总开关。adventure 复用既有常量；sleep 的常量定义在
- * sleep-mode.service.ts，但那个文件会引入 DeviceLink/BaiduAgent 依赖，
- * 叶子模块不直接 import，改为字面量并在 spec 里断言与真实常量逐字一致。
- */
+/** 冒险测试总开关。写操作只在它打开时放行。 */
 export const TEST_DEVICE_ENV = {
   adventure: ADVENTURE_TEST_ENV.enabled,
-  sleep: "SLEEP_TEST_MODE_ENABLED",
 } as const;
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -318,20 +313,18 @@ export class DeviceTestAccessService {
     return { ok: true as const, clearedAdventureAssignment: cleared };
   }
 
-  private enabledState(): { adventure: boolean; sleep: boolean } {
+  private enabledState(): { adventure: boolean } {
     return {
       adventure:
         this.configService.get<string>(TEST_DEVICE_ENV.adventure) === "true",
-      sleep: this.configService.get<string>(TEST_DEVICE_ENV.sleep) === "true",
     };
   }
 
-  /** 两个开关都关（prod）时写操作 403；只读仍可查看。 */
+  /** 冒险测试开关关（prod）时写操作 403；只读仍可查看。 */
   private assertWriteEnabled(): void {
-    const enabled = this.enabledState();
-    if (!enabled.adventure && !enabled.sleep) {
+    if (!this.enabledState().adventure) {
       throw new ForbiddenException(
-        "当前环境未开启测试模式（ADVENTURE_TEST_MODE_ENABLED / SLEEP_TEST_MODE_ENABLED 都为 false），白名单只读。",
+        "当前环境未开启冒险测试模式（ADVENTURE_TEST_MODE_ENABLED 为 false），白名单只读。",
       );
     }
   }
