@@ -11,19 +11,21 @@ import { DeviceTestAccessService } from "@/modules/device-test-access/device-tes
 import {
   ADVENTURE_CHOICE_LLM_DEFAULTS,
   ADVENTURE_CHOICE_LLM_ENV,
-  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
   ADVENTURE_ENGINE_FAILURE_MARKER,
   ADVENTURE_EXIT_TEXT,
-  ADVENTURE_SAFETY_CAUTION,
   ADVENTURE_TEST_ENV,
   ADVENTURE_TEST_STORY_NOT_ASSIGNED_TEXT,
   ADVENTURE_TEST_STORY_TRIGGER,
-  ADVENTURE_UNSAFE_LINE,
   AdventureFailurePhase,
   AdventureFailureReport,
   AdventureSafetyProvider,
   isAdventureExitRequest,
 } from "./adventure.constants";
+import {
+  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+  ADVENTURE_SAFETY_CAUTION,
+  ADVENTURE_UNSAFE_LINE,
+} from "@/modules/safety/safety-profile";
 import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
 import { adventureDateKey } from "./adventure-date.util";
 import {
