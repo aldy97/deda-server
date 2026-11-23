@@ -460,6 +460,9 @@ GET /analytics/messages/interruption-rate?startDate=&endDate=
 
 GET /analytics/messages/:id
 → 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
+   // 2026-11-23 起，历史回补会在 rawPayload.safety 放入本轮安全判定快照；
+   // 形状与 inferred 语义见 docs/message-safety-backfill.md。
+   // inferred=true = 没有判定行、由 AI 回复内容推断，前端必须标注「推断回补」。
 ```
 
 打断判定（`interrupted`）为**服务端推断口径**（`common/interruption/interruption.util.ts`，
