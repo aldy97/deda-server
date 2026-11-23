@@ -37,10 +37,10 @@ function trimToNull(value: unknown): string | null {
 /**
  * 测试设备白名单 HTTP 入口。
  *
- * 独立挂 `/analytics/test-devices` 而不是塞进 adventure-admin：这份名单同时管
- * 冒险测试与哄睡测试，塞进冒险内容台会让哄睡运维找不到入口，也会让「内容权限」
- * 与「设备测试权限」变成同一个闸。这里只挂 SuperAdminGuard，环境写闸在服务层
- * （两个测试开关都关 → 写操作 403，只读仍可看）。
+ * 独立挂 `/analytics/test-devices` 而不是塞进 adventure-admin：这份名单管
+ * 冒险测试，塞进冒险内容台会让「内容权限」与「设备测试权限」变成同一个闸。
+ * 这里只挂 SuperAdminGuard，环境写闸在服务层
+ * （冒险测试开关关闭 → 写操作 403，只读仍可看）。
  */
 @ApiTags("analytics-test-devices")
 @ApiBearerAuth()

@@ -71,7 +71,6 @@ const INTENTIONALLY_NOT_FORWARDED = new Set([
   "CONTENT_ADMIN_PROFILE",
   // 仅 staging 覆盖里显式 true，base/prod 不得出现
   "ADVENTURE_TEST_MODE_ENABLED",
-  "SLEEP_TEST_MODE_ENABLED",
 ]);
 
 const SOURCE_DIR = resolve(__dirname, "../..");
@@ -121,12 +120,6 @@ describe("compose 环境变量白名单", () => {
     expect("ADVENTURE_TEST_MODE_ENABLED" in baseEnv).toBe(false);
     expect("ADVENTURE_TEST_MODE_ENABLED" in prodEnv).toBe(false);
     expect(stagingEnv.ADVENTURE_TEST_MODE_ENABLED).toBe("true");
-  });
-
-  it("SLEEP_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
-    expect("SLEEP_TEST_MODE_ENABLED" in baseEnv).toBe(false);
-    expect("SLEEP_TEST_MODE_ENABLED" in prodEnv).toBe(false);
-    expect(stagingEnv.SLEEP_TEST_MODE_ENABLED).toBe("true");
   });
 });
 

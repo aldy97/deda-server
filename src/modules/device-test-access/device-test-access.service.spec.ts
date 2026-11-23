@@ -11,7 +11,7 @@ import {
 import { ADVENTURE_TEST_ENV } from "@/modules/adventure/adventure.constants";
 
 /**
- * 测试设备白名单：冒险测试与哄睡测试共用的设备级资格闸。
+ * 测试设备白名单：冒险测试的设备级资格闸。
  *
  * 这里钉住的是「谁能被放开、放开/收回留下什么、环境关时写不进去」四条口径。
  * 页面与 HTTP 层只做转发，真正的安全语义都在本服务。
@@ -79,10 +79,7 @@ describe("DeviceTestAccessService", () => {
     );
     config = {
       get: jest.fn((key: string) => {
-        if (
-          key === TEST_DEVICE_ENV.adventure ||
-          key === TEST_DEVICE_ENV.sleep
-        ) {
+        if (key === TEST_DEVICE_ENV.adventure) {
           return "true";
         }
         return undefined;
@@ -238,7 +235,7 @@ describe("DeviceTestAccessService", () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it("两个测试开关都关时写操作 403（prod 只读）", async () => {
+    it("冒险测试开关关时写操作 403（prod 只读）", async () => {
       config.get.mockReturnValue(undefined);
 
       await expect(
@@ -349,7 +346,7 @@ describe("DeviceTestAccessService", () => {
         where: { active: true },
       });
       expect(result).toEqual({
-        enabled: { adventure: true, sleep: true },
+        enabled: { adventure: true },
         total: 1,
         items: [expect.objectContaining({ id: "wl-1", active: true })],
       });
@@ -384,12 +381,10 @@ describe("DeviceTestAccessService", () => {
     });
 
     it("环境开关关时 enabled 如实反映，列表仍可读", async () => {
-      config.get.mockImplementation((key: string) =>
-        key === TEST_DEVICE_ENV.sleep ? "true" : undefined,
-      );
+      config.get.mockReturnValue(undefined);
 
       await expect(service.list({})).resolves.toEqual({
-        enabled: { adventure: false, sleep: true },
+        enabled: { adventure: false },
         total: 0,
         items: [],
       });
