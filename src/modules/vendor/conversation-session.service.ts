@@ -1,16 +1,10 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { isInSleepWindow } from "@/modules/sleep-configs/sleep-window.util";
-import {
-  SLEEP_TEST_MODE_ENV,
-  SLEEP_TEST_MODE_TRIGGER,
-  SleepModeService,
-} from "@/modules/sleep-configs/sleep-mode.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
-import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
 import { FILLER_EMOTIONS, type FillerEmotion } from "@/modules/llm/filler-bank";
 
@@ -56,7 +50,6 @@ const CONVERSATION_INTENTS: ConversationIntent[] = [
  * - session_sticky：活跃会话中调了模型，但模型判为 free_chat → 维持原模式
  * - force_sleep：家长开了强制哄睡且在哄睡时段内，未调模型直接覆写为 sleep_story
  * - sleep_window_closed：模型判为 sleep_story 但当前不在哄睡时段 → 降级 free_chat
- * - test_sleep：staging 下命中「测试哄睡模式」触发词，绕过时段门禁直接进 sleep_story
  */
 export type IntentSource =
   | "model"
@@ -67,8 +60,7 @@ export type IntentSource =
   | "session_sticky"
   | "explicit_exit"
   | "force_sleep"
-  | "sleep_window_closed"
-  | "test_sleep";
+  | "sleep_window_closed";
 
 export interface IntentDecision {
   intent: ConversationIntent;
@@ -96,9 +88,7 @@ export class ConversationSessionService {
     private readonly llmService: LlmService,
     private readonly sleepConfigs: SleepConfigsService,
     private readonly promptRegistry: PromptRegistryService,
-    private readonly configService: ConfigService,
     private readonly sleepMode: SleepModeService,
-    private readonly deviceTestAccess: DeviceTestAccessService,
   ) {}
 
   /**
@@ -142,13 +132,6 @@ export class ConversationSessionService {
     if (this.isForceSleepActive(sleepConfig)) {
       await this.activate(deviceId, "sleep_story");
       return { intent: "sleep_story", source: "force_sleep" };
-    }
-
-    // 测试哄睡模式（仅 staging）：命中触发词 + 开关开启 + 设备在白名单时
-    // 绕过时段门禁直接进哄睡。排在被判 sleep_story 之前，保证白天也能用这个触发词验证降速/降音量。
-    if (await this.isTestSleepTrigger(deviceId, asrText)) {
-      await this.activate(deviceId, "sleep_story");
-      return { intent: "sleep_story", source: "test_sleep" };
     }
 
     const sleepTime = sleepConfig?.sleepTime ?? null;
@@ -206,35 +189,6 @@ export class ConversationSessionService {
   /** 定时进入哄睡：无条件覆写会话为 sleep_story（45 分钟 TTL）。 */
   async activateSleepMode(deviceId: string): Promise<void> {
     await this.activate(deviceId, "sleep_story");
-  }
-
-  /**
-   * 「测试哄睡模式」触发词 + staging 开关 + 设备白名单：命中才进哄睡。
-   * 先判环境再判触发词，最后才查库——普通对话不承担白名单查询。
-   */
-  private async isTestSleepTrigger(
-    deviceId: string,
-    asrText: string,
-  ): Promise<boolean> {
-    if (
-      this.configService.get<string>(SLEEP_TEST_MODE_ENV.enabled) !== "true"
-    ) {
-      return false;
-    }
-    if (!asrText.includes(SLEEP_TEST_MODE_TRIGGER)) {
-      return false;
-    }
-    try {
-      return await this.deviceTestAccess.isAllowed(deviceId);
-    } catch (error) {
-      // 白名单查询失败时按「不在白名单」处理：测试开关不能成为一轮对话的故障点。
-      this.logger.warn(
-        `Test sleep whitelist check failed for device=${deviceId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return false;
-    }
   }
 
   /** 退出哄睡：恢复进入前的音速/音量（下一轮非 sleep_story 意图时调用）。 */

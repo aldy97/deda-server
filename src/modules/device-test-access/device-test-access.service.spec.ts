@@ -9,7 +9,6 @@ import {
   TEST_DEVICE_ENV,
 } from "./device-test-access.service";
 import { ADVENTURE_TEST_ENV } from "@/modules/adventure/adventure.constants";
-import { SLEEP_TEST_MODE_ENV } from "@/modules/sleep-configs/sleep-mode.service";
 
 /**
  * 测试设备白名单：冒险测试与哄睡测试共用的设备级资格闸。
@@ -93,9 +92,8 @@ describe("DeviceTestAccessService", () => {
   });
 
   describe("环境开关常量", () => {
-    it("与本仓既有的两个测试开关逐字一致，避免白名单放行却运行时没开", () => {
+    it("与冒险测试开关逐字一致，避免白名单放行却运行时没开", () => {
       expect(TEST_DEVICE_ENV.adventure).toBe(ADVENTURE_TEST_ENV.enabled);
-      expect(TEST_DEVICE_ENV.sleep).toBe(SLEEP_TEST_MODE_ENV.enabled);
     });
   });
 

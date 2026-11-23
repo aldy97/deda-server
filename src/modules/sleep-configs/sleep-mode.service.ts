@@ -18,14 +18,6 @@ export const SLEEP_SNAPSHOT_TTL_SECONDS = 45 * 60;
 /** 哄睡音量快照 Redis key 前缀：`sleep:volume-snapshot:{mac}` */
 export const SLEEP_VOLUME_SNAPSHOT_KEY_PREFIX = "sleep:volume-snapshot:";
 
-/** 「测试哄睡模式」语音触发词（仅 staging） */
-export const SLEEP_TEST_MODE_TRIGGER = "测试哄睡模式";
-
-/** 测试哄睡模式的环境开关（仅 staging compose 硬写 true，prod 刻意不转发） */
-export const SLEEP_TEST_MODE_ENV = {
-  enabled: "SLEEP_TEST_MODE_ENABLED",
-} as const;
-
 function sleepVolumeSnapshotKey(mac: string): string {
   return `${SLEEP_VOLUME_SNAPSHOT_KEY_PREFIX}${mac}`;
 }
