@@ -9,6 +9,7 @@ import {
 } from "./adventure.constants";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 
 /**
  * 冒险引擎状态机单测（TDD 先行）
@@ -20,6 +21,7 @@ describe("AdventureService", () => {
   let prisma: any;
   let llm: any;
   let configService: { get: jest.Mock };
+  let testAccess: { isAllowed: jest.Mock };
 
   const episode = {
     id: "ep1",
@@ -175,6 +177,10 @@ describe("AdventureService", () => {
           provide: ConfigService,
           useValue: { get: jest.fn() },
         },
+        {
+          provide: DeviceTestAccessService,
+          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
+        },
       ],
     }).compile();
 
@@ -182,6 +188,7 @@ describe("AdventureService", () => {
     prisma = module.get(PrismaService);
     llm = module.get(LlmService);
     configService = module.get(ConfigService);
+    testAccess = module.get(DeviceTestAccessService);
 
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
@@ -2624,19 +2631,50 @@ describe("AdventureService", () => {
       expect(service.isTestStoryEnabled()).toBe(false);
     });
 
-    it("环境未开启时触发词返回 null（落回正常链路）", async () => {
+    it("环境未开启时触发词返回 null（落回正常链路），也不查白名单", async () => {
       configService.get.mockReturnValue(undefined);
 
       await expect(
         service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
       ).resolves.toBeNull();
+      expect(testAccess.isAllowed).not.toHaveBeenCalled();
     });
 
-    it("不是触发词返回 null", async () => {
+    it("不是触发词返回 null，也不查白名单", async () => {
       enableTestStory();
 
       await expect(
         service.tryTestStoryTrigger("dev-uuid-1", "我想听故事"),
+      ).resolves.toBeNull();
+      expect(testAccess.isAllowed).not.toHaveBeenCalled();
+    });
+
+    it("触发词命中但设备不在白名单 → null，且不读下发字段", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockResolvedValue(false);
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
+      ).resolves.toBeNull();
+
+      expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-uuid-1");
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("直接调用 playTestEpisode 时非白名单同样返回 null（第二道兜底）", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockResolvedValue(false);
+
+      await expect(service.playTestEpisode("dev-uuid-1")).resolves.toBeNull();
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("白名单查询失败时静默回落，不让测试开关拖垮这一轮", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockRejectedValue(new Error("db down"));
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
       ).resolves.toBeNull();
     });
 

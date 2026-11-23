@@ -10,6 +10,7 @@ import { VendorStatusDto } from "./dto/vendor-status.dto";
 import { VendorBindDto } from "./dto/vendor-bind.dto";
 import { VendorConversationDto } from "./dto/vendor-conversation.dto";
 import { AdventureService } from "@/modules/adventure/adventure.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "./conversation-session.service";
 import { ChildSafetyService } from "./child-safety.service";
@@ -90,6 +91,10 @@ describe("VendorService", () => {
         PROMPT_REGISTRY_PROVIDER,
         VendorService,
         ConversationSessionService,
+        {
+          provide: DeviceTestAccessService,
+          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
+        },
         {
           provide: PrismaService,
           useValue: {

@@ -5,6 +5,7 @@ import type { Provider } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
@@ -338,6 +339,10 @@ describe("prompt 黄金基线等价性", () => {
         {
           provide: SleepModeService,
           useValue: { enter: jest.fn(), exit: jest.fn() },
+        },
+        {
+          provide: DeviceTestAccessService,
+          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
         },
         REGISTRY_PROVIDER,
       ]);

@@ -673,6 +673,51 @@ IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue`
 - 删除仍有设备在用的角色后，那些设备下一轮 `getvalue` 会 fail-closed 返回 500（不编兜底音色）。
 - 新增角色的完整流程（音色可自助、人设/冒险白名单/设备归属需发版或运维）见 `docs/voice-switching.md` §6。
 
+## 测试设备白名单（admin，仅 superadmin）
+
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放。
+> 实现：`src/modules/device-test-access/`，路由前缀 `/analytics/test-devices`。
+> 不并入冒险内容台：这份名单同时管冒险测试与哄睡测试，归入「运维与配置」独立入口。
+
+只有 `active=true` 的设备才能：
+
+- 被 `POST /analytics/adventure-admin/episodes/:episodeId/test-assign` 下发测试冒险故事；
+- 用语音触发词「测试冒险故事」「测试哄睡模式」（非白名单设备命中触发词按普通对话处理，
+  不返回「未下发」的确定性话术，避免暴露测试功能）。
+
+```
+GET /analytics/test-devices?keyword=&includeRevoked=&page=&pageSize=
+→ {
+    enabled: { adventure: boolean, sleep: boolean },
+    items: [{
+      id, active, note, addedBy, addedAt, addedReason,
+      revokedBy, revokedAt, revokeReason,
+      device: { id, deviceId, deviceCode, macAddress, characterKey, firmwareVersion }
+    }],
+    total
+  }
+   // enabled 如实反映 ADVENTURE_TEST_MODE_ENABLED / SLEEP_TEST_MODE_ENABLED。
+   // 默认只看 active；includeRevoked=true 连已撤销记录一起返回。pageSize 缺省 50、最大 200。
+
+POST /analytics/test-devices
+body { deviceId, note?, reason }
+→ { item, reactivated }
+   // deviceId 按业务 deviceId → deviceCode → macAddress 顺序精确匹配（大小写不敏感）。
+   // 设备必须已入库，否则 404。已 active → 409；已撤销 → 原地恢复，reactivated=true。
+   // reason >= 8 字。两个测试开关都关时 403（prod 白名单只读）。
+
+POST /analytics/test-devices/:deviceId/revoke
+body { reason }
+→ { ok: true, clearedAdventureAssignment }
+   // 软删除：保留添加/撤销人与时间，重新放开走 POST 原地恢复。
+   // 同时清空该设备的 testAdventureEpisodeId / testAdventureEpisodeVersionId。
+   // 不重置会话、不中断已经开始的测试故事/哄睡；只阻断下一次触发。
+   // 不在白名单 → 404；已撤销 → 409。
+```
+
+- 外键 `ON DELETE CASCADE`：设备被 wipe 后白名单行一并删除，重新入库必须重新添加。
+- 撤销后再添加是同一行的恢复，不新建第二行；唯一索引只管设备，避免同一设备出现多条 active。
+
 ## 冒险内容管理（Adventure Studio）
 
 > 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。
@@ -943,6 +988,7 @@ body { deviceId, reason }
 → { ok, audited, assignment: { episodeId, title, episodeVersionId, versionStatus } }
    // 仅 staging（ADVENTURE_TEST_MODE_ENABLED=true）。把当前集下发到设备，优先锁草稿快照，
    // 否则锁当前发布版本。孩子说「测试冒险故事」即播放被下发的集，不限次数/顺序/阶段。
+   // 设备必须在「测试设备白名单」里且 active=true，否则 403（见上节）。
 
 POST /analytics/adventure-admin/episodes/:episodeId/test-clear
 body { deviceId, reason }

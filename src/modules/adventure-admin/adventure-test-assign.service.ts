@@ -9,6 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { ADVENTURE_TEST_ENV } from "@/modules/adventure/adventure.constants";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { assertReason } from "./adventure-content.service";
 import { AdventureAuditService, AuditActor } from "./adventure-audit.service";
 
@@ -70,6 +71,7 @@ export class AdventureTestAssignService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly audit: AdventureAuditService,
+    private readonly deviceTestAccess: DeviceTestAccessService,
   ) {}
 
   private isEnabled(): boolean {
@@ -117,6 +119,11 @@ export class AdventureTestAssignService {
       throw new NotFoundException(`Episode not found: ${episodeId}`);
     }
     const device = await this.resolveDevice(input.deviceId);
+    if (!(await this.deviceTestAccess.isAllowed(device.id))) {
+      throw new ForbiddenException(
+        "该设备不在测试设备白名单里，不能下发测试冒险故事。请先在「运维与配置 → 测试设备白名单」添加。",
+      );
+    }
     const draft = await this.prisma.adventureEpisodeVersion.findFirst({
       where: { episodeId, status: "draft" },
       orderBy: { version: "desc" },
@@ -329,8 +336,9 @@ export class AdventureTestAssignService {
       return { enabled: false, assignment: null };
     }
     const device = await this.resolveDevice(deviceId);
+    const whitelisted = await this.deviceTestAccess.isAllowed(device.id);
     if (!device.testAdventureEpisodeId) {
-      return { enabled: true, assignment: null };
+      return { enabled: true, whitelisted, assignment: null };
     }
     const [episode, version] = await Promise.all([
       this.prisma.adventureEpisode.findUnique({
@@ -352,6 +360,7 @@ export class AdventureTestAssignService {
     ]);
     return {
       enabled: true,
+      whitelisted,
       assignment: {
         device: {
           id: device.id,

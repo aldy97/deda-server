@@ -79,10 +79,34 @@ model Device {
   habitPlans      HabitPlan[]
   conversationSession ConversationSession?
   sleepConfig     SleepConfig?
+  testWhitelist   DeviceTestWhitelist?
   llmUsageLogs    LlmUsageLog[]
   presenceDaily   DevicePresenceDaily[]
 
   @@map("devices")
+}
+
+/// 测试设备白名单：冒险测试与哄睡测试共用的设备级资格闸。
+/// 只有 active=true 的设备才能被下发测试冒险故事、才能用两个测试语音触发词。
+/// 软删除而不是物理删除：撤销后仍保留操作人、时间与理由；重新放开走原地恢复。
+/// 外键 ON DELETE CASCADE：设备被 wipe 后资格自动失效，重新入库需要重新添加。
+model DeviceTestWhitelist {
+  id           String    @id @default(uuid())
+  deviceId     String    @unique // Device.id（内部 UUID），不是业务 deviceId
+  active       Boolean   @default(true)
+  note         String? // 用途备注，如「3 号样机-熊枫」
+  addedBy      String
+  addedAt      DateTime  @default(now())
+  addedReason  String?
+  revokedBy    String?
+  revokedAt    DateTime?
+  revokeReason String?
+  updatedAt    DateTime  @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([active])
+  @@map("device_test_whitelist")
 }
 
 // 每台设备的当前对话会话；冒险进度仍由 AdventureProgress 单独管理。
