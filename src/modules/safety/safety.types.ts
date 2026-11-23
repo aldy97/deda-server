@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
 
 /**
  * 本轮实际安全话术处置，不是分类器结论。
@@ -27,3 +28,14 @@ export type SafetySnapshot = Prisma.InputJsonObject & {
 
 /** 安全话术文本与指令按模式分组，但策略本身不依赖任何业务模块。 */
 export type SafetyProfileKey = "default" | "adventure" | "sleep";
+
+/** gate 的一次解释结果；不含 reviewable，留原文始终由 recorder 判定。 */
+export interface SafetyEvaluation {
+  profile: SafetyProfileKey;
+  verdict: SafetyVerdict | null;
+  blocked: boolean;
+  safetyReply: SafetyReply;
+  cannedReply?: string;
+  promptInstruction?: string;
+  snapshot: SafetySnapshot | null;
+}
