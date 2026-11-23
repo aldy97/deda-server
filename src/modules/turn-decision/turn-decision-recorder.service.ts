@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { shouldPersistAsrText } from "@/modules/safety/safety-policy";
 import {
   ASR_TEXT_MAX_LENGTH,
   DEFAULT_TURN_CHANNEL,
@@ -49,7 +50,7 @@ export class TurnDecisionRecorder {
       safetyMatched: safety?.matched ?? null,
       intent: entry.intent ?? null,
       intentSource: entry.intentSource ?? null,
-      asrText: this.storableAsrText(entry, safetyBlocked, safetyCategory),
+      asrText: this.storableAsrText(entry),
     };
 
     this.prisma.turnDecisionLog
@@ -76,20 +77,9 @@ export class TurnDecisionRecorder {
    * 最后一条是冒险 fail-open 的补漏：L2 没给出结论，但代码已经用谨慎指令介入，
    * 这类轮次必须可复核。判 safe、未触发任何安全话术的 fail-open/未评估轮次不留原文。
    */
-  private storableAsrText(
-    entry: TurnDecisionRecord,
-    safetyBlocked: boolean,
-    safetyCategory: string | null,
-  ): string | null {
-    const safetyReplyTriggered =
-      entry.safetyReply === "canned_block" ||
-      entry.safetyReply === "unsafe_line_echo" ||
-      entry.safetyReply === "caution_injected";
-    const reviewable =
-      safetyBlocked ||
-      (safetyCategory !== null && safetyCategory !== "safe") ||
-      safetyReplyTriggered;
-    if (!reviewable || !entry.asrText) return null;
+  private storableAsrText(entry: TurnDecisionRecord): string | null {
+    if (!shouldPersistAsrText(entry.safety, entry.safetyReply)) return null;
+    if (!entry.asrText) return null;
     return entry.asrText.slice(0, ASR_TEXT_MAX_LENGTH);
   }
 }

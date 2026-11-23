@@ -7,8 +7,10 @@ import type {
   IntentSource,
 } from "@/modules/vendor/conversation-session.service";
 import type { FillerEmotion } from "@/modules/llm/filler-bank";
+import type { SafetyReply } from "@/modules/safety/safety.types";
 
 export type { SafetySource, SafetyVerdict, ConversationIntent, IntentSource };
+export type { SafetyReply } from "@/modules/safety/safety.types";
 
 /**
  * 落库用的意图来源。会话服务自身的 9 种来源之外，编排层还有三种「本轮没走到意图路由」
@@ -60,19 +62,6 @@ export const DEFAULT_TURN_CHANNEL = "baidu-rtc";
 
 /** asrText 列宽 VARCHAR(200)，超长截断，避免落库报错反过来打断对话 */
 export const ASR_TEXT_MAX_LENGTH = 200;
-
-/**
- * 本轮实际安全话术处置（不是分类器结论）。
- * - canned_block：任一 layer 明确拦截，代码返回固定话术
- * - unsafe_line_echo：模型输出中包含固定安全句（含 fail-open 回抄）
- * - caution_injected：注入了 L2 不可用时的谨慎指令，无论模型是否回抄
- * - none：未触发安全话术
- *
- * 只用于 recorder 判断是否留存原文与消息 rawPayload；不新增数据库列，
- * 避免为一次可观测性修复引入 migration。
- */
-export type SafetyReply =
-  "canned_block" | "unsafe_line_echo" | "caution_injected" | "none";
 
 /** 编排层的意图决策：会话服务的 IntentDecision 加上编排独有的来源 */
 export interface TurnIntentDecision {
