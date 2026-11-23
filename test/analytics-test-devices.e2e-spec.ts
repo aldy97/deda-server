@@ -12,7 +12,6 @@ dotenv.config();
 
 // 三个开关必须在 AppModule 初始化前写进 process.env：ConfigService 读的是进程环境。
 process.env.ADVENTURE_TEST_MODE_ENABLED = "true";
-process.env.SLEEP_TEST_MODE_ENABLED = "true";
 process.env.CONTENT_ADMIN_PROFILE = "authoring";
 
 const ANALYTICS_SECRET =
@@ -136,12 +135,12 @@ describe("Analytics test-devices (e2e)", () => {
     expect(add.status).toBe(403);
   });
 
-  it("superadmin 可读列表，enabled 如实反映两个测试开关", async () => {
+  it("superadmin 可读列表，enabled 如实反映冒险测试开关", async () => {
     const res = await get("/analytics/test-devices", superToken);
 
     expect(res.status).toBe(200);
     expect(res.body.code).toBe(0);
-    expect(res.body.data.enabled).toEqual({ adventure: true, sleep: true });
+    expect(res.body.data.enabled).toEqual({ adventure: true });
     expect(res.body.data.items).toEqual([]);
   });
 
