@@ -32,6 +32,7 @@ describe("AdventureTestAssignService", () => {
   };
   let config: { get: jest.Mock };
   let audit: { record: jest.Mock };
+  let testAccess: { isAllowed: jest.Mock };
 
   const actor: AuditActor = {
     username: "alice",
@@ -74,10 +75,12 @@ describe("AdventureTestAssignService", () => {
     };
     config = { get: jest.fn().mockReturnValue("true") };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    testAccess = { isAllowed: jest.fn().mockResolvedValue(true) };
     service = new AdventureTestAssignService(
       prisma as never,
       config as never,
       audit as never,
+      testAccess as never,
     );
   });
 
@@ -98,6 +101,22 @@ describe("AdventureTestAssignService", () => {
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.device.update).not.toHaveBeenCalled();
+  });
+
+  it("assign 403s when the device is not on the test whitelist", async () => {
+    testAccess.isAllowed.mockResolvedValue(false);
+
+    await expect(
+      service.assign(
+        "ep1",
+        { deviceId: "dev-1001", reason: "测试环境验收这一集" },
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-internal-1");
+    expect(prisma.device.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
   it("assign 404s when the episode is unknown", async () => {
@@ -146,6 +165,7 @@ describe("AdventureTestAssignService", () => {
       },
     });
     expect(prisma.conversationSession.upsert).toHaveBeenCalled();
+    expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-internal-1");
     expect(audit.record).toHaveBeenCalledWith(
       actor,
       expect.objectContaining({ action: "device_test_assign" }),
@@ -246,6 +266,8 @@ describe("AdventureTestAssignService", () => {
       actor,
       expect.objectContaining({ action: "device_test_clear" }),
     );
+    // 清除是给脏数据兜底的，不要求设备仍在白名单里。
+    expect(testAccess.isAllowed).not.toHaveBeenCalled();
     expect(result.ok).toBe(true);
   });
 
@@ -262,6 +284,7 @@ describe("AdventureTestAssignService", () => {
   it("assignment returns null for an unassigned device", async () => {
     await expect(service.assignment("dev-1001")).resolves.toEqual({
       enabled: true,
+      whitelisted: true,
       assignment: null,
     });
   });
@@ -285,10 +308,34 @@ describe("AdventureTestAssignService", () => {
     const result = await service.assignment("dev-1001");
 
     expect(result.enabled).toBe(true);
+    expect(result.whitelisted).toBe(true);
     expect(result.assignment).toMatchObject({
       episode: { id: "ep1", title: "听风原野第一天" },
       episodeVersion: { id: "draft-1", status: "draft" },
     });
+  });
+
+  it("assignment reports whitelisted=false but still returns details for cleanup", async () => {
+    testAccess.isAllowed.mockResolvedValue(false);
+    prisma.device.findFirst.mockResolvedValue({
+      id: "dev-internal-1",
+      deviceId: "dev-1001",
+      deviceCode: "CN-001",
+      testAdventureEpisodeId: "ep1",
+      testAdventureEpisodeVersionId: "draft-1",
+    });
+    prisma.adventureEpisode.findUnique.mockResolvedValue({
+      id: "ep1",
+      title: "听风原野第一天",
+      episodeNumber: 1,
+      characterKey: "elly",
+      season: 1,
+    });
+
+    const result = await service.assignment("dev-1001");
+
+    expect(result.whitelisted).toBe(false);
+    expect(result.assignment).toMatchObject({ episode: { id: "ep1" } });
   });
 
   it("assignment returns a null version when the assigned episode has no pinned snapshot", async () => {

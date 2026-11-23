@@ -10,6 +10,7 @@ import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
 import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.module";
 import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module";
+import { DeviceTestAccessModule } from "@/modules/device-test-access/device-test-access.module";
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module
     AdventureModule,
     ChildMemoriesModule,
     SleepConfigsModule,
+    DeviceTestAccessModule,
   ],
   providers: [
     VendorGateway,

@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { LlmModule } from "@/modules/llm/llm.module";
+import { DeviceTestAccessModule } from "@/modules/device-test-access/device-test-access.module";
 import { AdventureCircuitBreaker } from "./adventure-circuit-breaker.service";
 import { AdventureRecoveryService } from "./adventure-recovery.service";
 import { AdventureService } from "./adventure.service";
@@ -14,7 +15,7 @@ import { AdventureService } from "./adventure.service";
  * 孩子正在走的播放链路一起拖下水。
  */
 @Module({
-  imports: [LlmModule],
+  imports: [LlmModule, DeviceTestAccessModule],
   providers: [
     AdventureService,
     AdventureCircuitBreaker,

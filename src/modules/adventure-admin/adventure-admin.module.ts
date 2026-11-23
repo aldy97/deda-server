@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { DeviceTestAccessModule } from "@/modules/device-test-access/device-test-access.module";
 import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAuditService } from "./adventure-audit.service";
@@ -31,7 +32,7 @@ import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
  * PrismaModule / RedisModule / ConfigModule 都是 @Global，无需在此重复导入。
  */
 @Module({
-  imports: [AdventureModule, LlmModule],
+  imports: [AdventureModule, DeviceTestAccessModule, LlmModule],
   controllers: [AdventureAdminController],
   providers: [
     ContentAdminGuard,

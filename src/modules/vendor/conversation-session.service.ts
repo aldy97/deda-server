@@ -10,6 +10,7 @@ import {
   SleepModeService,
 } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
 
 export type ConversationIntent =
@@ -94,6 +95,7 @@ export class ConversationSessionService {
     private readonly promptRegistry: PromptRegistryService,
     private readonly configService: ConfigService,
     private readonly sleepMode: SleepModeService,
+    private readonly deviceTestAccess: DeviceTestAccessService,
   ) {}
 
   /**
@@ -139,9 +141,9 @@ export class ConversationSessionService {
       return { intent: "sleep_story", source: "force_sleep" };
     }
 
-    // 测试哄睡模式（仅 staging）：命中触发词 + 开关开启时绕过时段门禁直接进哄睡。
-    // 排在被判 sleep_story 之前，保证白天也能用这个触发词验证降速/降音量。
-    if (this.isTestSleepTrigger(asrText)) {
+    // 测试哄睡模式（仅 staging）：命中触发词 + 开关开启 + 设备在白名单时
+    // 绕过时段门禁直接进哄睡。排在被判 sleep_story 之前，保证白天也能用这个触发词验证降速/降音量。
+    if (await this.isTestSleepTrigger(deviceId, asrText)) {
       await this.activate(deviceId, "sleep_story");
       return { intent: "sleep_story", source: "test_sleep" };
     }
@@ -203,12 +205,33 @@ export class ConversationSessionService {
     await this.activate(deviceId, "sleep_story");
   }
 
-  /** 「测试哄睡模式」触发词 + staging 开关：命中即无条件进哄睡，绕过时段门禁。 */
-  private isTestSleepTrigger(asrText: string): boolean {
-    return (
-      this.configService.get<string>(SLEEP_TEST_MODE_ENV.enabled) === "true" &&
-      asrText.includes(SLEEP_TEST_MODE_TRIGGER)
-    );
+  /**
+   * 「测试哄睡模式」触发词 + staging 开关 + 设备白名单：命中才进哄睡。
+   * 先判环境再判触发词，最后才查库——普通对话不承担白名单查询。
+   */
+  private async isTestSleepTrigger(
+    deviceId: string,
+    asrText: string,
+  ): Promise<boolean> {
+    if (
+      this.configService.get<string>(SLEEP_TEST_MODE_ENV.enabled) !== "true"
+    ) {
+      return false;
+    }
+    if (!asrText.includes(SLEEP_TEST_MODE_TRIGGER)) {
+      return false;
+    }
+    try {
+      return await this.deviceTestAccess.isAllowed(deviceId);
+    } catch (error) {
+      // 白名单查询失败时按「不在白名单」处理：测试开关不能成为一轮对话的故障点。
+      this.logger.warn(
+        `Test sleep whitelist check failed for device=${deviceId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
   }
 
   /** 退出哄睡：恢复进入前的音速/音量（下一轮非 sleep_story 意图时调用）。 */

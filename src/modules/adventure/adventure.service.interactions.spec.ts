@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import { AdventureService } from "./adventure.service";
 import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
 
@@ -70,6 +71,10 @@ describe("AdventureService · 游玩交互契约", () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdventureService,
+        {
+          provide: DeviceTestAccessService,
+          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
+        },
         {
           provide: PrismaService,
           useValue: {

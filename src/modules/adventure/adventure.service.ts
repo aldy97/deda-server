@@ -7,6 +7,7 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
 import {
   ADVENTURE_CHOICE_LLM_DEFAULTS,
   ADVENTURE_CHOICE_LLM_ENV,
@@ -204,6 +205,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly llmService: LlmService,
     private readonly configService: ConfigService,
+    private readonly deviceTestAccess: DeviceTestAccessService,
   ) {}
 
   onModuleInit() {
@@ -674,7 +676,13 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     if (!(asrText ?? "").includes(ADVENTURE_TEST_STORY_TRIGGER)) {
       return null;
     }
+    // 设备级资格闸：触发词命中后才查库，普通对话不承担这次查询。
+    // 非白名单设备静默回落正常链路，连「未下发」的确定性话术都不给，避免暴露测试功能。
+    // 查库失败也必须回落而不是抛错——测试开关不能成为一轮对话的故障点。
     try {
+      if (!(await this.deviceTestAccess.isAllowed(deviceInternalId))) {
+        return null;
+      }
       const reply = await this.playTestEpisode(deviceInternalId);
       if (reply) {
         return reply;
@@ -698,6 +706,10 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     deviceInternalId: string,
   ): Promise<AdventureReply | null> {
     if (!this.isTestStoryEnabled()) {
+      return null;
+    }
+    // 第二道兜底：即使未来有调用方绕过触发词入口直接播，也必须过白名单。
+    if (!(await this.deviceTestAccess.isAllowed(deviceInternalId))) {
       return null;
     }
     const device = await this.prisma.device.findUnique({
