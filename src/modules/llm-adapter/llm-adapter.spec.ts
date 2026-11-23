@@ -2187,6 +2187,30 @@ describe("LlmAdapterModule", () => {
       expect(recorded()).toMatchObject({ safetyReply: "none" });
     });
 
+    it("SAFETY_GATE_SLEEP=on：free_chat 仍读 NORMAL 键，不被哄睡开关接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("假数据-暴力表达")),
+      );
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+    });
+
     it("SAFETY_GATE_NORMAL=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
@@ -2228,6 +2252,48 @@ describe("LlmAdapterModule", () => {
         expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
       );
       expect(recorded()).toMatchObject({ safetyReply: "none" });
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_NORMAL=shadow：两解释器一致时不告警", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(
+        service.streamReply(boundReq("今天天气不错")),
+      );
+
+      expect(chunks).toEqual(["好的呀"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
       warnSpy.mockRestore();
     });
 
@@ -2294,6 +2360,26 @@ describe("LlmAdapterModule", () => {
       expect(safetyGate.interpret).not.toHaveBeenCalled();
     });
 
+    it("SAFETY_GATE_NORMAL=on：哄睡仍读 SLEEP 键，不被普通聊天开关接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "on" : original(key),
+      );
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(chunks).toEqual(["晚安故事来了"]);
+    });
+
     it("SAFETY_GATE_SLEEP=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       session.resolveWithSource.mockResolvedValue({
@@ -2334,6 +2420,50 @@ describe("LlmAdapterModule", () => {
       expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
       expect(childSafety.classifyL2).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_SLEEP=shadow：两解释器一致时不告警", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["晚安故事来了"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalledWith(
         expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
       );
       warnSpy.mockRestore();
@@ -2386,6 +2516,9 @@ describe("LlmAdapterModule", () => {
       expect(chunks).toEqual(["gate blocked sleep"]);
       expect(llm.completeStream).not.toHaveBeenCalled();
       expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked sleep");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
     });
 
     it("SAFETY_GATE_SLEEP=on：sleep_config 被 gate 拦截时不进短链路", async () => {
@@ -2419,7 +2552,15 @@ describe("LlmAdapterModule", () => {
         safetyReply: "canned_block",
         cannedReply: "gate blocked config",
         promptInstruction: undefined,
-        snapshot: null,
+        snapshot: {
+          layer: "L2",
+          category: "self_harm",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
       });
 
       const chunks = await collect(
@@ -2429,6 +2570,9 @@ describe("LlmAdapterModule", () => {
       expect(chunks).toEqual(["gate blocked config"]);
       expect(sleepVoice.handle).not.toHaveBeenCalled();
       expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked config");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
     });
 
     it("哄睡设置短链路：intent 记 sleep_config 并透传会话服务给出的 source", async () => {
