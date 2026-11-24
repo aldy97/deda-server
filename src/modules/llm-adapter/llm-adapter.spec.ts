@@ -877,6 +877,69 @@ describe("LlmAdapterModule", () => {
       });
     });
 
+    it("停止轮走 stop 桶、情绪归 neutral，handoff 带 stop 动作", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+        emotion: "sad",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["那我们就不听啦"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "我不要听了" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.stop).toContain(chunks[0]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        fillerBucket: "stop",
+        fillerEmotion: "neutral",
+      });
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("stop");
+    });
+
+    it("故事轮走重写后的 story 桶，handoff 带 story_tell", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["小河水往前流"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "给我讲个故事" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.story).toContain(chunks[0]);
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("story_tell");
+    });
+
+    it("继续轮走 continue 桶，handoff 带 continue 动作", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "continuation",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["接着往下讲"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "继续" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.continue).toContain(chunks[0]);
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("continue");
+    });
+
     it("主模型失败时 filler 已播，仍走兜底文案", async () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);

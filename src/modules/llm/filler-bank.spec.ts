@@ -43,6 +43,8 @@ const ZH_BUCKETS: FillerBucket[] = [
   "celebrate",
   "identity",
   "preference",
+  "stop",
+  "continue",
 ];
 
 const EN_BUCKETS: FillerBucket[] = [
@@ -51,6 +53,8 @@ const EN_BUCKETS: FillerBucket[] = [
   "en_story",
   "en_comfort",
   "en_celebrate",
+  "en_stop",
+  "en_continue",
 ];
 
 describe("FILLER_POOLS invariants", () => {
@@ -156,6 +160,42 @@ describe("FILLER_POOLS invariants", () => {
           }
         }
       }
+    }
+  });
+});
+
+describe("story 桶视角迁移", () => {
+  /** v1 的 13 条倾听视角句子：已删除，禁止回归 */
+  const LEGACY_LISTENER_LINES = [
+    "好呀，我先把小耳朵准备好，安安静静听你安排呢……",
+    "好，我坐好啦，等你一说开始，我们就出发呀……",
+    "嗯嗯，我准备好了，你一说我们就开始呀……",
+    "我把小毯子盖好，安安静静等你开口呢……",
+    "嗯，我乖乖坐好啦，慢慢听你的安排呀……",
+    "嗯，我已经准备好啦，你说开始就开始呀……",
+    "好，我把小手放好，安安静静等你讲故事呀……",
+    "嗯，我坐好准备啦，你慢慢说，我认真听呀……",
+    "我把小耳朵竖起来啦，等你的故事呀……",
+    "嗯，我坐得稳稳的，等你带我去故事里呀……",
+    "好呀，我把声音放得轻轻的，慢慢听你说呀……",
+    "嗯，我准备好啦，你什么时候开始都可以呀……",
+    "好，我安安静静坐好，等你讲故事给我听呀……",
+  ];
+
+  it("13 条旧倾听句全部消失", () => {
+    for (const line of LEGACY_LISTENER_LINES) {
+      expect(FILLER_POOLS.story).not.toContain(line);
+    }
+  });
+
+  it("story / en_story 只保留讲述者视角", () => {
+    for (const line of FILLER_POOLS.story) {
+      expect(line).not.toMatch(/听你安排|听你说|等你|你来讲|开始都可以/);
+    }
+    for (const line of FILLER_POOLS.en_story) {
+      expect(line).not.toMatch(
+        /take your time|ready to listen|you can start|all ears/i,
+      );
     }
   });
 });
@@ -292,6 +332,55 @@ describe("pickFillerLine", () => {
       ),
     );
     expect(others.size).toBeGreaterThan(1);
+  });
+
+  it("停止与继续走独立桶", () => {
+    const stop = pickFillerLine({
+      ...base,
+      asrText: "我不要听了",
+      intent: "free_chat",
+      emotion: "sad",
+    });
+    expect(stop.bucket).toBe("stop");
+    expect(stop.emotion).toBe("neutral");
+    expect(FILLER_POOLS.stop).toContain(stop.text);
+
+    const cont = pickFillerLine({
+      ...base,
+      asrText: "继续",
+      intent: "sleep_story",
+      intentSource: "continuation",
+    });
+    expect(cont.bucket).toBe("continue");
+    expect(FILLER_POOLS.continue).toContain(cont.text);
+  });
+
+  it("“换一个”走 story 桶（讲述者视角），不落 stop", () => {
+    const picked = pickFillerLine({
+      ...base,
+      asrText: "我不想听了，换一个",
+      intent: "free_chat",
+    });
+    expect(picked.act).toBe("story_tell");
+    expect(picked.bucket).toBe("story");
+    expect(FILLER_POOLS.story).toContain(picked.text);
+  });
+
+  it("英文停止/继续走 en_stop / en_continue", () => {
+    expect(
+      pickFillerLine({
+        ...base,
+        asrText: "I don't want to listen",
+        intent: "free_chat",
+      }).bucket,
+    ).toBe("en_stop");
+    expect(
+      pickFillerLine({
+        ...base,
+        asrText: "continue",
+        intent: "free_chat",
+      }).bucket,
+    ).toBe("en_continue");
   });
 });
 
