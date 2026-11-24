@@ -74,8 +74,8 @@ describe("PROFILE_CONTENT", () => {
 
   it("default/sleep 不持有冒险专属文本", () => {
     for (const profile of ["default", "sleep"] as const) {
-      expect(PROFILE_CONTENT[profile].unsafeLine).toBeUndefined();
-      expect(PROFILE_CONTENT[profile].cautionInstruction).toBeUndefined();
+      expect("unsafeLine" in PROFILE_CONTENT[profile]).toBe(false);
+      expect("cautionInstruction" in PROFILE_CONTENT[profile]).toBe(false);
     }
   });
 

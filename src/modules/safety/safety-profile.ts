@@ -24,17 +24,25 @@ export const ADVENTURE_SAFETY_CAUTION =
 export const ADVENTURE_EMOTIONAL_HARM_GUIDANCE =
   "孩子刚才的话带有攻击性或负面情绪。请先共情孩子的感受，温和地询问发生了什么；绝不附和、鼓励或复述任何伤害性内容，不批评、不说教；等孩子情绪平复后，自然接回故事。";
 
-/** 安全话术与指令按 profile 分组；唯一真相在 safety，业务模块只读。 */
+/** safety 话术的公共部分：三个 profile 都有的共情指令。 */
 export interface SafetyProfileContent {
   /** emotional_harm 时注入的共情指令。 */
   emotionalHarmInstruction: string;
-  /** adventure：固定安全句，同时是 echo 判定的子串。 */
-  unsafeLine?: string;
-  /** adventure：L2 不可用时的谨慎指令。 */
-  cautionInstruction?: string;
 }
 
-export const PROFILE_CONTENT: Record<SafetyProfileKey, SafetyProfileContent> = {
+/** 冒险 profile 额外拥有固定安全句（同时是 echo 判定的子串）与谨慎指令。 */
+export interface AdventureSafetyProfileContent extends SafetyProfileContent {
+  /** 固定安全句，绝不交给生成模型。 */
+  unsafeLine: string;
+  /** L2 不可用时的谨慎指令。 */
+  cautionInstruction: string;
+}
+
+export const PROFILE_CONTENT: {
+  default: SafetyProfileContent;
+  sleep: SafetyProfileContent;
+  adventure: AdventureSafetyProfileContent;
+} = {
   default: {
     emotionalHarmInstruction: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
   },
@@ -51,22 +59,24 @@ export const PROFILE_CONTENT: Record<SafetyProfileKey, SafetyProfileContent> = {
 /**
  * 安全结论 → 附加指令，与引擎旧真值表逐行一致：
  * null（评估失败/未给结论）或 fail-open 来源 → 谨慎指令；emotional_harm → 共情指令。
- * undefined（调用方根本没提供判定）不注入，保持惰性路径零成本。
+ * undefined（调用方根本没提供判定）不注入，保持惰性路径零成本；
+ * default/sleep 没有谨慎指令，避免把冒险专属文本注入普通对话。
  */
 export function resolveSafetyInstruction(
   profile: SafetyProfileKey,
   verdict: SafetyVerdict | null | undefined,
 ): string | undefined {
-  const content = PROFILE_CONTENT[profile];
   if (
     verdict === null ||
     verdict?.source === "l2_fail_open" ||
     verdict?.source === "l2_invalid_label"
   ) {
-    return content.cautionInstruction;
+    return profile === "adventure"
+      ? PROFILE_CONTENT.adventure.cautionInstruction
+      : undefined;
   }
   if (verdict?.category === "emotional_harm") {
-    return content.emotionalHarmInstruction;
+    return PROFILE_CONTENT[profile].emotionalHarmInstruction;
   }
   return undefined;
 }

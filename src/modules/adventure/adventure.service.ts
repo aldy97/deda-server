@@ -27,6 +27,7 @@ import {
   ADVENTURE_UNSAFE_LINE,
 } from "@/modules/safety/safety-profile";
 import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
+import type { SafetyHandle, SafetyReply } from "@/modules/safety/safety.types";
 import { adventureDateKey } from "./adventure-date.util";
 import {
   buildClosedEpisodeIds,
@@ -67,6 +68,8 @@ export interface AdventureReply {
   matchReason?: ChoiceMatchReason;
   /** 本轮被 L2 安全判定拦截（由代码直接返回固定安全话术） */
   safetyBlocked?: boolean;
+  /** 产生点给出的安全处置；显式值优先于 adapter 的字符串推断 */
+  safetyDisposition?: SafetyReply;
   /**
    * 本轮处置发生在哪个交互点：类型 + 段 order。
    * result 事件由四种交互类型共用（two_choice / open_question /
@@ -94,9 +97,11 @@ export interface AdventureReply {
 /**
  * 冒险接话的可选上下文。getSafety 是惰性安全判定：只有真正要调接话层/
  * 二选一 LLM 时才会被调用，避免确定性命中/跟读/退出等路径多付一次小模型调用。
+ * safetyHandle 存在时优先于 getSafety：由 safety 模块统一决定何时评估与如何解释。
  */
 export interface HandleChildReplyOptions {
   getSafety?: AdventureSafetyProvider;
+  safetyHandle?: SafetyHandle;
   /** 本轮对话 ID：与安全/意图/主回答共用，供 llm_usage_logs 串联 */
   turnId?: string;
 }
@@ -1024,7 +1029,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     if (safety?.blocked) {
       return withInteractionMeta(this.blockedReply(), interaction);
     }
-    const safetyInstruction = this.safetyInstruction(safety);
+    const safetyInstruction = this.safetyInstructionOf(options, safety);
     const bridgeText = safetyInstruction
       ? await this.generateBridge(
           deviceInternalId,
@@ -1084,7 +1089,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
    * 并行执行「惰性安全判定」与「生成/判定」：
    * - 安全判定只在调用方真正需要 LLM 时才被触发；
    * - 两者并行，正常轮次不增加串行延迟；
-   * - 安全判定异常返回 null（fail-open），由 safetyInstruction 注入谨慎指令。
+   * - 安全判定异常返回 null（fail-open），由 safetyInstructionOf 注入谨慎指令。
    */
   private async withSafety<T>(
     options: HandleChildReplyOptions | undefined,
@@ -1094,10 +1099,28 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     result: T;
   }> {
     const [safety, result] = await Promise.all([
-      this.resolveSafety(options?.getSafety),
+      this.resolveSafety(this.safetyProviderOf(options)),
       run(),
     ]);
     return { safety, result };
+  }
+
+  /** handle 存在时由它决定何时评估；否则沿用调用方的 getSafety（vendor 老链路）。 */
+  private safetyProviderOf(
+    options?: HandleChildReplyOptions,
+  ): AdventureSafetyProvider | undefined {
+    const handle = options?.safetyHandle;
+    return handle ? () => handle.evaluateIfNeeded() : options?.getSafety;
+  }
+
+  /** 安全结论对应的附加指令；handle 接管时由 safety 模块给出同一真值表。 */
+  private safetyInstructionOf(
+    options: HandleChildReplyOptions | undefined,
+    safety: SafetyVerdict | null | undefined,
+  ): string | undefined {
+    return options?.safetyHandle
+      ? options.safetyHandle.promptInstruction(safety)
+      : this.safetyInstruction(safety);
   }
 
   /** undefined = 调用方没提供；null = 提供了但异常/未给出结论（fail-open） */
@@ -1143,6 +1166,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       action: "await_reply",
       result: "off_topic",
       safetyBlocked: true,
+      safetyDisposition: "canned_block",
     };
   }
 
@@ -1248,7 +1272,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       if (safety?.blocked) {
         return this.blockedReply();
       }
-      const safetyInstruction = this.safetyInstruction(safety);
+      const safetyInstruction = this.safetyInstructionOf(handleOptions, safety);
       const verdict = safetyInstruction
         ? await this.judgeAndRedirect(
             deviceInternalId,
@@ -1327,7 +1351,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
       if (safety?.blocked) {
         return this.blockedReply();
       }
-      const safetyInstruction = this.safetyInstruction(safety);
+      const safetyInstruction = this.safetyInstructionOf(handleOptions, safety);
       const redirect = safetyInstruction
         ? await this.generateBridge(
             deviceInternalId,
