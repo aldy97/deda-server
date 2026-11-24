@@ -463,6 +463,12 @@ GET /analytics/messages/:id
    // 2026-11-23 起，历史回补会在 rawPayload.safety 放入本轮安全判定快照；
    // 形状与 inferred 语义见 docs/message-safety-backfill.md。
    // inferred=true = 没有判定行、由 AI 回复内容推断，前端必须标注「推断回补」。
+   // adventureEpisode：仅 mode=adventure_story 时非空，形状
+   //   { episodeId, businessKey, characterKey, season, episodeNumber,
+   //     title, versionId, version }
+   // 通过 adventure_events(deviceId, turnId) 关联 adventure_episodes；
+   // versionId/version 是该轮播放时锁定的版本快照（无记录为 null，不做时间推断）；
+   // title 有版本时取版本 payload 的标题（当时的标题），否则回落集当前标题。
 ```
 
 打断判定（`interrupted`）为**服务端推断口径**（`common/interruption/interruption.util.ts`，

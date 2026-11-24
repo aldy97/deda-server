@@ -1622,11 +1622,28 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
     if (!daily) {
       return;
     }
+    // 该轮播放时钉住的版本。二选一命中时 reply 上已带（与 progress 同源）；
+    // 其余轮次从进度行取。写进本 turn 的所有事件，消息详情才能回溯「当时那一版」。
+    const pinnedVersionId =
+      reply.matchedChoice?.episodeVersionId ??
+      (
+        await this.prisma.adventureProgress.findUnique({
+          where: {
+            deviceId_episodeId: {
+              deviceId: deviceInternalId,
+              episodeId: daily.episodeId,
+            },
+          },
+          select: { episodeVersionId: true },
+        })
+      )?.episodeVersionId ??
+      null;
     const base = {
       deviceId: deviceInternalId,
       episodeId: daily.episodeId,
       dailyRecordId: daily.id,
       turnId,
+      episodeVersionId: pinnedVersionId,
     };
     await this.prisma.adventureEvent.upsert({
       where: { eventKey: `turn:${turnId}:segments_presented` },
@@ -1672,7 +1689,7 @@ export class AdventureService implements OnModuleInit, OnModuleDestroy {
           eventKey: `turn:${turnId}:choice_matched`,
           eventType: "choice_matched",
           messageId: userMessageId ?? null,
-          episodeVersionId: reply.matchedChoice.episodeVersionId,
+          episodeVersionId: pinnedVersionId,
           segmentOrder: reply.matchedChoice.segmentOrder,
           payload: {
             index: reply.matchedChoice.index,

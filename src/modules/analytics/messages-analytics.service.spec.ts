@@ -10,6 +10,8 @@ function buildPrisma(data: {
   messages?: Row[];
   message?: Row | null;
   groups?: Row[];
+  adventureEvents?: Row[];
+  adventureVersion?: Row | null;
   countImpl?: (where: any) => number;
 }) {
   return {
@@ -27,6 +29,12 @@ function buildPrisma(data: {
       findMany: jest.fn((_args?: any) => data.messages ?? []),
       findUnique: jest.fn((_args?: any) => data.message ?? null),
       groupBy: jest.fn((_args?: any) => Promise.resolve(data.groups ?? [])),
+    },
+    adventureEvent: {
+      findMany: jest.fn((_args?: any) => data.adventureEvents ?? []),
+    },
+    adventureEpisodeVersion: {
+      findUnique: jest.fn((_args?: any) => data.adventureVersion ?? null),
     },
   };
 }
@@ -189,6 +197,104 @@ describe("MessagesAnalyticsService", () => {
     await expect(service.getMessage("ghost")).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  describe("详情里的冒险故事", () => {
+    const adventureMessage = {
+      id: "m1",
+      deviceId: "uuid-1",
+      turnId: "turn-1",
+      mode: "adventure_story",
+      rawPayload: null,
+      device: { deviceId: "dev-biz-1" },
+    };
+    const episode = {
+      id: "ep1",
+      characterKey: "elly",
+      season: 1,
+      episodeNumber: 1,
+      title: "现在的标题",
+    };
+
+    it("按 deviceId + turnId 解析事件，返回集身份、播放版本与版本标题", async () => {
+      const prisma = buildPrisma({
+        message: adventureMessage,
+        adventureEvents: [
+          { episode, episodeVersionId: null },
+          { episode, episodeVersionId: "ver-2" },
+        ],
+        adventureVersion: {
+          id: "ver-2",
+          version: 2,
+          payload: { title: "当时的标题" },
+        },
+      });
+      const service = await buildService(prisma);
+
+      const row = await service.getMessage("m1");
+
+      expect(row.adventureEpisode).toEqual({
+        episodeId: "ep1",
+        businessKey: "elly/1/1",
+        characterKey: "elly",
+        season: 1,
+        episodeNumber: 1,
+        title: "当时的标题",
+        versionId: "ver-2",
+        version: 2,
+      });
+      expect(prisma.adventureEvent.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deviceId: "uuid-1", turnId: "turn-1" },
+          orderBy: { createdAt: "asc" },
+        }),
+      );
+      expect(prisma.adventureEpisodeVersion.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "ver-2" } }),
+      );
+    });
+
+    it("该轮没有版本记录时 version 为空，标题回落集的当前标题", async () => {
+      const prisma = buildPrisma({
+        message: adventureMessage,
+        adventureEvents: [{ episode, episodeVersionId: null }],
+      });
+      const service = await buildService(prisma);
+
+      const row = await service.getMessage("m1");
+
+      expect(row.adventureEpisode).toEqual({
+        episodeId: "ep1",
+        businessKey: "elly/1/1",
+        characterKey: "elly",
+        season: 1,
+        episodeNumber: 1,
+        title: "现在的标题",
+        versionId: null,
+        version: null,
+      });
+    });
+
+    it("冒险故事轮次没有任何事件时返回 null", async () => {
+      const prisma = buildPrisma({ message: adventureMessage });
+      const service = await buildService(prisma);
+
+      const row = await service.getMessage("m1");
+
+      expect(row.adventureEpisode).toBeNull();
+    });
+
+    it("非冒险故事轮次不查事件表", async () => {
+      const prisma = buildPrisma({
+        message: { ...adventureMessage, mode: "free_chat" },
+      });
+      const service = await buildService(prisma);
+
+      const row = await service.getMessage("m1");
+
+      expect(row.adventureEpisode).toBeNull();
+      expect(prisma.adventureEvent.findMany).not.toHaveBeenCalled();
+    });
   });
 
   describe("getModes", () => {

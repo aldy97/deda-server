@@ -27,8 +27,13 @@ describe("Analytics messages (e2e)", () => {
   const suffix = randomUUID().slice(0, 8);
   const businessDeviceId = `msg-e2e-${suffix}`;
   const turnId = `turn-${suffix}`;
+  const adventureTurnId = `turn-adv-${suffix}`;
+  const episodeNumber = 900000 + (parseInt(suffix.slice(0, 6), 16) % 99999);
   let deviceInternalId: string;
   let messageId: string;
+  let adventureMessageId: string;
+  let adventureEpisodeId: string;
+  let adventureVersionId: string;
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -92,11 +97,77 @@ describe("Analytics messages (e2e)", () => {
         spokeAt: new Date("2026-11-06T03:00:00Z"),
       },
     });
+
+    // 冒险故事轮次：集当前标题已被新版改过，但本轮事件锁的是 v1。
+    const adventureEpisode = await prisma.adventureEpisode.create({
+      data: {
+        characterKey: "elly",
+        season: 1,
+        episodeNumber,
+        title: "新版标题",
+      },
+    });
+    adventureEpisodeId = adventureEpisode.id;
+    const adventureVersion = await prisma.adventureEpisodeVersion.create({
+      data: {
+        episodeId: adventureEpisode.id,
+        version: 1,
+        status: "published",
+        payload: { title: "当时的标题", segments: [] },
+        createdBy: "e2e",
+        createdByName: "E2E",
+        publishedAt: new Date("2026-11-05T02:00:00Z"),
+        publishedBy: "e2e",
+      },
+    });
+    adventureVersionId = adventureVersion.id;
+    await prisma.adventureEpisode.update({
+      where: { id: adventureEpisode.id },
+      data: { title: "新版标题", currentVersionId: adventureVersion.id },
+    });
+    const adventureDaily = await prisma.adventureDailyRecord.create({
+      data: {
+        deviceId: deviceInternalId,
+        episodeId: adventureEpisode.id,
+        assignedDate: "2026-11-05",
+        status: "completed",
+        completedAt: new Date("2026-11-05T03:10:00Z"),
+        completedDate: "2026-11-05",
+      },
+    });
+    const adventureMessage = await prisma.message.create({
+      data: {
+        deviceId: deviceInternalId,
+        turnId: adventureTurnId,
+        role: "user",
+        content: "我们继续冒险",
+        status: "completed",
+        mode: "adventure_story",
+        spokeAt: new Date("2026-11-05T03:00:00Z"),
+      },
+    });
+    adventureMessageId = adventureMessage.id;
+    await prisma.adventureEvent.create({
+      data: {
+        eventKey: `turn:${adventureTurnId}:segments_presented`,
+        deviceId: deviceInternalId,
+        episodeId: adventureEpisode.id,
+        dailyRecordId: adventureDaily.id,
+        turnId: adventureTurnId,
+        episodeVersionId: adventureVersion.id,
+        eventType: "segments_presented",
+        payload: { action: "await_reply", textCount: 1 },
+      },
+    });
   });
 
   afterAll(async () => {
     await prisma.message.deleteMany({ where: { deviceId: deviceInternalId } });
     await prisma.device.delete({ where: { id: deviceInternalId } });
+    await prisma.adventureEpisodeVersion.deleteMany({
+      where: { episodeId: adventureEpisodeId },
+    });
+    await prisma.adventureEpisode.delete({ where: { id: adventureEpisodeId } });
     await app.close();
   });
 
@@ -127,8 +198,8 @@ describe("Analytics messages (e2e)", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.code).toBe(0);
-    expect(res.body.data.total).toBe(3);
-    expect(res.body.data.items).toHaveLength(3);
+    expect(res.body.data.total).toBe(4);
+    expect(res.body.data.items).toHaveLength(4);
     expect(res.body.data.items[0]).not.toHaveProperty("rawPayload");
     expect(res.body.data.items[0].device.deviceId).toBe(businessDeviceId);
     // 默认 spokeAt 倒序：最新的在最前
@@ -176,6 +247,7 @@ describe("Analytics messages (e2e)", () => {
     expect(found.status).toBe(200);
     expect(found.body.data.id).toBe(messageId);
     expect(found.body.data.device.deviceId).toBe(businessDeviceId);
+    expect(found.body.data.adventureEpisode).toBeNull();
 
     const assistant = await prisma.message.findFirst({
       where: { turnId, role: "assistant" },
@@ -188,5 +260,20 @@ describe("Analytics messages (e2e)", () => {
 
     const missing = await authed(`/analytics/messages/${randomUUID()}`);
     expect(missing.status).toBe(404);
+  });
+
+  it("详情：冒险故事轮次返回集身份、播放时版本与当时标题", async () => {
+    const res = await authed(`/analytics/messages/${adventureMessageId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.adventureEpisode).toEqual({
+      episodeId: adventureEpisodeId,
+      businessKey: `elly/1/${episodeNumber}`,
+      characterKey: "elly",
+      season: 1,
+      episodeNumber,
+      title: "当时的标题",
+      versionId: adventureVersionId,
+      version: 1,
+    });
   });
 });
