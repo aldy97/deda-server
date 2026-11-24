@@ -39,7 +39,10 @@ import {
   SafetyGateService,
   diffSafetyEvaluations,
 } from "@/modules/safety/safety-gate.service";
-import { resolveSafetyProfile } from "@/modules/safety/safety-profile";
+import {
+  resolveSafetyInstruction,
+  resolveSafetyProfile,
+} from "@/modules/safety/safety-profile";
 import type {
   SafetyEvaluation,
   SafetySnapshot,
@@ -170,6 +173,12 @@ export class LlmAdapterService {
         ? "SAFETY_GATE_SLEEP"
         : "SAFETY_GATE_NORMAL";
     const raw = this.configService.get<string>(key);
+    return raw === "shadow" || raw === "on" ? raw : "off";
+  }
+
+  /** Phase 4：冒险 gate 开关；默认 off，shadow 只对比解释、on 由 gate 收口。 */
+  private adventureGateMode(): "off" | "shadow" | "on" {
+    const raw = this.configService.get<string>("SAFETY_GATE_ADVENTURE");
     return raw === "shadow" || raw === "on" ? raw : "off";
   }
 
@@ -311,26 +320,111 @@ export class LlmAdapterService {
     // 等待互动时优先交给冒险状态机，避免把选项回答误分类成新故事。
     // 引擎内部已自带「换集 → 返回 null」的兜底，这里再包一层是 belt-and-braces：
     // 引擎抛错时本轮降级到下面的自由创作链路，绝不让孩子听到静音。
-    // 惰性安全判定：冒险接话层真正要调 LLM 时才会触发 L2；未接管时同一个
-    // promise 直接复用给下面的常规 L2，不重复调用。
+    // 安全判定按开关三档：
+    // - off：仍由 adapter 的 getSafety 惰性触发，未接管时复用给常规 L2；
+    // - shadow/on：由 safety 的惰性句柄决定何时评估，adapter 只在成功后收口。
     let adventureSafety: Promise<SafetyVerdict | null> | null = null;
     if (device) {
       let adventureReply: AdventureReply | null = null;
+      const advMode = this.adventureGateMode();
+      const handle =
+        advMode === "off"
+          ? null
+          : this.safetyGate.openLazyHandle({
+              profile: "adventure",
+              getVerdict: () => this.safeClassifyL2(asrText, device.id, turnId),
+            });
       const getSafety = () =>
         (adventureSafety ??= this.safeClassifyL2(asrText, device.id, turnId));
       try {
         adventureReply = await this.adventure.handleChildReply(
           device.id,
           asrText,
-          { getSafety, turnId },
+          handle ? { safetyHandle: handle, turnId } : { getSafety, turnId },
         );
       } catch (error) {
         this.logger.error(
           `Adventure reply handling failed, degrading to free chat for device=${device.deviceId}: ${describeError(error)}`,
         );
       }
+      if (adventureReply && handle) {
+        const evaluation = handle.finalize({
+          texts: adventureReply.texts,
+          safetyBlocked: adventureReply.safetyBlocked,
+          safetyDisposition: adventureReply.safetyDisposition,
+        });
+        const safetySource = evaluation.evaluated
+          ? evaluation.verdict
+            ? undefined
+            : ("l2_fail_open" as const)
+          : "not_evaluated";
+        if (advMode === "shadow") {
+          // shadow 只验证「旧解释器 vs handle」一致性，落库/播出仍走 legacy。
+          const safety = evaluation.verdict;
+          const safetyReply = resolveSafetyReply({
+            texts: adventureReply.texts,
+            safetyBlocked: adventureReply.safetyBlocked,
+            verdict: safety,
+            unsafeLine: ADVENTURE_UNSAFE_LINE,
+          });
+          const legacyEvaluation: SafetyEvaluation = {
+            profile: "adventure",
+            verdict: safety,
+            blocked: Boolean(safety?.blocked) || safetyReply === "canned_block",
+            safetyReply,
+            cannedReply:
+              safetyReply === "canned_block"
+                ? ADVENTURE_UNSAFE_LINE
+                : undefined,
+            promptInstruction: resolveSafetyInstruction("adventure", safety),
+            snapshot: buildSafetySnapshot(safety, safetyReply),
+          };
+          const diffs = diffSafetyEvaluations(legacyEvaluation, evaluation);
+          if (diffs.length > 0) {
+            this.logger.warn(
+              `SAFETY_GATE_SHADOW_MISMATCH intent=adventure fields=${diffs.join(",")}`,
+            );
+          }
+          this.turnDecisions.record({
+            turnId,
+            deviceId: device.id,
+            safety,
+            safetySource,
+            safetyReply,
+            intent: null,
+            intentSource: "adventure_takeover",
+            asrText,
+          });
+          yield* this.emitAdventureReply(
+            device,
+            adventureReply,
+            asrText,
+            turnId,
+            legacyEvaluation.snapshot,
+          );
+          return;
+        }
+        this.turnDecisions.record({
+          turnId,
+          deviceId: device.id,
+          safety: evaluation.verdict,
+          safetySource,
+          safetyReply: evaluation.safetyReply,
+          intent: null,
+          intentSource: "adventure_takeover",
+          asrText,
+        });
+        yield* this.emitAdventureReply(
+          device,
+          adventureReply,
+          asrText,
+          turnId,
+          evaluation.snapshot,
+        );
+        return;
+      }
       if (adventureReply) {
-        // 冒险接管：安全判定已按需执行（接话层/二选一 LLM 路径）。
+        // 冒险接管（off）：安全判定已按需执行（接话层/二选一 LLM 路径）。
         // 未触发的路径如实记 not_evaluated，触发但失败记 l2_fail_open。
         const safety = adventureSafety ? await adventureSafety : null;
         const safetyReply = resolveSafetyReply({
@@ -361,6 +455,11 @@ export class LlmAdapterService {
           buildSafetySnapshot(safety, safetyReply),
         );
         return;
+      }
+      if (handle) {
+        // 引擎抛错/未接管但可能已触发过评估：把同一个 promise 交给常规 L2，
+        // 保证整轮最多一次 L2；未触发时等价于正常链路自己评估。
+        adventureSafety ??= handle.evaluateIfNeeded();
       }
     }
 

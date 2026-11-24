@@ -22,6 +22,10 @@ import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
 import { SafetyGateService } from "@/modules/safety/safety-gate.service";
+import type {
+  SafetyEvaluation,
+  SafetyHandleEvaluation,
+} from "@/modules/safety/safety.types";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
@@ -63,7 +67,7 @@ describe("LlmAdapterModule", () => {
   };
   let session: { resolveWithSource: jest.Mock; reset: jest.Mock };
   let turnDecisions: { record: jest.Mock };
-  let safetyGate: { interpret: jest.Mock };
+  let safetyGate: { interpret: jest.Mock; openLazyHandle: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
@@ -154,7 +158,10 @@ describe("LlmAdapterModule", () => {
       reset: jest.fn().mockResolvedValue(undefined),
     };
     turnDecisions = { record: jest.fn() };
-    safetyGate = { interpret: jest.fn() };
+    safetyGate = {
+      interpret: jest.fn(),
+      openLazyHandle: jest.fn(),
+    };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -2753,6 +2760,244 @@ describe("LlmAdapterModule", () => {
         source: "l2_model",
         reply: "canned_block",
         inferred: false,
+      });
+    });
+
+    describe("SAFETY_GATE_ADVENTURE 三档", () => {
+      const stubEvaluation = (
+        over: Partial<SafetyHandleEvaluation> = {},
+      ): SafetyHandleEvaluation => ({
+        profile: "adventure",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+        evaluated: true,
+        ...over,
+      });
+
+      const makeHandle = (evaluation: SafetyEvaluation) => ({
+        evaluateIfNeeded: jest.fn().mockResolvedValue(evaluation.verdict),
+        promptInstruction: jest.fn(),
+        finalize: jest.fn().mockReturnValue(evaluation),
+      });
+
+      const withGateMode = (mode: string) => {
+        const original = configGet.getMockImplementation() as (
+          key: string,
+        ) => string | undefined;
+        configGet.mockImplementation((key: string) =>
+          key === "SAFETY_GATE_ADVENTURE" ? mode : original(key),
+        );
+      };
+
+      it("off：不建 handle，仍把 getSafety 交给引擎", async () => {
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(safetyGate.openLazyHandle).not.toHaveBeenCalled();
+        const options = adventure.handleChildReply.mock.calls[0][2] as {
+          getSafety?: unknown;
+          safetyHandle?: unknown;
+        };
+        expect(options.getSafety).toEqual(expect.any(Function));
+        expect(options.safetyHandle).toBeUndefined();
+        expect(recorded()).toMatchObject({
+          safetySource: "not_evaluated",
+          safetyReply: "none",
+        });
+      });
+
+      it("其它两档开关打开不影响冒险：仍读 ADVENTURE 键", async () => {
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const original = configGet.getMockImplementation() as (
+          key: string,
+        ) => string | undefined;
+        configGet.mockImplementation((key: string) =>
+          key === "SAFETY_GATE_NORMAL" || key === "SAFETY_GATE_SLEEP"
+            ? "on"
+            : original(key),
+        );
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(safetyGate.openLazyHandle).not.toHaveBeenCalled();
+        expect(adventure.handleChildReply).toHaveBeenCalledWith(
+          deviceRow.id,
+          "我选第一个",
+          expect.objectContaining({ getSafety: expect.any(Function) }),
+        );
+      });
+
+      it("shadow：一次 finalize + 双解释器 diff，落库与播出仍走 legacy", async () => {
+        withGateMode("shadow");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+        const evaluation = stubEvaluation({
+          blocked: true,
+          safetyReply: "canned_block",
+          cannedReply: ADVENTURE_UNSAFE_LINE,
+          snapshot: {
+            layer: "L2",
+            category: "safe",
+            blocked: true,
+            source: "l2_model",
+            matched: null,
+            reply: "canned_block",
+            inferred: false,
+          },
+        });
+        const handle = makeHandle(evaluation);
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        const warnSpy = jest.spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        );
+
+        const chunks = await collect(
+          service.streamReply(boundReq("我选第一个")),
+        );
+
+        expect(safetyGate.openLazyHandle).toHaveBeenCalledWith(
+          expect.objectContaining({
+            profile: "adventure",
+            getVerdict: expect.any(Function),
+          }),
+        );
+        expect(handle.finalize).toHaveBeenCalledWith({
+          texts: ["段落一"],
+          safetyBlocked: undefined,
+          safetyDisposition: undefined,
+        });
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+        );
+        expect(chunks).toEqual(["段落一"]);
+        expect(recorded()).toMatchObject({ safetyReply: "none" });
+        warnSpy.mockRestore();
+      });
+
+      it("shadow：两解释器一致时不告警", async () => {
+        withGateMode("shadow");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+        const handle = makeHandle(stubEvaluation());
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        const warnSpy = jest.spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        );
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(warnSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+        );
+        warnSpy.mockRestore();
+      });
+
+      it("on：record 与 assistant 快照来自 finalize，播出文本不被替换", async () => {
+        withGateMode("on");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const blockedVerdict = {
+          blocked: true,
+          category: "violence" as const,
+          layer: "L2" as const,
+          source: "l2_model" as const,
+          matched: null,
+        };
+        const evaluation = stubEvaluation({
+          verdict: blockedVerdict,
+          blocked: true,
+          safetyReply: "canned_block",
+          cannedReply: ADVENTURE_UNSAFE_LINE,
+          snapshot: {
+            layer: "L2",
+            category: "violence",
+            blocked: true,
+            source: "l2_model",
+            matched: null,
+            reply: "canned_block",
+            inferred: false,
+          },
+        });
+        const handle = makeHandle(evaluation);
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: [ADVENTURE_UNSAFE_LINE],
+          action: "await_reply",
+          result: "off_topic",
+          safetyBlocked: true,
+          safetyDisposition: "canned_block",
+        });
+
+        const chunks = await collect(
+          service.streamReply(boundReq("我要拿刀伤人")),
+        );
+
+        expect(chunks).toEqual([ADVENTURE_UNSAFE_LINE]);
+        expect(handle.finalize).toHaveBeenCalledWith({
+          texts: [ADVENTURE_UNSAFE_LINE],
+          safetyBlocked: true,
+          safetyDisposition: "canned_block",
+        });
+        expect(recorded()).toMatchObject({
+          safety: blockedVerdict,
+          safetyReply: "canned_block",
+          intent: null,
+          intentSource: "adventure_takeover",
+        });
+        const assistantCall = prisma.message.create.mock.calls[1][0];
+        expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
+      });
+
+      it("on：引擎抛错降级时复用 verdict，不平白多调 L2", async () => {
+        withGateMode("on");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const safeVerdict = {
+          blocked: false,
+          category: "safe" as const,
+          layer: "L2" as const,
+          source: "l2_model" as const,
+          matched: null,
+        };
+        const handle = makeHandle(stubEvaluation({ verdict: safeVerdict }));
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        adventure.handleChildReply.mockRejectedValue(new Error("boom"));
+        llm.completeStream.mockReturnValue(makeStream(["嗯，我在听"])());
+
+        const chunks = await collect(
+          service.streamReply(boundReq("今天想聊什么")),
+        );
+
+        expect(handle.evaluateIfNeeded).toHaveBeenCalledTimes(1);
+        expect(childSafety.classifyL2).not.toHaveBeenCalled();
+        expect(chunks).toEqual(["嗯，我在听"]);
       });
     });
 

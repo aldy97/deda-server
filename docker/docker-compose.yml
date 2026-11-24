@@ -66,6 +66,8 @@ services:
       SAFETY_GATE_NORMAL: ${SAFETY_GATE_NORMAL:-off}
       # Phase 3：哄睡安全 gate 开关，off | shadow | on；默认 off
       SAFETY_GATE_SLEEP: ${SAFETY_GATE_SLEEP:-off}
+      # Phase 4：冒险安全 gate 开关，off | shadow | on；默认 off
+      SAFETY_GATE_ADVENTURE: ${SAFETY_GATE_ADVENTURE:-off}
       # 机芯厂设备侧接口（client-api）：设备上线共享密钥与认领窗口
       DEVICE_LOGIN_MAC_KEY: ${DEVICE_LOGIN_MAC_KEY:-}
       PROVISION_CLAIM_WINDOW_SEC: ${PROVISION_CLAIM_WINDOW_SEC:-120}

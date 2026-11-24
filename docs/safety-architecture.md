@@ -41,11 +41,11 @@
 
 ## 非破坏性阶段
 
-1. **Phase 1a（当前）**：提取类型/纯策略/profile，接线 recorder 与 llm-adapter；行为不变，无 API/schema 变化。
+1. **Phase 1a**：提取类型/纯策略/profile，接线 recorder 与 llm-adapter；行为不变，无 API/schema 变化。
 2. **Phase 1b**：删除 `AdventureSafetySignal`，统一 `SafetyVerdict`。
 3. **Phase 2**：`SafetyGateService` + 普通聊天 shadow（一次 L2 + 双解释器 diff）。
 4. **Phase 3**：哄睡接 gate。
-5. **Phase 4**：冒险 lazy handle。
+5. **Phase 4（已完成）**：冒险 lazy handle。
 6. **Phase 5**：审计/消息写入收口，回补模块类型复用。
 7. **Phase 6**：L3 文本迁入 safety；`ChildSafetyService` 迁入 `safety/`（决定：迁）。
 
