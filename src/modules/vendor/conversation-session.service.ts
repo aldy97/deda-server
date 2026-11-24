@@ -7,6 +7,7 @@ import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
 import { FILLER_EMOTIONS, type FillerEmotion } from "@/modules/llm/filler-bank";
+import { isStorySwitchRequest } from "@/modules/llm/filler-act";
 
 export type ConversationIntent =
   | "free_chat"
@@ -405,6 +406,9 @@ export class ConversationSessionService {
    * 合并之后任何一侧加词都自动对另一侧生效。
    */
   private isExplicitExit(asrText: string): boolean {
+    // 「换一个/再讲一个」是换故事，不是退出；否则会被退出词表里的
+    // 「不想听」抢先命中，孩子要新故事反而被送回 free_chat。
+    if (isStorySwitchRequest(asrText)) return false;
     return isAdventureExitRequest(asrText);
   }
 

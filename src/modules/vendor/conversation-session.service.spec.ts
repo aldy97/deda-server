@@ -555,6 +555,25 @@ describe("ConversationSessionService", () => {
       expect(llmService.complete).not.toHaveBeenCalled();
     });
 
+    it("换故事不算显式退出：交给模型重新判定", async () => {
+      prisma.conversationSession.findUnique.mockResolvedValue(
+        activeSession("english_story"),
+      );
+      mockModel("free_story|neutral");
+
+      const decision = await service.resolveWithSource(
+        "device-1",
+        "我不想听了，换一个",
+      );
+
+      expect(decision).toEqual({
+        intent: "free_story",
+        source: "model",
+        emotion: "neutral",
+      });
+      expect(llmService.complete).toHaveBeenCalledTimes(1);
+    });
+
     // 词表与冒险引擎共用 ADVENTURE_EXIT_KEYWORDS：这里锁「引擎侧原有的拒绝词
     // 会话层也认」（旧正则缺「不想玩」，孩子说这句会掉进模型分类）。
     // 反方向由 adventure.service.spec.ts 的 shared keyword 用例锁住。
