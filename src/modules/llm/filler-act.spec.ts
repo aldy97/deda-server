@@ -221,4 +221,13 @@ describe("resolveFillerAct", () => {
   it("普通陈述落 neutral", () => {
     expect(resolveFillerAct({ ...base }).act).toBe("neutral");
   });
+
+  it("关键词情绪兜底覆盖生气分支；缺省 intent 走 neutral", () => {
+    expect(resolveFillerAct({ ...base, asrText: "我生气了" }).act).toBe(
+      "comfort",
+    );
+    expect(resolveFillerAct({ asrText: "我碰到了你最好的朋友" }).act).toBe(
+      "neutral",
+    );
+  });
 });

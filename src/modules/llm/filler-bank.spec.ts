@@ -382,6 +382,41 @@ describe("pickFillerLine", () => {
       }).bucket,
     ).toBe("en_continue");
   });
+
+  it("英文故事/情绪走 en_story / en_comfort / en_celebrate", () => {
+    expect(
+      pickFillerLine({
+        ...base,
+        asrText: "Tell me a story",
+        intent: "english_story",
+      }).bucket,
+    ).toBe("en_story");
+    expect(
+      pickFillerLine({
+        ...base,
+        asrText: "I am sad",
+        intent: "free_chat",
+        emotion: "sad",
+      }).bucket,
+    ).toBe("en_comfort");
+    expect(
+      pickFillerLine({
+        ...base,
+        asrText: "I am happy",
+        intent: "free_chat",
+        emotion: "happy",
+      }).bucket,
+    ).toBe("en_celebrate");
+  });
+
+  it("最近 10 轮覆盖整桶时走兜底轮转", () => {
+    const picked = pickFillerLine({
+      ...base,
+      intent: "free_chat",
+      recentFillers: [...FILLER_POOLS.neutral],
+    });
+    expect(FILLER_POOLS.neutral).toContain(picked.text);
+  });
 });
 
 describe("normalizeFiller / isFillerDuplicate", () => {
