@@ -535,6 +535,55 @@ describe("DeviceLinkService", () => {
 
       expect(prisma.device.updateMany).not.toHaveBeenCalled();
     });
+
+    it("非法 networkMode（如 5g）被忽略：保留上次值且不写库", async () => {
+      const warnSpy = jest
+        .spyOn((service as any).logger, "warn")
+        .mockImplementation();
+      redisService.getValue.mockResolvedValue(
+        JSON.stringify({
+          mac: "AABBCCDDEEFF",
+          networkMode: "wifi",
+          wifiRssi: -55,
+          lastSeenAt: Date.now(),
+        }),
+      );
+
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({ networkMode: "5g" }),
+      );
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.networkMode).toBe("wifi");
+      expect(cached.wifiRssi).toBe(-55);
+      expect(prisma.device.updateMany).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("invalid networkMode"),
+      );
+    });
+
+    it("networkType 写库失败只记 error，不影响状态缓存", async () => {
+      const errorSpy = jest
+        .spyOn((service as any).logger, "error")
+        .mockImplementation();
+      prisma.device.updateMany.mockRejectedValueOnce(new Error("db down"));
+
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({ networkMode: "wifi", wifiRssi: -48 }),
+      );
+      await flushPromises(5);
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.networkMode).toBe("wifi");
+      expect(cached.wifiRssi).toBe(-48);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to update networkType"),
+        expect.any(Error),
+      );
+    });
   });
 
   describe("getStatus 在线判定", () => {
