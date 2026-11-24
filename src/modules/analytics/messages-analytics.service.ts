@@ -27,6 +27,20 @@ export interface MessagesModesQuery {
   endDate?: string;
 }
 
+/** 消息详情里的冒险故事：集身份 + 该轮播放时锁定的版本（无记录时 version 为空） */
+export interface MessageAdventureEpisode {
+  episodeId: string;
+  /** {characterKey}/{season}/{episodeNumber}，与冒险内容工作台同一口径 */
+  businessKey: string;
+  characterKey: string;
+  season: number;
+  episodeNumber: number;
+  /** 有版本时取版本快照里的标题（当时的标题），否则回落集当前标题 */
+  title: string;
+  versionId: string | null;
+  version: number | null;
+}
+
 /** 日期边界固定 Asia/Shanghai，与服务器时区解耦 */
 function shanghaiDayStart(date: string): Date {
   return new Date(`${date}T00:00:00+08:00`);
@@ -176,7 +190,73 @@ export class MessagesAnalyticsService {
     if (!row) {
       throw new NotFoundException("message not found");
     }
-    return row;
+    return {
+      ...row,
+      adventureEpisode: await this.resolveAdventureEpisode(row),
+    };
+  }
+
+  /**
+   * 消息对应的冒险故事：按 deviceId + turnId 找该轮事件，再取集身份与播放时锁定的版本。
+   * 只有 adventure_story 轮次才查事件表；无事件（冒险上线前 / 写库失败）返回 null，
+   * 刻意不按发布时间推断版本——重发时设备可能仍锁在旧版，推断会给出看似合理却错误的一版。
+   */
+  private async resolveAdventureEpisode(row: {
+    deviceId: string;
+    turnId: string;
+    mode: string | null;
+  }): Promise<MessageAdventureEpisode | null> {
+    if (row.mode !== "adventure_story") {
+      return null;
+    }
+    const events = await this.prisma.adventureEvent.findMany({
+      where: { deviceId: row.deviceId, turnId: row.turnId },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+      select: {
+        episodeVersionId: true,
+        episode: {
+          select: {
+            id: true,
+            characterKey: true,
+            season: true,
+            episodeNumber: true,
+            title: true,
+          },
+        },
+      },
+    });
+    const episode = events[0]?.episode;
+    if (!episode) {
+      return null;
+    }
+    // 早期事件只有二选一命中带版本；取第一条带版本的即可，同一轮的事件同属一集。
+    const versionId =
+      events.find((event) => event.episodeVersionId !== null)
+        ?.episodeVersionId ?? null;
+    // 版本快照可能很大，单独取一次，避免同一轮多条事件各带一份 payload。
+    const version = versionId
+      ? await this.prisma.adventureEpisodeVersion.findUnique({
+          where: { id: versionId },
+          select: { version: true, payload: true },
+        })
+      : null;
+    const versionTitle = (version?.payload as { title?: unknown } | null)
+      ?.title;
+    return {
+      episodeId: episode.id,
+      businessKey: `${episode.characterKey}/${episode.season}/${episode.episodeNumber}`,
+      characterKey: episode.characterKey,
+      season: episode.season,
+      episodeNumber: episode.episodeNumber,
+      // 有版本时用播放当时的标题；标题可能已被新版本改掉。
+      title:
+        typeof versionTitle === "string" && versionTitle
+          ? versionTitle
+          : episode.title,
+      versionId,
+      version: version?.version ?? null,
+    };
   }
 
   /**

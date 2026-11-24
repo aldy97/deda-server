@@ -1724,6 +1724,55 @@ describe("AdventureService", () => {
     expect(eventPayload).not.toContain("故事原文");
   });
 
+  describe("pinned adventure version on turn events", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    it("stamps the progress-pinned version onto every event of the turn", async () => {
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        episodeVersionId: "ver-2",
+      });
+
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["森林里有一只小松鼠。"],
+        action: "await_reply",
+        result: "answered",
+        interaction: { type: "open_question", order: 4 },
+      });
+
+      const creates = prisma.adventureEvent.upsert.mock.calls.map(
+        (call) => call[0].create,
+      );
+      expect(creates).toHaveLength(2);
+      creates.forEach((create) => {
+        expect(create.episodeVersionId).toBe("ver-2");
+      });
+    });
+
+    it("prefers the matchedChoice pinned version when the progress row is gone", async () => {
+      prisma.adventureProgress.findUnique.mockResolvedValue(null);
+
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["好呀，我们去森林！"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: "ver-1",
+        },
+      });
+
+      const choiceCreate = prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === "choice_matched",
+      )![0].create;
+      expect(choiceCreate.episodeVersionId).toBe("ver-1");
+    });
+  });
+
   describe("choice_matched telemetry", () => {
     beforeEach(() => {
       prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
