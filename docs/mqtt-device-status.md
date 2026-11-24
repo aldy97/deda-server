@@ -49,9 +49,10 @@
 
 - 设备每 **5 秒**上报一次 `query` 心跳（即使无变化也必须报）
 - 服务端判定：**15 秒内**（3 倍心跳）有上报 = 在线，否则离线；恢复上报自动转在线
-- `query.data`：`{ battery: 0-100, volume: 0-100, version: "x.y.z", charging: boolean | null }`
-  （`charging` 为 2026-11-11 约定增补，机芯厂 v1.1 已按 `boolean | null` 上报，当前固件恒发 `null`；
-  服务端对 `null` 与字段缺失同口径处理——保留上一次已知值）
+- `query.data`：`{ battery: 0-100, volume: 0-100, version: "x.y.z", charging: boolean, networkMode: "wifi"|"4g"|null, wifiRssi: int|null }`
+  （`charging` 为 2026-11-11 约定增补；协议 v1.8 起固件恒发布尔值，不再发 null。
+  网络字段为 v1.8 增补：`networkMode` 每次心跳都带，切网期间两路均未就绪时为 `null`；
+  `wifiRssi` 仅 wifi 模式有值，4G/未就绪时为显式 `null`）
 
 ## 4. 总体架构
 
@@ -171,12 +172,14 @@ MQTT_PASSWORD=<32 位随机>
     "status": "online",            // "online" | "offline"，15s 心跳窗口判定
     "battery": 80,                  // 0-100 | null（从未上报）
     "isCharging": true,             // true | false | null（设备未上报充电字段时为 null）
+    "networkMode": "wifi",          // "wifi" | "4g" | null（切网中或老固件未知）
+    "wifiRssi": -62,                // dBm | null（4G / 未上报 / 已清空）
     "lastActiveAt": "2026-11-11T01:22:12.000Z"  // ISO 8601 | null
   }
 }
 ```
 
-约束：设备不存在返回 404（前端已按"已解绑"兜底）；offline 时 battery/isCharging 仍返回最近一次已知值。
+约束：设备不存在返回 404（前端已按"已解绑"兜底）；offline 时 battery/isCharging/networkMode/wifiRssi 仍返回最近一次已知值，是否展示由前端按 `status` 判断。
 
 ### 7.2 对设备（MQTT，本次交付机芯厂）
 
@@ -186,7 +189,7 @@ MQTT_PASSWORD=<32 位随机>
 - `query.data` 期望扩展为：
 
 ```json
-{ "battery": 80, "volume": 50, "version": "1.2.3", "charging": false }
+{ "battery": 80, "volume": 50, "version": "1.2.3", "charging": false, "networkMode": "wifi", "wifiRssi": -62 }
 ```
 
 - 断线重连后恢复订阅与心跳；无需重复 HTTP 上线（API KEY 仍有效时）
@@ -223,3 +226,40 @@ MQTT_PASSWORD=<32 位随机>
 4. [x] 模拟设备验证在线/离线翻转与字段透传
 5. [ ] 交付机芯厂 broker 参数 + charging 字段约定
 6. [ ] 真机复验，PR 合并部署
+
+## 11. 网络信息透传（协议 v1.8，2026-11-24）
+
+协议 v1.8 在 `query.data` 增加两个字段，服务端透传到 `GET /devices/{id}/status`：
+
+| 字段 | 类型 | 语义 |
+| --- | --- | --- |
+| `networkMode` | `"wifi"` / `"4g"` / `null` | 当前已就绪的网络模式；**切网期间两路均未就绪时为 `null`** |
+| `wifiRssi` | int dBm / `null` | WiFi 信号强度；4G 或网络未就绪时为**显式 `null`** |
+
+### 11.1 合并语义（device-link `mergeStatus`）
+
+| 收到 | 结果 |
+| --- | --- |
+| `networkMode="wifi"` + 数字 rssi | 写入模式与 RSSI |
+| `networkMode="4g"` + `null` | 写入 4G，**清空** RSSI |
+| `networkMode=null` + `null` | 写入 null（切网中），清空 RSSI |
+| 两字段缺省 | 老固件：不更新，保留上一次已知值 |
+| `networkMode="wifi"` + `null` | 写入 wifi，清空 RSSI |
+| `networkMode="4g"` + 数字 | 以模式为准，丢弃 RSSI 并 warn |
+| 非法值（正数 / `< -120` / 字符串） | 丢弃并保留上一次值，warn |
+
+**缺省与显式 null 必须区分**：缺省 = 老固件「无更新」，显式 null = 「状态明确为空」。
+两者混同会让 4G 设备一直显示过期的 WiFi 信号。
+
+### 11.2 落库
+
+`networkMode` 变化时（仅 wifi/4g，不含 null）低频同步 `Device.networkType`
+（`"WiFi"` / `"4G"`），供 about-device 页展示；RSSI 只留 Redis 快照，不落库。
+
+### 11.3 已知边界
+
+- API 上 `null` 同时表示「切网中」与「老固件未知」，服务端不做区分。
+- 离线时字段保留最后已知值（Redis TTL 3600s），**前端必须按 `status === "online"` 门控展示**，
+  否则会拿一小时前的信号骗家长。
+- 协议 v1.8 第 4.2 节的 `authorization_Role` / `authorization_TTS` 续签**尚未实现**，
+  属独立议题（长对话超过 30 分钟后签名过期，切音色/打断可能失败）。

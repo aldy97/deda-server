@@ -42,7 +42,13 @@ export interface DeviceLinkMessage<T = unknown> {
   data?: T | null;
 }
 
-/** query 上报数据：电量 / 音量 / 固件版本 / 充电状态 */
+/**
+ * 当前已就绪的网络模式（协议 v1.8 `query.data.networkMode`）。
+ * `null` 表示切网期间两路均未就绪；字段缺省表示老固件未上报。
+ */
+export type NetworkMode = "wifi" | "4g" | null;
+
+/** query 上报数据：电量 / 音量 / 固件版本 / 充电状态 / 网络信息 */
 export interface DeviceQueryData {
   battery?: number;
   volume?: number;
@@ -53,6 +59,16 @@ export interface DeviceQueryData {
    * 与 battery / volume / version 同口径保留上一次已知值。
    */
   charging?: boolean | null;
+  /**
+   * 当前网络模式（协议 v1.8）。设备每次心跳都携带；
+   * 字段缺省只可能是老固件，按「无更新」处理。
+   */
+  networkMode?: NetworkMode;
+  /**
+   * WiFi 信号强度 dBm（协议 v1.8）。仅 wifi 模式有意义；
+   * 4G 或网络未就绪时为显式 null（需清空旧值）；缺省表示老固件未上报。
+   */
+  wifiRssi?: number | null;
 }
 
 /** volume 指令/回执数据 */
@@ -67,6 +83,10 @@ export interface DeviceLinkStatus {
   volume: number | null;
   version: string | null;
   charging: boolean | null;
+  /** 最近一次上报的网络模式；从未上报为 null */
+  networkMode: NetworkMode;
+  /** 最近一次上报的 WiFi RSSI（dBm）；4G / 未上报 / 已清空为 null */
+  wifiRssi: number | null;
   /** 最后一次收到该设备任意上报的时间（Unix 毫秒） */
   lastSeenAt: number | null;
 }

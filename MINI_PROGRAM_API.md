@@ -287,12 +287,14 @@ Content-Type: application/json
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
 | `status` | string | `online`／`offline`；超过 15 秒未收到设备心跳即判定 `offline` |
-| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。当前固件为占位值，前端可展示但勿据此做业务判断 |
+| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。协议 v1.8 起固件在未取得有效电量时上报 `100`（仅作显示），前端可展示但勿据此做业务判断 |
 | `volume` | number \| null | 音量 0–100；设备尚未上报时为 `null`。音量下发（见 3.6）后回读本字段即可确认设备是否已生效 |
-| `isCharging` | boolean \| null | 是否充电中；对应机芯厂 `query.data.charging`（契约类型 `boolean \| null`），`null` 表示未知。当前固件恒发 `null`，前端按未知处理 |
+| `isCharging` | boolean \| null | 对应机芯厂 `query.data.charging`；协议 v1.8 起固件恒发布尔值（表示 USB 是否接入），老固件未上报时为 `null` |
+| `networkMode` | `"wifi"` \| `"4g"` \| null | 当前已就绪的网络模式；`null` 表示切网中**或**老固件未上报，API 层不区分 |
+| `wifiRssi` | number \| null | WiFi 信号强度 dBm（负整数）；仅 `networkMode="wifi"` 时有意义，4G/未上报为 `null`；离线时保留最后已知值 |
 | `lastActiveAt` | string \| null | 最近活跃时间，ISO 8601；设备从未上报时为 `null` |
 
-设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值。
+设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值；**网络字段必须在 `status === "online"` 时展示**，否则会显示 Redis 中最多 1 小时前的陈旧信号。
 
 ### 3.5 查询设备绑定成员
 
