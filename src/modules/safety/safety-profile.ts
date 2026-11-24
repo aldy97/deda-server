@@ -1,5 +1,75 @@
+import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
+import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
 import type { ConversationIntent } from "@/modules/vendor/conversation-session.service";
 import type { SafetyProfileKey } from "./safety.types";
+
+/**
+ * 冒险链路的固定安全话术：由代码直接返回，绝不交给生成模型。
+ * 触发条件只有一个——本轮 L2 明确判定 blocked（性/暴力/自伤）。
+ */
+export const ADVENTURE_UNSAFE_LINE = "我们先回到故事里，好吗？";
+
+/**
+ * L2 不可用（fail-open）时注入接话层的谨慎指令。
+ * 正常情况下安全判定由 L2 负责；只有分类器异常/超时才让模型兜底，
+ * 并明确“孩子对角色行为的道德评价不算不适宜”，避免误伤。
+ */
+export const ADVENTURE_SAFETY_CAUTION =
+  "本轮安全分类不可用。若孩子的话涉及性、色情、隐私部位、真实暴力或伤害他人的方法、自伤、自杀、自残、辱骂或教唆伤害，不要复述，只说「我们先回到故事里，好吗？」。孩子对故事角色行为的道德评价或否定判断（如「你不应该偷拿别人的东西」）不属于不适宜内容。";
+
+/**
+ * L2 判为 emotional_harm（情绪宣泄，不拦截）时注入接话层的共情指令。
+ * 与自由对话的 EMOTIONAL_HARM_GUIDANCE 同向，但把落点改成“接回故事”。
+ */
+export const ADVENTURE_EMOTIONAL_HARM_GUIDANCE =
+  "孩子刚才的话带有攻击性或负面情绪。请先共情孩子的感受，温和地询问发生了什么；绝不附和、鼓励或复述任何伤害性内容，不批评、不说教；等孩子情绪平复后，自然接回故事。";
+
+/** 安全话术与指令按 profile 分组；唯一真相在 safety，业务模块只读。 */
+export interface SafetyProfileContent {
+  /** emotional_harm 时注入的共情指令。 */
+  emotionalHarmInstruction: string;
+  /** adventure：固定安全句，同时是 echo 判定的子串。 */
+  unsafeLine?: string;
+  /** adventure：L2 不可用时的谨慎指令。 */
+  cautionInstruction?: string;
+}
+
+export const PROFILE_CONTENT: Record<SafetyProfileKey, SafetyProfileContent> = {
+  default: {
+    emotionalHarmInstruction: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
+  },
+  sleep: {
+    emotionalHarmInstruction: ChildSafetyService.EMOTIONAL_HARM_GUIDANCE,
+  },
+  adventure: {
+    unsafeLine: ADVENTURE_UNSAFE_LINE,
+    cautionInstruction: ADVENTURE_SAFETY_CAUTION,
+    emotionalHarmInstruction: ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+  },
+};
+
+/**
+ * 安全结论 → 附加指令，与引擎旧真值表逐行一致：
+ * null（评估失败/未给结论）或 fail-open 来源 → 谨慎指令；emotional_harm → 共情指令。
+ * undefined（调用方根本没提供判定）不注入，保持惰性路径零成本。
+ */
+export function resolveSafetyInstruction(
+  profile: SafetyProfileKey,
+  verdict: SafetyVerdict | null | undefined,
+): string | undefined {
+  const content = PROFILE_CONTENT[profile];
+  if (
+    verdict === null ||
+    verdict?.source === "l2_fail_open" ||
+    verdict?.source === "l2_invalid_label"
+  ) {
+    return content.cautionInstruction;
+  }
+  if (verdict?.category === "emotional_harm") {
+    return content.emotionalHarmInstruction;
+  }
+  return undefined;
+}
 
 /** 与 messages.mode / llm-adapter mode 解析段保持一致的真实取值。 */
 export type MessageMode =

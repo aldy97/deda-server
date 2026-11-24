@@ -37,26 +37,12 @@ export const ADVENTURE_DEGRADED_REPLIES = {
  */
 export const ADVENTURE_EXIT_TEXT = "好的，那么我们之后再一起继续冒险吧";
 
-/**
- * 冒险链路的固定安全话术：由代码直接返回，绝不交给生成模型。
- * 触发条件只有一个——本轮 L2 明确判定 blocked（性/暴力/自伤）。
- */
-export const ADVENTURE_UNSAFE_LINE = "我们先回到故事里，好吗？";
-
-/**
- * L2 不可用（fail-open）时注入接话层的谨慎指令。
- * 正常情况下安全判定由 L2 负责；只有分类器异常/超时才让模型兜底，
- * 并明确“孩子对角色行为的道德评价不算不适宜”，避免误伤。
- */
-export const ADVENTURE_SAFETY_CAUTION =
-  "本轮安全分类不可用。若孩子的话涉及性、色情、隐私部位、真实暴力或伤害他人的方法、自伤、自杀、自残、辱骂或教唆伤害，不要复述，只说「我们先回到故事里，好吗？」。孩子对故事角色行为的道德评价或否定判断（如「你不应该偷拿别人的东西」）不属于不适宜内容。";
-
-/**
- * L2 判为 emotional_harm（情绪宣泄，不拦截）时注入接话层的共情指令。
- * 与自由对话的 EMOTIONAL_HARM_GUIDANCE 同向，但把落点改成“接回故事”。
- */
-export const ADVENTURE_EMOTIONAL_HARM_GUIDANCE =
-  "孩子刚才的话带有攻击性或负面情绪。请先共情孩子的感受，温和地询问发生了什么；绝不附和、鼓励或复述任何伤害性内容，不批评、不说教；等孩子情绪平复后，自然接回故事。";
+/** 冒险链路安全文本的唯一真相在 safety-profile；这里保留旧 import 路径。 */
+export {
+  ADVENTURE_UNSAFE_LINE,
+  ADVENTURE_SAFETY_CAUTION,
+  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+} from "@/modules/safety/safety-profile";
 
 /**
  * 惰性安全判定：只在真正需要调接话层/二选一判定时才会被调用。

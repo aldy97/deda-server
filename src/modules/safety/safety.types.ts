@@ -39,3 +39,29 @@ export interface SafetyEvaluation {
   promptInstruction?: string;
   snapshot: SafetySnapshot | null;
 }
+
+/** 引擎在产生点给出的回复最小形状；safetyDisposition 是显式处置。 */
+export interface AdventureReplyLike {
+  texts: string[];
+  safetyBlocked?: boolean;
+  safetyDisposition?: SafetyReply;
+}
+
+export interface SafetyHandleEvaluation extends SafetyEvaluation {
+  /** 本轮是否真实请求过 L2 评估（adapter 记 safetySource 用）。 */
+  evaluated: boolean;
+}
+
+/**
+ * 惰性安全句柄：引擎决定「何时评估」，gate 决定「如何解释」。
+ * - evaluateIfNeeded：单飞记忆化，并发多次调用共享同一次 getVerdict；
+ * - promptInstruction：生成前注入；
+ * - finalize：生成后收口，显式 disposition 优先于字符串推断。
+ */
+export interface SafetyHandle {
+  evaluateIfNeeded(): Promise<SafetyVerdict | null>;
+  promptInstruction(
+    verdict: SafetyVerdict | null | undefined,
+  ): string | undefined;
+  finalize(reply: AdventureReplyLike): SafetyHandleEvaluation;
+}
