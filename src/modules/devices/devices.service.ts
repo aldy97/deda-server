@@ -298,6 +298,10 @@ export class DevicesService {
       battery: link.battery,
       volume: link.volume,
       isCharging: link.charging,
+      // MQTT v1.8 网络信息：null 同时表示「切网中」与「老固件未知」，
+      // API 层不区分；离线时保留最后已知值，由前端按 status 决定是否展示。
+      networkMode: link.networkMode ?? null,
+      wifiRssi: link.wifiRssi ?? null,
       lastActiveAt: link.lastSeenAt
         ? new Date(link.lastSeenAt).toISOString()
         : null,

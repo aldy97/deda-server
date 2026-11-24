@@ -118,7 +118,9 @@
     "battery": 80,
     "volume": 50,
     "version": "1.2.3",
-    "charging": false
+    "charging": false,
+    "networkMode": "wifi",
+    "wifiRssi": -62
   }
 }
 ```
@@ -129,6 +131,8 @@
 | volume | int | 0-100 | 音量百分比 |
 | version | string | - | 固件版本号，格式 x.y.z |
 | charging | bool | true/false | 是否正在充电。**2026-11-11 约定增补**：机芯厂待实现；未上报时服务端按 `null` 处理，不影响既有链路 |
+| networkMode | string/null | `"wifi"` / `"4g"` / `null` | **v1.8 增补**：当前已就绪的网络模式；切网期间两路均未就绪时为 `null` |
+| wifiRssi | int/null | dBm 整数或 `null` | **v1.8 增补**：Wi‑Fi 联网时为当前连接 RSSI（如 `-62`）；4G 或未就绪时为 `null` |
 
 **服务端行为**: 更新设备电量、音量、版本信息，推送状态到App端，如有新固件则自动下发升级指令。
 
@@ -275,7 +279,10 @@
   "data": {
     "battery": 80,
     "volume": 50,
-    "version": "1.2.3"
+    "version": "1.2.3",
+    "charging": false,
+    "networkMode": "4g",
+    "wifiRssi": null
   }
 }
 ```

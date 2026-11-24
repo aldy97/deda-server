@@ -564,6 +564,8 @@ describe("DevicesService", () => {
         volume: 50,
         version: "1.2.3",
         charging: true,
+        networkMode: "wifi",
+        wifiRssi: -48,
         lastSeenAt,
         online: true,
       });
@@ -577,8 +579,69 @@ describe("DevicesService", () => {
         battery: 80,
         volume: 50,
         isCharging: true,
+        networkMode: "wifi",
+        wifiRssi: -48,
         lastActiveAt: new Date(lastSeenAt).toISOString(),
       });
+    });
+
+    it("should expose 4G mode with null RSSI", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 100,
+        volume: 75,
+        version: "1.0.4",
+        charging: false,
+        networkMode: "4g",
+        wifiRssi: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.networkMode).toBe("4g");
+      expect(result.wifiRssi).toBeNull();
+    });
+
+    it("should keep last known signal when the device is offline", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 40,
+        volume: 50,
+        version: "1.0.4",
+        charging: false,
+        networkMode: "wifi",
+        wifiRssi: -72,
+        lastSeenAt: Date.now() - 90_000,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.status).toBe("offline");
+      expect(result.networkMode).toBe("wifi");
+      expect(result.wifiRssi).toBe(-72);
+    });
+
+    it("should normalize missing network keys to null (old cache shape)", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 80,
+        volume: 50,
+        version: "1.2.3",
+        charging: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.networkMode).toBeNull();
+      expect(result.wifiRssi).toBeNull();
     });
 
     it("should expose volume so the mini program renders the real device volume", async () => {
@@ -654,6 +717,8 @@ describe("DevicesService", () => {
         battery: null,
         volume: null,
         isCharging: null,
+        networkMode: null,
+        wifiRssi: null,
         lastActiveAt: null,
       });
     });
