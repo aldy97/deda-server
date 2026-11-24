@@ -10,6 +10,7 @@ import {
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
+import type { SafetyHandle } from "@/modules/safety/safety.types";
 
 /**
  * 冒险引擎状态机单测（TDD 先行）
@@ -1450,6 +1451,120 @@ describe("AdventureService", () => {
 
       expect(llm.complete).toHaveBeenCalledTimes(1);
       expect(reply.texts[0]).toBe("哇，你说得真有意思！");
+    });
+
+    describe("with safetyHandle", () => {
+      const makeHandle = (
+        verdictValue: unknown,
+        instruction?: string,
+      ): SafetyHandle & {
+        evaluateIfNeeded: jest.Mock;
+        promptInstruction: jest.Mock;
+      } =>
+        ({
+          evaluateIfNeeded: jest.fn().mockResolvedValue(verdictValue),
+          promptInstruction: jest.fn().mockReturnValue(instruction),
+          finalize: jest.fn(),
+        }) as unknown as SafetyHandle & {
+          evaluateIfNeeded: jest.Mock;
+          promptInstruction: jest.Mock;
+        };
+
+      it("handle 优先于 getSafety，拦截轮打出显式处置", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle({ blocked: true, category: "violence" });
+        const getSafety = jest.fn();
+
+        const reply = await service.handleChildReply(
+          "dev-uuid-1",
+          "我要拿刀伤人",
+          { getSafety, safetyHandle: handle },
+        );
+
+        expect(getSafety).not.toHaveBeenCalled();
+        expect(handle.evaluateIfNeeded).toHaveBeenCalledTimes(1);
+        expect(reply.texts).toEqual([ADVENTURE_UNSAFE_LINE]);
+        expect(reply.safetyDisposition).toBe("canned_block");
+      });
+
+      it("开放提问的谨慎指令来自 handle.promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue({
+          ...baseProgress,
+          status: "awaiting_reply",
+          nextSegmentOrder: 5,
+          waitingSince: new Date(),
+        });
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("二选一 LLM 重试的指令来自 handle.promptInstruction", async () => {
+        configService.get.mockImplementation((key: string) =>
+          key === "ADVENTURE_CHOICE_LLM_ENABLED" ? "true" : undefined,
+        );
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        llm.complete.mockResolvedValueOnce({ text: "0" });
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我要去大树那边", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("首次跑题 redirect 的指令来自 handle.promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("确定性命中不触发评估，也不问 promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle({ blocked: false, category: "safe" });
+
+        const reply = await service.handleChildReply("dev-uuid-1", "森林", {
+          safetyHandle: handle,
+        });
+
+        expect(reply.result).toBe("answered");
+        expect(handle.evaluateIfNeeded).not.toHaveBeenCalled();
+        expect(handle.promptInstruction).not.toHaveBeenCalled();
+      });
     });
   });
 
