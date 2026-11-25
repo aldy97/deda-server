@@ -437,7 +437,10 @@ export class FleetService {
 
   // ── 5. Devices List ───────────────────────────────────────────────────
 
-  async getDevices(query: FleetDevicesQueryDto) {
+  async getDevices(
+    query: FleetDevicesQueryDto,
+    options: { includeTestWhitelist?: boolean } = {},
+  ) {
     const page = query.page ?? 1;
     let pageSize = query.pageSize ?? 20;
     if (pageSize > MAX_PAGE_SIZE) pageSize = MAX_PAGE_SIZE;
@@ -490,7 +493,16 @@ export class FleetService {
       -6,
     );
     const deviceUuids = items.map((d) => d.id);
-    const [presenceRows, messageCounts] = await Promise.all([
+    // 测试白名单是与运行时闸同一口径的 active=true 行；备注原文回传，
+    // 「有资格但没写备注」由调用方补展示文案。
+    const whitelistQuery: Promise<{ deviceId: string; note: string | null }[]> =
+      options.includeTestWhitelist
+        ? this.prisma.deviceTestWhitelist.findMany({
+            where: { deviceId: { in: deviceUuids }, active: true },
+            select: { deviceId: true, note: true },
+          })
+        : Promise.resolve([]);
+    const [presenceRows, messageCounts, whitelistRows] = await Promise.all([
       this.prisma.devicePresenceDaily.findMany({
         where: {
           deviceId: { in: deviceUuids },
@@ -509,6 +521,7 @@ export class FleetService {
         },
         _count: { _all: true },
       }),
+      whitelistQuery,
     ]);
 
     // 构建 presence 映射: deviceId -> Set<date>
@@ -537,6 +550,11 @@ export class FleetService {
     const messageMap = new Map<string, number>();
     for (const m of messageCounts) {
       messageMap.set(m.deviceId, m._count._all);
+    }
+
+    const whitelistNotes = new Map<string, string | null>();
+    for (const row of whitelistRows) {
+      whitelistNotes.set(row.deviceId, row.note);
     }
 
     // 已绑定用户数
@@ -572,6 +590,9 @@ export class FleetService {
         presenceDays7d,
         lastPresenceDate,
         turns7d: messageMap.get(d.id) ?? 0,
+        testWhitelist: whitelistNotes.has(d.id)
+          ? { note: whitelistNotes.get(d.id) ?? null }
+          : null,
       };
     });
 

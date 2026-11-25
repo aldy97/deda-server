@@ -5,6 +5,7 @@ import {
   NotFoundException,
   Param,
   Query,
+  Req,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -15,6 +16,7 @@ import {
 } from "@nestjs/swagger";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
 import { SuperAdminGuard } from "./guards/super-admin.guard";
+import { isSuperAdmin } from "./admin-role";
 import { FleetService } from "./fleet.service";
 import {
   FleetChurnRiskQueryDto,
@@ -57,8 +59,14 @@ export class FleetController {
 
   @Get("devices")
   @ApiOperation({ summary: "设备列表（分页 + 搜索）" })
-  getDevices(@Query() query: FleetDevicesQueryDto) {
-    return this.fleetService.getDevices(query);
+  getDevices(
+    @Query() query: FleetDevicesQueryDto,
+    @Req() req: { user?: { role?: unknown } },
+  ) {
+    return this.fleetService.getDevices(query, {
+      // 白名单备注只给超管：普通 admin 看得到设备，看不到谁在被测试。
+      includeTestWhitelist: isSuperAdmin(req.user),
+    });
   }
 
   @Get("devices/:deviceId")
