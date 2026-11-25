@@ -18,6 +18,14 @@ export interface ConversationMetrics {
  */
 const MINUTES_PER_MESSAGE = 0.5;
 
+/**
+ * 消息条数 → 陪伴时长（分钟）。
+ * 与家长报告共用同一口径，避免设备列表与报告出现两个数字。
+ */
+export function estimateDurationMinutes(turnCount: number): number {
+  return Math.round(turnCount * MINUTES_PER_MESSAGE);
+}
+
 export class ConversationMetricsCalculator implements MetricCalculator<ConversationMetrics> {
   calculate(conversations: ConversationWithDevice[]): ConversationMetrics {
     const now = new Date();

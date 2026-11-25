@@ -99,6 +99,49 @@ describe("Devices ordering (e2e)", () => {
     );
   };
 
+  it("returns todayUsage for the caller's devices", async () => {
+    const spokeAt = new Date();
+    await prisma.message.createMany({
+      data: [
+        {
+          deviceId: deviceAInternalId,
+          turnId: randomUUID(),
+          role: "user",
+          content: "hello",
+          spokeAt,
+        },
+        {
+          deviceId: deviceAInternalId,
+          turnId: randomUUID(),
+          role: "user",
+          content: "again",
+          spokeAt,
+        },
+        {
+          deviceId: deviceAInternalId,
+          turnId: randomUUID(),
+          role: "assistant",
+          content: "hi",
+          spokeAt,
+        },
+      ],
+    });
+
+    const response = await request(app.getHttpServer())
+      .get("/devices")
+      .set("Authorization", `Bearer ${tokenA}`)
+      .expect(200);
+
+    const deviceA = response.body.data.find(
+      (device: { deviceId: string }) => device.deviceId === deviceAId,
+    );
+    expect(deviceA.todayUsage).toMatchObject({
+      durationMinutes: 1,
+      turnCount: 2,
+    });
+    expect(deviceA.todayUsage.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   it("persists a complete order and accepts an idempotent retry", async () => {
     const orderedDeviceIds = [deviceBId, deviceAId];
     const response = await authedPut().send({ orderedDeviceIds }).expect(200);
