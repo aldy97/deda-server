@@ -1,6 +1,7 @@
 import { plainToInstance } from "class-transformer";
 import { FleetController } from "./fleet.controller";
 import { FleetService } from "./fleet.service";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import {
   FleetChurnRiskQueryDto,
   FleetDeviceDetailQueryDto,
@@ -117,5 +118,66 @@ describe("Fleet query DTO 转换（query string → number + 缺省值）", () =
     });
     expect(filled.page).toBe(3);
     expect(filled.pageSize).toBe(500);
+  });
+});
+
+describe("FleetController child-profile 端点", () => {
+  it("getDeviceChildProfile 透传 deviceId，未设置档案时 profile 为 null", async () => {
+    const service = {
+      getDeviceChildProfile: jest.fn().mockResolvedValue({ profile: null }),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    const result = await controller.getDeviceChildProfile("dev-001");
+
+    expect(service.getDeviceChildProfile).toHaveBeenCalledWith("dev-001");
+    expect(result).toEqual({ profile: null });
+  });
+
+  it("getDeviceChildProfile 设备不存在返回 404", async () => {
+    const service = {
+      getDeviceChildProfile: jest.fn().mockResolvedValue(null),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    await expect(
+      controller.getDeviceChildProfile("nonexistent"),
+    ).rejects.toThrow("Device not found");
+    expect(service.getDeviceChildProfile).toHaveBeenCalledWith("nonexistent");
+  });
+
+  it("deleteDeviceChildProfile 透传 deviceId，无档案时 deleted=false", async () => {
+    const service = {
+      deleteDeviceChildProfile: jest.fn().mockResolvedValue({ deleted: false }),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    const result = await controller.deleteDeviceChildProfile("dev-001");
+
+    expect(service.deleteDeviceChildProfile).toHaveBeenCalledWith("dev-001");
+    expect(result).toEqual({ deleted: false });
+  });
+
+  it("deleteDeviceChildProfile 设备不存在返回 404", async () => {
+    const service = {
+      deleteDeviceChildProfile: jest.fn().mockResolvedValue(null),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    await expect(
+      controller.deleteDeviceChildProfile("nonexistent"),
+    ).rejects.toThrow("Device not found");
+    expect(service.deleteDeviceChildProfile).toHaveBeenCalledWith(
+      "nonexistent",
+    );
+  });
+
+  it("deleteDeviceChildProfile 挂 SuperAdminGuard（写闸不可被误摘）", () => {
+    const guards = Reflect.getMetadata(
+      "__guards__",
+      FleetController.prototype.deleteDeviceChildProfile,
+    ) as unknown[];
+
+    expect(guards).toContain(SuperAdminGuard);
   });
 });

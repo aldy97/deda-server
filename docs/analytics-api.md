@@ -532,6 +532,17 @@ GET /analytics/fleet/devices/:deviceId?days=30
     dailyTurns: [{ date, turns }],
     totals: { presenceDays, turns } }
    // days 范围 1–90；404 on missing；boundUsers 不含 PII
+
+GET /analytics/fleet/devices/:deviceId/child-profile
+→ { profile: { name, birthday, englishName, gender } | null }
+   // dashboard 设备详情 drawer 孩子信息 section；档案未设置是合法空态（profile=null，
+   //   与设备 404 区分）；只回展示四字段，不含 userId（PII 最小化）；
+   //   业务 deviceId 精确匹配优先、大小写不敏感兜底（与详情接口同口径）
+
+DELETE /analytics/fleet/devices/:deviceId/child-profile
+→ { deleted: boolean }
+   // 仅 superadmin（SuperAdminGuard）；幂等：无档案 deleted=false；
+   //   deleteMany 免疫并发竞态；404 on missing device
 ```
 
 全局口径：
