@@ -241,6 +241,10 @@ Content-Type: application/json
 | `childProfile` | object \| null | 孩子摘要 |
 | `childProfile.name` | string \| null | 孩子姓名 |
 | `childProfile.englishName` | string \| null | 孩子英文名 |
+| `todayUsage` | object \| null | 今日陪伴摘要；统计失败时为 `null`，旧客户端可忽略。按设备时区（缺失回落 `Asia/Shanghai`）统计自然日 |
+| `todayUsage.date` | string | 设备本地日期 `YYYY-MM-DD` |
+| `todayUsage.durationMinutes` | number | 当日陪伴时长（分钟），与家长报告同一估算口径：`role=user` 消息数 × 0.5 后四舍五入 |
+| `todayUsage.turnCount` | number | 当日孩子发言条数（一条 user 消息 = 一轮） |
 
 ### 3.3 查询设备详情
 
