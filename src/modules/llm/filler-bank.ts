@@ -2,9 +2,12 @@
  * Filler 模板池：生产 filler 的唯一来源。
  *
  * 只承接「孩子在跟我说话」和情绪，不复述孩子说的具体内容。
- * 桶由已算好的 intent、冒险门禁和确定性正则决定；桶内句子由
- * 最近 10 轮过滤 + turnId 哈希轮转决定，任何一步都不调用 LLM。
+ * 动作（停止 / 继续 / 讲故事 / 哄睡 / 共情…）由 filler-act 判定，
+ * 这里只负责按 act 选语言与桶；桶内句子由最近 10 轮过滤 + turnId
+ * 哈希轮转决定，任何一步都不调用 LLM。
  */
+
+import { resolveFillerAct, type FillerAct } from "./filler-act";
 
 export type FillerEmotion = "neutral" | "happy" | "sad" | "angry" | "scared";
 
@@ -25,11 +28,15 @@ export type FillerBucket =
   | "celebrate"
   | "identity"
   | "preference"
+  | "stop"
+  | "continue"
   | "en_neutral"
   | "en_question"
   | "en_story"
   | "en_comfort"
-  | "en_celebrate";
+  | "en_celebrate"
+  | "en_stop"
+  | "en_continue";
 
 export const FILLER_POOLS: Record<FillerBucket, readonly string[]> = {
   neutral: [
@@ -67,21 +74,21 @@ export const FILLER_POOLS: Record<FillerBucket, readonly string[]> = {
     "嗯，我要转转眼珠，好好想一想再答呀……",
   ],
   story: [
-    "好呀，我先把小耳朵准备好，安安静静听你安排呢……",
-    "嗯，我把声音放轻一点，慢慢陪你进故事里呀……",
-    "好，我坐好啦，等你一说开始，我们就出发呀……",
-    "嗯嗯，我准备好了，你一说我们就开始呀……",
-    "我把小毯子盖好，安安静静等你开口呢……",
-    "嗯，我乖乖坐好啦，慢慢听你的安排呀……",
-    "我把灯调得暗一点点，慢慢陪着你呢……",
-    "嗯，我已经准备好啦，你说开始就开始呀……",
-    "好，我把小手放好，安安静静等你讲故事呀……",
-    "嗯，我坐好准备啦，你慢慢说，我认真听呀……",
-    "我把小耳朵竖起来啦，等你的故事呀……",
-    "嗯，我坐得稳稳的，等你带我去故事里呀……",
-    "好呀，我把声音放得轻轻的，慢慢听你说呀……",
-    "嗯，我准备好啦，你什么时候开始都可以呀……",
-    "好，我安安静静坐好，等你讲故事给我听呀……",
+    "好呀，我给你讲一个，你躺好慢慢听呀……",
+    "嗯，故事这就来啦，我们轻轻开始听呀……",
+    "好，我讲你听，你闭上眼睛跟着我走呀……",
+    "我把声音放轻啦，讲一个短短的故事呀……",
+    "好呀，那小耳朵准备好，故事要开始啦……",
+    "嗯，我给你讲个新的，你慢慢听我讲呀……",
+    "好呀，故事来啦，我们安安静静听着呀……",
+    "我把小灯调暗啦，慢慢给你讲个故事呀……",
+    "嗯，你坐好啦，我这就慢慢讲给你听呀……",
+    "好，故事开头啦，你跟着我慢慢往下听呀……",
+    "嗯，我把声音放得软软的，给你讲故事呀……",
+    "好嘞，我给你讲一个暖暖的小故事呀……",
+    "嗯，故事准备好了，你安安静静听着呀……",
+    "好，我慢慢讲，你慢慢听，我们不着急呀……",
+    "好啦，故事这就开始啦，你跟着我走吧……",
   ],
   sleep: [
     "好呀，我把声音放轻一点，慢慢陪着你呀……",
@@ -162,6 +169,40 @@ export const FILLER_POOLS: Record<FillerBucket, readonly string[]> = {
     "你喜欢什么呀，你问我这个，我慢慢想一想呢……",
     "你问我爱吃什么呀，我好好想一想再告诉你呢……",
   ],
+  stop: [
+    "好呀，那我们先不听了，我就在这儿陪着你呀……",
+    "嗯，停下来也没关系，我安安静静陪着你呀……",
+    "好，那我们把声音关小一点，歇一会儿呀……",
+    "嗯，不听了就不听了，我陪着你休息一下呀……",
+    "好呀，我们休息一下，我一直在你旁边呢……",
+    "嗯，那就不听啦，我轻轻陪着你待一会儿呀……",
+    "好，停下来吧，我们安安静静靠一会儿呀……",
+    "嗯，不听也没关系，我就在这儿守着你呀……",
+    "好啦，那我们歇一歇，我慢慢陪着你呢……",
+    "嗯，先不听了，我们一起慢慢松一口气呀……",
+    "好，那就不讲啦，我安安静静陪着你呀……",
+    "嗯，歇一会儿也好，我们慢慢放松一下呀……",
+    "好呀，不听了不听了，我就在这儿陪你呀……",
+    "嗯，那我们先安静下来，我慢慢陪着你呢……",
+    "好，我们先把声音关掉，慢慢歇一会儿呀……",
+  ],
+  continue: [
+    "好呀，我们接着刚才的往下讲，你别着急呀……",
+    "嗯，故事还没完呢，我们慢慢接着讲呀……",
+    "好，接着刚才的往下说，我慢慢讲给你呀……",
+    "嗯，我们继续往下讲，你安安静静听着呀……",
+    "好呀，接下来还有呢，我们接着往下走呀……",
+    "嗯，刚才讲到哪儿啦，我们接着往下说呀……",
+    "好，故事还长着呢，我们慢慢接着听呀……",
+    "嗯，别着急，我们慢慢接着往下讲就好呀……",
+    "来呀，我们接着说，你跟着我慢慢听呀……",
+    "嗯，还没讲完呢，我们一点一点接着来呀……",
+    "好，那我们就接着往下讲，你慢慢听呀……",
+    "嗯，那我们就继续往下讲，慢慢说着呀……",
+    "好呀，接着往下讲啦，你安安静静听呀……",
+    "嗯，我们接着说下去，不急不慢地讲呀……",
+    "好，故事继续啦，我们一起慢慢往下听呀……",
+  ],
   en_neutral: [
     "I am right here, listening to you carefully, keep going!",
     "Hmm, I am listening carefully, tell me a little more!",
@@ -191,18 +232,18 @@ export const FILLER_POOLS: Record<FillerBucket, readonly string[]> = {
     "So, I need a little moment to think!",
   ],
   en_story: [
-    "Okay, I am comfy and ready, take your time!",
-    "Oh, I am all cozy, I cannot wait to listen!",
-    "Hmm, I am ready, whenever you want to start!",
-    "Right, I am sitting still and ready to listen!",
-    "Wow, I am comfy, and I am listening carefully!",
-    "So, I am ready, you can start whenever you like!",
-    "I am cozy and quiet, ready for a story!",
-    "Hey, I am settled in, and I am all ears!",
-    "Well, I am comfy and quiet, ready when you are!",
-    "Now, I am all ready, so take your time!",
-    "Here I am, comfy and ready for a story!",
-    "Just say when, and I am all ready to listen!",
+    "Okay, here comes a story, snuggle in and listen!",
+    "Hmm, I will tell you a story, let us begin!",
+    "Right, a little story is coming, listen closely!",
+    "Oh, I have a story for you, sit comfortably!",
+    "Well, let me tell you a story, here we go!",
+    "Now, I will begin the story, listen carefully!",
+    "Okay, the story starts now, just follow me!",
+    "Oh my, I will speak softly and tell a story!",
+    "Oh, a cozy story is ready, here it comes!",
+    "Right, snuggle up, and I will tell a story!",
+    "So, I will tell you a new story now!",
+    "Here we go, a little story just for you!",
   ],
   en_comfort: [
     "I am right here with you, take your time and tell me.",
@@ -232,24 +273,35 @@ export const FILLER_POOLS: Record<FillerBucket, readonly string[]> = {
     "Here I am, smiling with you, tell me more!",
     "Just so happy for you, keep telling me!",
   ],
+  en_stop: [
+    "Okay, we can stop now, I am right here with you.",
+    "Hmm, we can rest now, I am staying right here.",
+    "Right, no more listening, I am here beside you.",
+    "Oh, we can stop, and I will stay with you.",
+    "Well, we can take a break, I am right here.",
+    "Now, let us stop and rest, I am here with you.",
+    "Alright, we will pause now, I am right beside you.",
+    "Hmm, that is okay, we can rest for a while.",
+    "Oh, no more for now, I will stay right here.",
+    "Right, we can stop here, and I am with you.",
+    "So, let us take a little rest, I am here.",
+    "Here we are, all quiet now, I am with you.",
+  ],
+  en_continue: [
+    "Okay, let us keep going with the story now.",
+    "Hmm, the story is not over, let us continue.",
+    "Right, we will carry on from where we stopped.",
+    "Oh, there is more to come, let us keep listening.",
+    "Well, we can go on, the story is still here.",
+    "Now, let us continue, and I will keep telling.",
+    "Okay, we will go on, just follow my voice.",
+    "Hmm, let us carry on, nice and slow now.",
+    "Oh, the story continues, let us go on now.",
+    "True, we are not done yet, let us continue.",
+    "So, let us keep going, nice and slowly now.",
+    "Here we go again, the story will go on.",
+  ],
 };
-
-const STORY_INTENTS = new Set([
-  "english_story",
-  "idiom_story",
-  "free_story",
-  "adventure_story",
-]);
-
-const COMFORT_ANGRY = /(生气|讨厌)/;
-const COMFORT_SCARED = /(害怕|怕怕|好怕|有点怕|很怕)/;
-const COMFORT_SAD = /(难过|伤心|哭|不开心|孤单|想妈妈|想爸爸|疼|痛|不舒服)/;
-const CELEBRATE = /(开心|高兴|太棒|耶|哈哈|好玩|兴奋)/;
-const QUESTION =
-  /[?？]|吗[。！!…]*$|为什么|怎么|是什么|是谁|哪里|哪儿|多少|几点/;
-const SELF_IDENTITY_QUESTION =
-  /你(叫什么|是谁|是干什么的)|你的名字|who are you|your name/i;
-const SELF_PREFERENCE_QUESTION = /你(最?(喜欢|爱)|喜欢什么|爱吃什么|平时喜欢)/i;
 
 function detectLanguage(text: string): "zh" | "en" {
   const hasCjk = /[\u4e00-\u9fff]/.test(text);
@@ -257,52 +309,50 @@ function detectLanguage(text: string): "zh" | "en" {
   return !hasCjk && hasLatin ? "en" : "zh";
 }
 
-function resolveEmotion(input: {
-  asrText: string;
-  emotion?: FillerEmotion;
-}): FillerEmotion {
-  if (input.emotion) {
-    return input.emotion;
-  }
-  if (COMFORT_ANGRY.test(input.asrText)) return "angry";
-  if (COMFORT_SCARED.test(input.asrText)) return "scared";
-  if (COMFORT_SAD.test(input.asrText)) return "sad";
-  if (CELEBRATE.test(input.asrText)) return "happy";
-  return "neutral";
-}
-
-function resolveBucket(
-  input: {
-    asrText: string;
-    intent?: string | null;
-    adventureDeclined?: boolean;
-  },
-  emotion: FillerEmotion,
-  lang: "zh" | "en",
-): FillerBucket {
-  if (emotion === "sad" || emotion === "angry" || emotion === "scared") {
-    return lang === "en" ? "en_comfort" : "comfort";
-  }
-  if (emotion === "happy") {
-    return lang === "en" ? "en_celebrate" : "celebrate";
-  }
-  if (input.adventureDeclined) {
-    return lang === "en" ? "en_neutral" : "neutral";
-  }
-  const intent = input.intent ?? "";
-  if (intent === "sleep_story") {
-    return lang === "en" ? "en_story" : "sleep";
-  }
-  if (STORY_INTENTS.has(intent)) {
-    return lang === "en" ? "en_story" : "story";
-  }
+function bucketForAct(act: FillerAct, lang: "zh" | "en"): FillerBucket {
   if (lang === "en") {
-    return QUESTION.test(input.asrText) ? "en_question" : "en_neutral";
+    switch (act) {
+      case "stop":
+        return "en_stop";
+      case "continue":
+        return "en_continue";
+      case "story_tell":
+      case "sleep":
+        return "en_story";
+      case "comfort":
+        return "en_comfort";
+      case "celebrate":
+        return "en_celebrate";
+      case "identity":
+      case "preference":
+      case "question":
+        return "en_question";
+      default:
+        return "en_neutral";
+    }
   }
-  if (SELF_IDENTITY_QUESTION.test(input.asrText)) return "identity";
-  if (SELF_PREFERENCE_QUESTION.test(input.asrText)) return "preference";
-  if (QUESTION.test(input.asrText)) return "question";
-  return "neutral";
+  switch (act) {
+    case "stop":
+      return "stop";
+    case "continue":
+      return "continue";
+    case "story_tell":
+      return "story";
+    case "sleep":
+      return "sleep";
+    case "comfort":
+      return "comfort";
+    case "celebrate":
+      return "celebrate";
+    case "identity":
+      return "identity";
+    case "preference":
+      return "preference";
+    case "question":
+      return "question";
+    default:
+      return "neutral";
+  }
 }
 
 export function normalizeFiller(text: string): string {
@@ -358,6 +408,8 @@ function pickFromPool(
 export interface FillerPickInput {
   asrText: string;
   intent?: string | null;
+  /** 会话状态机来源；explicit_exit / continuation 等直接决定动作 */
+  intentSource?: string | null;
   adventureDeclined?: boolean;
   turnId: string;
   recentFillers: string[];
@@ -369,10 +421,11 @@ export function pickFillerLine(input: FillerPickInput): {
   text: string;
   bucket: FillerBucket;
   emotion: FillerEmotion;
+  act: FillerAct;
 } {
   const lang = detectLanguage(input.asrText);
-  const emotion = resolveEmotion(input);
-  const bucket = resolveBucket(input, emotion, lang);
+  const { act, emotion } = resolveFillerAct(input);
+  const bucket = bucketForAct(act, lang);
   return {
     text: pickFromPool(
       FILLER_POOLS[bucket],
@@ -382,6 +435,7 @@ export function pickFillerLine(input: FillerPickInput): {
     ),
     bucket,
     emotion,
+    act,
   };
 }
 

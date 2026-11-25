@@ -520,6 +520,33 @@ describe("LlmService", () => {
       expect(without.content).not.toContain("不要再用相同开头");
     });
 
+    it("stop 承接语只收尾：不提议新内容、不追问", () => {
+      const msg = service.buildFillerHandoffMessage(
+        "好呀，那我们先不听了，我就在这儿陪着你呀……",
+        [],
+        "stop",
+      );
+
+      expect(msg.content).toContain("只做一句温和收尾");
+      expect(msg.content).toContain("不要提议新的故事、儿歌、游戏");
+      expect(msg.content).toContain("不要追问为什么");
+      expect(msg.content).not.toContain("可以最多加一句简单的追问");
+      expect(msg.content).not.toContain("开始故事");
+    });
+
+    it("continue 承接语从断开处继续，不重新开头", () => {
+      const msg = service.buildFillerHandoffMessage(
+        "好，我们接着往下讲呀……",
+        ["公园里最好玩"],
+        "continue",
+      );
+
+      expect(msg.content).toContain("从断开处继续");
+      expect(msg.content).toContain("不要重新开头");
+      expect(msg.content).toContain("「公园里最好玩」");
+      expect(msg.content).not.toContain("可以最多加一句简单的追问");
+    });
+
     it("extractRecentAnswerOpeners 只取最近 5 条 assistant 开场", () => {
       const history = [
         { role: "user" as const, content: "问题不算" },

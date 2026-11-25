@@ -4,6 +4,7 @@ import axios, { AxiosError } from "axios";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import type { FillerAct } from "@/modules/llm/filler-act";
 import {
   RawUsage,
   costMicroCnyOf,
@@ -525,14 +526,40 @@ export class LlmService {
   buildFillerHandoffMessage(
     fillerText: string,
     recentOpeners: string[] = [],
+    act?: FillerAct,
   ): LlmMessage {
     const sanitized = fillerText.replace(/\s+/g, " ").trim().slice(0, 100);
+    const openerList = recentOpeners.map((opener) => `「${opener}」`).join("");
     const openerSection =
       recentOpeners.length > 0
-        ? `\n6. 最近几轮你的开场是：${recentOpeners
-            .map((opener) => `「${opener}」`)
-            .join("")}；不要再用相同开头。`
+        ? `\n6. 最近几轮你的开场是：${openerList}；不要再用相同开头。`
         : "";
+
+    if (act === "stop") {
+      return {
+        role: "system",
+        content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。孩子这一轮要停止，请只做一句温和收尾：
+1. 一句以内，≤20 个中文字或 ≤12 个英文词。
+2. 不要提议新的故事、儿歌、游戏或任何新内容，不要把孩子引向下一步活动。
+3. 不要追问为什么，不要评价孩子，不要用「好问题」「真棒」。
+4. 承接语已经说完了，直接收尾，不要重复或换写它。`,
+      };
+    }
+
+    if (act === "continue") {
+      return {
+        role: "system",
+        content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。孩子要接着听，请从断开处继续：
+1. 第一句直接接上刚才的内容，不要重新开头，不要复述已经播过的句子。
+2. ≤20 个中文字或 ≤12 个英文词。
+3. 不要用「好问题」「让我想想」「你知道吗」开场。${
+          recentOpeners.length > 0
+            ? `\n最近几轮你的开场是：${openerList}；不要再用相同开头。`
+            : ""
+        }`,
+      };
+    }
+
     return {
       role: "system",
       content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。请从它自然接续：

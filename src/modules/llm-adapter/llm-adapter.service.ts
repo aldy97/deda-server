@@ -54,6 +54,7 @@ import {
   type FillerBucket,
   type FillerEmotion,
 } from "@/modules/llm/filler-bank";
+import type { FillerAct } from "@/modules/llm/filler-act";
 import {
   describeError,
   extractHistory,
@@ -797,11 +798,13 @@ export class LlmAdapterService {
     let fillerText = "";
     let fillerBucket: FillerBucket | undefined;
     let fillerEmotion: FillerEmotion | undefined;
+    let fillerAct: FillerAct | undefined;
     if (fillerEnabled) {
       const picked = pickFillerLine({
         asrText,
         recentFillers,
         intent,
+        intentSource: intentDecision.source,
         adventureDeclined,
         turnId,
         emotion: intentDecision.emotion,
@@ -809,6 +812,7 @@ export class LlmAdapterService {
       fillerText = picked.text;
       fillerBucket = picked.bucket;
       fillerEmotion = picked.emotion;
+      fillerAct = picked.act;
       yield fillerText;
     }
 
@@ -855,6 +859,7 @@ export class LlmAdapterService {
         this.llmService.buildFillerHandoffMessage(
           fillerText,
           LlmService.extractRecentAnswerOpeners(history),
+          fillerAct,
         ),
       );
     }
