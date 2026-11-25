@@ -753,3 +753,27 @@ model PromptTemplateVersion {
   @@unique([templateId, revision])
   @@map("prompt_template_versions")
 }
+
+// 展示型 Elly 素材：运营在 dashboard 上传自有图片，小程序按 key 显示、失败回退包内图。
+// 只有展示需求，没有用户上传/头像/签名 URL；manifest 公开读。
+// 每个 key 最多一条 published，由迁移里的 partial unique index 兜底（Prisma 不支持 partial unique）。
+model AppAsset {
+  id          String    @id @default(uuid())
+  key         String
+  version     Int
+  url         String
+  width       Int
+  height      Int
+  mimeType    String
+  bytes       Int
+  note        String?
+  status      String    @default("draft") // draft / published / archived
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+
+  @@unique([key, version])
+  @@index([key, status])
+  @@map("app_assets")
+}

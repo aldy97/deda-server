@@ -22,8 +22,14 @@ services:
       # 旧 inode 会让容器内永久看到空目录（2026-11-08 事故）；挂父目录后子目录
       # 删建对容器透明，仅投递窗口期短暂 404。
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
+      # 展示型 Elly 素材（AppAsset）本地文件卷：staging/prod 共用父目录，子目录各自隔离。
+      - /opt/deda/app-assets:/opt/deda/app-assets
     environment:
       DASHBOARD_DIST_PATH: /opt/deda/dashboard/staging
+      # 展示型 Elly 素材
+      APP_ASSET_LOCAL_DIR: /opt/deda/app-assets/staging
+      APP_ASSET_PUBLIC_BASE_URL: https://staging.valleyletters.com/app-assets/files
+      APP_ASSET_HOSTS: staging.valleyletters.com
       # staging 是内容创作环境，放开写。prod 的 compose 不设这个变量 → 只读（fail-safe），
       # 内容必须在 staging 改好、验证过，再用管理台的导入功能搬过去。
       CONTENT_ADMIN_PROFILE: authoring

@@ -61,6 +61,14 @@ const MUST_FORWARD = [
   "CHARACTER_TIMBRE_JSON",
   "TTS_DEFAULT_VOL",
   "VOICE_CATALOG_JSON",
+  // 展示型 Elly 素材（AppAsset）local 存储与公开访问 URL。compose 白名单里的默认值
+  // 是 staging 口径，prod/staging override 各自覆盖 LOCAL_DIR / PUBLIC_BASE_URL / HOSTS。
+  "APP_ASSET_STORAGE_DRIVER",
+  "APP_ASSET_LOCAL_DIR",
+  "APP_ASSET_PUBLIC_BASE_URL",
+  "APP_ASSET_HOSTS",
+  "APP_ASSET_MAX_BYTES",
+  "APP_ASSET_MAX_DIMENSION",
 ];
 
 /**

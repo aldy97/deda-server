@@ -317,6 +317,14 @@
 - 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
 - 边界：原「子模式模板」归 `conversation_modes.promptTemplate`；该表已随 mode 平级化迁移 `20261113141812_remove_conversation_mode_key` 删除，子模式模板概念一并废弃，可运营编辑的 prompt 文本现在只有 prompt registry 一个入口。儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
 
+## 展示型素材（AppAsset）
+
+- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布版本；小程序按 key 渲染，失败回退包内 fallback。
+- 管理接口：`/analytics/app-assets/*`，仅 superadmin（AnalyticsAuthGuard + SuperAdminGuard）；dashboard 入口在「运维与配置」。
+- 存储：本期 local 驱动，文件经 `GET /app-assets/files/*` 输出；env 见 `docs/deployment.md` 第 8 节。
+- 展示位注册表在 `src/modules/app-assets/app-assets.constants.ts`；初始只有 `diagnostics/remote-probe`。
+- 小程序侧：`miniprogram/utils/app-assets.ts` + `components/elly-image`；真机验证入口为体验版「关于设备」长按版本号进入素材自检页。
+
 ## 联调顺序
 
 1. 对契约：先看 `docs/api.md` 或 Swagger。
