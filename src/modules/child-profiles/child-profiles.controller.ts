@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Patch,
+  Delete,
   Param,
   Body,
   Req,
@@ -43,5 +44,13 @@ export class ChildProfilesController {
       deviceId,
       dto,
     );
+  }
+
+  @Delete("device/:deviceId")
+  async deleteByDevice(
+    @Param("deviceId") deviceId: string,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.childProfilesService.deleteByDevice(req.user.userId, deviceId);
   }
 }

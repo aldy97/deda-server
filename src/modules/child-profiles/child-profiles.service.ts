@@ -49,6 +49,20 @@ export class ChildProfilesService {
   }
 
   /**
+   * 删除指定设备的孩子档案（物理删除，幂等）
+   * 无档案时返回 { deleted: false }，不视为错误
+   */
+  async deleteByDevice(userId: string, deviceId: string) {
+    const binding = await this.ensureDeviceOwnership(userId, deviceId);
+
+    const result = await this.prisma.childProfile.deleteMany({
+      where: { deviceId: binding.device.id },
+    });
+
+    return { deleted: result.count > 0 };
+  }
+
+  /**
    * 校验当前用户是否拥有该设备
    */
   private async ensureDeviceOwnership(userId: string, deviceId: string) {

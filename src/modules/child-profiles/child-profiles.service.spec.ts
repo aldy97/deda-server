@@ -21,6 +21,7 @@ describe("ChildProfilesService", () => {
             childProfile: {
               findUnique: jest.fn(),
               upsert: jest.fn(),
+              deleteMany: jest.fn(),
             },
           },
         },
@@ -210,6 +211,38 @@ describe("ChildProfilesService", () => {
       await expect(
         service.upsertByDevice("user-001", "dev-001", dto),
       ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe("deleteByDevice", () => {
+    it("should delete existing profile and return deleted=true", async () => {
+      prisma.userDeviceBinding.findFirst.mockResolvedValue(mockBinding);
+      prisma.childProfile.deleteMany.mockResolvedValue({ count: 1 });
+
+      const result = await service.deleteByDevice("user-001", "dev-001");
+
+      expect(prisma.childProfile.deleteMany).toHaveBeenCalledWith({
+        where: { deviceId: "device-uuid-001" },
+      });
+      expect(result).toEqual({ deleted: true });
+    });
+
+    it("should return deleted=false when profile does not exist", async () => {
+      prisma.userDeviceBinding.findFirst.mockResolvedValue(mockBinding);
+      prisma.childProfile.deleteMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.deleteByDevice("user-001", "dev-001");
+
+      expect(result).toEqual({ deleted: false });
+    });
+
+    it("should throw ForbiddenException and not delete when user does not own the device", async () => {
+      prisma.userDeviceBinding.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.deleteByDevice("user-001", "dev-001"),
+      ).rejects.toThrow(ForbiddenException);
+      expect(prisma.childProfile.deleteMany).not.toHaveBeenCalled();
     });
   });
 });

@@ -19,6 +19,7 @@ describe("ChildProfilesController", () => {
           useValue: {
             getByDevice: jest.fn(),
             upsertByDevice: jest.fn(),
+            deleteByDevice: jest.fn(),
           },
         },
       ],
@@ -111,6 +112,34 @@ describe("ChildProfilesController", () => {
         dto,
       );
       expect(result).toEqual(expected);
+    });
+  });
+
+  describe("DELETE /child-profiles/device/:deviceId", () => {
+    it("should delete owner info with valid JWT", async () => {
+      service.deleteByDevice.mockResolvedValue({ deleted: true });
+
+      const result = await controller.deleteByDevice(
+        "dev-001",
+        mockReq("user-001"),
+      );
+
+      expect(service.deleteByDevice).toHaveBeenCalledWith(
+        "user-001",
+        "dev-001",
+      );
+      expect(result).toEqual({ deleted: true });
+    });
+
+    it("should return deleted=false when owner info not filled", async () => {
+      service.deleteByDevice.mockResolvedValue({ deleted: false });
+
+      const result = await controller.deleteByDevice(
+        "dev-001",
+        mockReq("user-001"),
+      );
+
+      expect(result).toEqual({ deleted: false });
     });
   });
 });
