@@ -2,7 +2,7 @@
 
 > 文档版本：1.1.0  
 > 适用范围：微信小程序业务接口  
-> 接口总数：35  
+> 接口总数：37
 > 契约依据：当前后端 Controller、DTO、Service 与统一响应实现
 
 ## 1. 通用约定
@@ -98,6 +98,7 @@ Content-Type: application/json
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 | 哄睡配置 | 2 | 查询、部分更新 |
 | 推送订阅 | 1 | 上报订阅消息授权结果 |
+| 展示型素材 | 1 | manifest |
 
 ---
 
@@ -1082,7 +1083,52 @@ Query：
 
 ---
 
-## 11. 小程序接入注意事项
+## 11. 展示型素材（AppAsset）
+
+运营在 dashboard 上传自有图片，小程序按 key 展示；没有用户上传、头像或签名 URL。
+
+### 11.1 获取素材 manifest
+
+- Method：`GET`
+- Path：`/app-assets/manifest`
+- 鉴权：公开（无 Bearer Token）
+- 缓存：响应头带 `Cache-Control: public, max-age=60, stale-while-revalidate=300` 与 `ETag`
+
+响应数据：
+
+```json
+{
+  "version": "2026-11-25T10:00:00.000Z",
+  "assets": {
+    "diagnostics/remote-probe": {
+      "url": "https://staging.valleyletters.com/app-assets/files/diagnostics/remote-probe/v1-a1b2c3.png",
+      "width": 512,
+      "height": 512,
+      "version": 1,
+      "updatedAt": "2026-11-25T09:59:00.000Z"
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| version | string | manifest 版本（当前最大 updatedAt）；无数据时为空字符串 |
+| assets | object | key → 素材；只包含已发布版本，未配置的 key 不出现 |
+| assets[key].url | string | 图片 HTTPS 地址 |
+| assets[key].width / height | number | 图片尺寸 |
+| assets[key].version | number | 同一 key 下的版本号 |
+| assets[key].updatedAt | string | 该版本更新时间（ISO 8601） |
+
+小程序端要求：
+
+- 拉取失败 / key 缺失 / 图片加载失败时回退包内 fallback，不阻塞页面。
+- 远程图片允许 WebP；包内 fallback 不允许 WebP（iOS 本地 webp 不解码）。
+- 图片域名需加入微信后台的 `downloadFile` 合法域名。
+
+---
+
+## 12. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。

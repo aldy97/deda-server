@@ -284,3 +284,36 @@ ECS 2 vCPU / 3623 MiB，staging 与 prod 同机。护栏口径由
 | `/dashboard` 突然 404（ENOENT stat index.html） | 容器内 `ls /opt/deda/dashboard/staging` 为空而宿主机有文件 → 挂载失效（多因 compose 挂了子目录且流水线删建目录）；确认 compose 挂的是父目录后 `up -d --force-recreate app` |
 | env 文件里改了值，容器里却不生效 | `docker/docker-compose.yml` 的 `environment` 是**白名单**，没列进去的键不会进容器且不报错。`docker exec deda-server-prod env \| grep <KEY>` 验证；缺了就补进白名单（口径见 `src/common/workflows/compose-env-gate.spec.ts`） |
 | 容器反复重启、退出码 137、日志里没有 JS 堆溢出 | OOM kill。`docker inspect <容器> -f '{{.State.OOMKilled}} {{.State.ExitCode}}'` 确认；再看 `NODE_OPTIONS` 的 `--max-old-space-size` 是否小于该容器的 memory limit（见 §6.2 第 4 节） |
+
+## 8. 展示型 Elly 素材（app-assets）
+
+运营在 dashboard 上传自有图片，小程序按 key 显示、失败回退包内图；没有用户上传/头像/签名 URL。manifest 公开读（`GET /app-assets/manifest`，无鉴权）。
+
+### 环境变量
+
+| 键 | staging 示例 | prod 示例 | 说明 |
+| --- | --- | --- | --- |
+| `APP_ASSET_STORAGE_DRIVER` | `local` | `local` | 存储驱动，本期只实现 local |
+| `APP_ASSET_LOCAL_DIR` | `/opt/deda/app-assets/staging` | `/opt/deda/app-assets/prod` | 本地文件根目录（启动前自动 mkdir） |
+| `APP_ASSET_PUBLIC_BASE_URL` | `https://staging.valleyletters.com/app-assets/files` | `https://valleyletters.com/app-assets/files` | 公开访问 base URL |
+| `APP_ASSET_HOSTS` | `staging.valleyletters.com` | `valleyletters.com` | URL host 白名单（逗号分隔）；留空回落到 PUBLIC_BASE_URL 的 host |
+| `APP_ASSET_MAX_BYTES` | `2097152` | `2097152` | 单文件上限（默认 2 MiB） |
+| `APP_ASSET_MAX_DIMENSION` | `8000` | `8000` | 宽高上限（默认 8000） |
+
+### 文件与 URL
+
+- 文件路径：`<APP_ASSET_LOCAL_DIR>/<key 分段>/v<version>-<sha256 前16位>.<ext>`；key 每段只允许 `[a-z0-9-]+`。
+- 公开 URL：`${APP_ASSET_PUBLIC_BASE_URL}/${相对路径}`；上传/发布时校验 URL host 在有效白名单（生产禁止 http/IP/端口，非生产允许 localhost）。
+- 静态托管：`AppAssetsFilesController` 把 `APP_ASSET_LOCAL_DIR` 下的文件暴露在 `/app-assets/files/*`（长缓存，内容哈希文件名）；nginx 已把 `/` 反代到 app。
+- nginx 需允许 2MB 上传：仓库内 `nginx/nginx.prod.conf` 已设 `client_max_body_size 4m`，默认 1m 会 413。
+
+### 微信后台
+
+小程序用 `downloadFile` 拉取素材，需要把同一域名加入微信后台的 **downloadFile 合法域名**（request 合法域名与 downloadFile 合法域名是两套白名单）：
+- staging：`https://staging.valleyletters.com`
+- prod：`https://valleyletters.com`
+
+### 部署注意
+
+- 多实例子目录共享卷由部署解决（`/opt/deda/app-assets` 父目录挂载、子目录隔离），不实现对象存储驱动。
+- 新增环境变量必须同步进 `docker/docker-compose.yml` 的 `environment` 白名单（口径见 `src/common/workflows/compose-env-gate.spec.ts`）。

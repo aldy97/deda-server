@@ -20,8 +20,14 @@ services:
       # 必须挂父目录而非 prod 子目录：流水线若删建子目录，bind mount 绑定的
       # 旧 inode 会让容器内永久看到空目录；挂父目录后子目录删建对容器透明。
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
+      # 展示型 Elly 素材（AppAsset）本地文件卷：staging/prod 共用父目录，子目录各自隔离。
+      - /opt/deda/app-assets:/opt/deda/app-assets
     environment:
       DASHBOARD_DIST_PATH: /opt/deda/dashboard/prod
+      # 展示型 Elly 素材
+      APP_ASSET_LOCAL_DIR: /opt/deda/app-assets/prod
+      APP_ASSET_PUBLIC_BASE_URL: https://valleyletters.com/app-assets/files
+      APP_ASSET_HOSTS: valleyletters.com
       # 容器 limit 1536M，堆留 1024M：Node 按宿主内存（3623MiB）推算老生代上限，
       # 不限定就会在 GC 前把容器撑到 limit 被 OOM kill。余量给 Buffer/代码段/ARMS 探针。
       NODE_OPTIONS: --max-old-space-size=1024
