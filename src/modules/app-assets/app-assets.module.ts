@@ -5,6 +5,7 @@ import { AppAssetsFilesController } from "./app-assets-files.controller";
 import { AppAssetsService } from "./app-assets.service";
 import { AppAssetsAdminController } from "./app-assets-admin.controller";
 import { AppAssetsAdminService } from "./app-assets-admin.service";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
 import { AssetStorage } from "./storage/asset-storage";
 import { LocalAssetStorage } from "./storage/local-asset-storage";
 import { AnalyticsAuthGuard } from "../analytics/guards/analytics-auth.guard";
@@ -20,6 +21,7 @@ import { SuperAdminGuard } from "../analytics/guards/super-admin.guard";
   providers: [
     AppAssetsService,
     AppAssetsAdminService,
+    AppAssetSlotsService,
     { provide: AssetStorage, useClass: LocalAssetStorage },
     AnalyticsAuthGuard,
     SuperAdminGuard,

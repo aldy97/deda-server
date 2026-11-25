@@ -2,39 +2,40 @@ import { createHash } from "crypto";
 import { resolve } from "path";
 import { tmpdir } from "os";
 
-/** 展示位注册表：小程序按 key 拉取，失败回退包内图。初始只有探针一项。 */
-export interface AppAssetSlot {
+/**
+ * 展示位注册表的初始种子：迁移只种这一项，业务展示位由 dashboard 创建。
+ * 保留这份常量是为了让 seed、文档和测试有同一个对照。
+ */
+export interface AppAssetSlotSeed {
   key: string;
   label: string;
   page: string;
 }
 
-export const APP_ASSET_SLOTS: AppAssetSlot[] = [
+export const APP_ASSET_SLOT_SEED: AppAssetSlotSeed[] = [
   {
     key: "diagnostics/remote-probe",
     label: "远程素材探针",
-    page: "asset-selftest",
+    page: "diagnostics",
   },
 ];
 
-export const APP_ASSET_SLOT_MAP = new Map(
-  APP_ASSET_SLOTS.map((slot) => [slot.key, slot]),
-);
-
 /** key 的每一段只允许 [a-z0-9-]+；段之间以 / 分隔。 */
-export const APP_ASSET_KEY_SEGMENT_PATTERN = /^[a-z0-9-]+$/;
+export const APP_ASSET_KEY_PATTERN = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
 
-export function isRegisteredAssetKey(key: string): boolean {
-  return APP_ASSET_SLOT_MAP.has(key);
-}
+/** page 是短 code（单段），且必须等于 key 的第一段。 */
+export const APP_ASSET_SLOT_PAGE_PATTERN = /^[a-z0-9-]+$/;
+
+/** suffix 拼在 page 后面，允许一个或多个分段。 */
+export const APP_ASSET_SLOT_SUFFIX_PATTERN = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
+
+export const APP_ASSET_SLOT_MAX_KEY_LENGTH = 64;
+export const APP_ASSET_SLOT_MAX_PAGE_LENGTH = 32;
+export const APP_ASSET_SLOT_MAX_LABEL_LENGTH = 40;
+export const APP_ASSET_SLOT_MAX_NOTE_LENGTH = 200;
 
 export function isValidAssetKey(key: string): boolean {
-  return (
-    key.length > 0 &&
-    key
-      .split("/")
-      .every((segment) => APP_ASSET_KEY_SEGMENT_PATTERN.test(segment))
-  );
+  return key.length > 0 && APP_ASSET_KEY_PATTERN.test(key);
 }
 
 /** 默认值（compose 与代码共享口径）。 */

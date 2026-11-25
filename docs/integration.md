@@ -319,11 +319,12 @@
 
 ## 展示型素材（AppAsset）
 
-- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布版本；小程序按 key 渲染，失败回退包内 fallback。
-- 管理接口：`/analytics/app-assets/*`，仅 superadmin（AnalyticsAuthGuard + SuperAdminGuard）；dashboard 入口在「运维与配置」。
+- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布且展示位启用的 key；小程序按 key 渲染，失败回退包内 fallback。
+- 管理接口：`/analytics/app-assets/*`，仅 superadmin（SuperAdminGuard）；dashboard 入口在「运维与配置 → 图片素材」。
 - 存储：本期 local 驱动，文件经 `GET /app-assets/files/*` 输出；env 见 `docs/deployment.md` 第 8 节。
-- 展示位注册表在 `src/modules/app-assets/app-assets.constants.ts`；初始只有 `diagnostics/remote-probe`。
-- 小程序侧：`miniprogram/utils/app-assets.ts` + `components/elly-image`；真机验证入口为体验版「关于设备」长按版本号进入素材自检页。
+- 展示位注册表在 DB（`app_asset_slots`）：key = `page/suffix`，page 是短 code 且等于 key 第一段；迁移只 seed `diagnostics/remote-probe`，业务展示位由 dashboard 创建（staging / prod 各自维护，不搬运）。
+- 生命周期：新建展示位 → 上传 draft（只新增版本，不覆盖旧版本）→ 发布（旧 published 自动归档，可回滚）→ 下架 → 停用（停用前必须先下架）。**不提供物理删除**，建错的 key 只能永久停用。
+- 小程序侧：`miniprogram/utils/app-assets.ts` + `components/elly-image`；新 key 必须先在小程序 `constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 下发了也不会展示。真机验证入口为体验版「关于设备」长按版本号进入素材自检页。
 
 ## 联调顺序
 

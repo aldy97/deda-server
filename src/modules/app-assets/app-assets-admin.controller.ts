@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -23,8 +24,11 @@ import {
   AppAssetsAdminService,
   type UploadedAssetFile,
 } from "./app-assets-admin.service";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
 import {
   AppAssetVersionsQueryDto,
+  CreateAppAssetSlotDto,
+  UpdateAppAssetSlotDto,
   UploadAppAssetDto,
 } from "./dto/app-assets-admin.dto";
 import { createMemoryStorage } from "./storage/memory-storage";
@@ -38,12 +42,27 @@ interface AppAssetsRequest {
 @UseGuards(SuperAdminGuard)
 @Controller("analytics/app-assets")
 export class AppAssetsAdminController {
-  constructor(private readonly service: AppAssetsAdminService) {}
+  constructor(
+    private readonly service: AppAssetsAdminService,
+    private readonly slots: AppAssetSlotsService,
+  ) {}
 
   @Get("keys")
-  @ApiOperation({ summary: "展示位注册表" })
+  @ApiOperation({ summary: "展示位注册表（含停用项）" })
   keys() {
-    return this.service.keys();
+    return this.slots.listAll();
+  }
+
+  @Post("keys")
+  @ApiOperation({ summary: "新建展示位（key = page/suffix）" })
+  create(@Body() dto: CreateAppAssetSlotDto, @Req() req: AppAssetsRequest) {
+    return this.slots.create(dto, req.user?.username ?? null);
+  }
+
+  @Patch("keys")
+  @ApiOperation({ summary: "编辑展示位标签/备注，或停用（有线上素材时禁止）" })
+  update(@Body() dto: UpdateAppAssetSlotDto, @Req() req: AppAssetsRequest) {
+    return this.slots.update(dto, req.user?.username ?? null);
   }
 
   @Get()

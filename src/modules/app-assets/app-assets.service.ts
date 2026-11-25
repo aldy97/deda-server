@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { isRegisteredAssetKey } from "./app-assets.constants";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
 
 export interface AppAssetsManifestItem {
   url: string;
@@ -17,9 +17,13 @@ export interface AppAssetsManifest {
 
 @Injectable()
 export class AppAssetsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly slots: AppAssetSlotsService,
+  ) {}
 
   async getManifest(): Promise<AppAssetsManifest> {
+    const enabled = await this.slots.enabledKeySet();
     const rows = await this.prisma.appAsset.findMany({
       where: { status: "published" },
       orderBy: [{ key: "asc" }, { version: "desc" }],
@@ -29,8 +33,8 @@ export class AppAssetsService {
     let maxUpdatedAt: Date | null = null;
 
     for (const row of rows) {
-      // 防御：注册表之外的历史/手工数据不对外暴露。
-      if (!isRegisteredAssetKey(row.key)) continue;
+      // 只下发已注册且启用的展示位；停用后小程序回退包内图。
+      if (!enabled.has(row.key)) continue;
       // 每 key 只取最新一条（version 降序后的首条）。
       if (!(row.key in assets)) {
         assets[row.key] = {
