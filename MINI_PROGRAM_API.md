@@ -1125,6 +1125,9 @@ Query：
 - 拉取失败 / key 缺失 / 图片加载失败时回退包内 fallback，不阻塞页面。
 - 远程图片允许 WebP；包内 fallback 不允许 WebP（iOS 本地 webp 不解码）。
 - 图片域名需加入微信后台的 `downloadFile` 合法域名。
+- 展示位注册表在服务端 DB，但小程序侧的 key 仍是编译期常量：新增展示位必须先在
+  `miniprogram/constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 即使下发了该 key 也不会被使用。
+- 停用展示位后该 key 会从 manifest 消失（受 manifest 60s 缓存与小程序 5min 缓存影响），此时回退包内 fallback。
 
 ---
 

@@ -11,15 +11,10 @@ import { AssetStorage } from "./storage/asset-storage";
 import {
   APP_ASSET_MAX_BYTES_DEFAULT,
   APP_ASSET_MAX_DIMENSION_DEFAULT,
-  APP_ASSET_SLOTS,
   detectImageType,
-  isRegisteredAssetKey,
-  type AppAssetSlot,
 } from "./app-assets.constants";
-import type {
-  AppAssetVersionsQueryDto,
-  UploadAppAssetDto,
-} from "./dto/app-assets-admin.dto";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
+import type { UploadAppAssetDto } from "./dto/app-assets-admin.dto";
 
 export interface AppAssetView {
   id: string;
@@ -42,6 +37,8 @@ export interface AppAssetsAdminListItem {
   key: string;
   label: string;
   page: string;
+  enabled: boolean;
+  orphan?: boolean;
   published: AppAssetView | null;
   latestDraft: AppAssetView | null;
   versions: AppAssetView[];
@@ -73,17 +70,22 @@ export function toAppAssetView(row: AppAsset): AppAssetView {
 const prismaCode = (error: unknown): string | undefined =>
   (error as { code?: string } | null)?.code;
 
+interface GroupBase {
+  key: string;
+  label: string;
+  page: string;
+  enabled: boolean;
+  orphan?: boolean;
+}
+
 @Injectable()
 export class AppAssetsAdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: AssetStorage,
     private readonly configService: ConfigService,
+    private readonly slots: AppAssetSlotsService,
   ) {}
-
-  keys(): AppAssetSlot[] {
-    return APP_ASSET_SLOTS;
-  }
 
   async list(): Promise<AppAssetsAdminListItem[]> {
     const rows = await this.prisma.appAsset.findMany();
@@ -94,29 +96,46 @@ export class AppAssetsAdminService {
       byKey.set(row.key, bucket);
     }
 
-    return APP_ASSET_SLOTS.map((slot) => {
-      const versions = (byKey.get(slot.key) ?? []).sort(
-        (a, b) => b.version - a.version,
+    const slots = await this.slots.listAll();
+    const known = new Set(slots.map((slot) => slot.key));
+    const result: AppAssetsAdminListItem[] = slots.map((slot) =>
+      this.buildGroup(
+        {
+          key: slot.key,
+          label: slot.label,
+          page: slot.page,
+          enabled: slot.enabled,
+        },
+        byKey.get(slot.key) ?? [],
+      ),
+    );
+
+    // 注册表里已经没有、但库里仍有历史版本的 key：保留为只读孤儿行，
+    // 避免素材管理页把历史素材“弄丢”。
+    for (const [key, versions] of byKey) {
+      if (known.has(key)) continue;
+      result.push(
+        this.buildGroup(
+          { key, label: key, page: "", enabled: false, orphan: true },
+          versions,
+        ),
       );
-      const published = versions.find((v) => v.status === "published") ?? null;
-      const latestDraft = versions.find((v) => v.status === "draft") ?? null;
-      return {
-        key: slot.key,
-        label: slot.label,
-        page: slot.page,
-        published: published ? toAppAssetView(published) : null,
-        latestDraft: latestDraft ? toAppAssetView(latestDraft) : null,
-        versions: versions.map(toAppAssetView),
-      };
-    });
+    }
+
+    return result;
   }
 
   async versions(key: string): Promise<AppAssetView[]> {
-    this.assertRegisteredKey(key);
     const rows = await this.prisma.appAsset.findMany({
       where: { key },
       orderBy: { version: "desc" },
     });
+    if (rows.length === 0) {
+      const slot = await this.slots.find(key);
+      if (!slot) {
+        throw new BadRequestException(`未知的素材 key：${key}`);
+      }
+    }
     return rows.map(toAppAssetView);
   }
 
@@ -125,7 +144,7 @@ export class AppAssetsAdminService {
     file: UploadedAssetFile | undefined,
     createdBy: string | null,
   ): Promise<AppAssetView> {
-    this.assertRegisteredKey(dto.key);
+    await this.slots.assertEnabled(dto.key);
     if (!file || !file.buffer) {
       throw new BadRequestException("缺少素材文件");
     }
@@ -221,6 +240,25 @@ export class AppAssetsAdminService {
     return toAppAssetView(updated);
   }
 
+  private buildGroup(
+    base: GroupBase,
+    rows: AppAsset[],
+  ): AppAssetsAdminListItem {
+    const versions = [...rows].sort((a, b) => b.version - a.version);
+    const published = versions.find((v) => v.status === "published") ?? null;
+    const latestDraft = versions.find((v) => v.status === "draft") ?? null;
+    return {
+      key: base.key,
+      label: base.label,
+      page: base.page,
+      enabled: base.enabled,
+      ...(base.orphan ? { orphan: true } : {}),
+      published: published ? toAppAssetView(published) : null,
+      latestDraft: latestDraft ? toAppAssetView(latestDraft) : null,
+      versions: versions.map(toAppAssetView),
+    };
+  }
+
   private async nextVersion(key: string): Promise<number> {
     const last = await this.prisma.appAsset.findFirst({
       where: { key },
@@ -244,12 +282,6 @@ export class AppAssetsAdminService {
     return Number.isInteger(parsed) && parsed > 0
       ? parsed
       : APP_ASSET_MAX_DIMENSION_DEFAULT;
-  }
-
-  private assertRegisteredKey(key: string): void {
-    if (!isRegisteredAssetKey(key)) {
-      throw new BadRequestException(`未知的素材 key：${key}`);
-    }
   }
 
   private assertDimensions(width: number, height: number): void {

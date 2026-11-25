@@ -289,6 +289,15 @@ ECS 2 vCPU / 3623 MiB，staging 与 prod 同机。护栏口径由
 
 运营在 dashboard 上传自有图片，小程序按 key 显示、失败回退包内图；没有用户上传/头像/签名 URL。manifest 公开读（`GET /app-assets/manifest`，无鉴权）。
 
+### 展示位注册表
+
+注册表存 DB 表 `app_asset_slots`（key 主键，key = `page/suffix`）。迁移只 seed 内置探针 `diagnostics/remote-probe`，业务展示位由 dashboard「图片素材 → 新建展示位」创建。
+
+- 部署顺序：先 `prisma migrate deploy`（含本表与 seed），再发新代码；新代码依赖该表存在。
+- staging / prod 各自创建业务展示位，不做跨环境搬运。
+- 停用展示位前必须先下架其线上素材（服务端 409）；不提供物理删除，建错的 key 只能永久停用。
+- 新建展示位后，小程序侧必须在 `miniprogram/constants/app-asset-keys.ts` 登记 key 并在目标页面接入，发版后才会展示。
+
 ### 环境变量
 
 | 键 | staging 示例 | prod 示例 | 说明 |

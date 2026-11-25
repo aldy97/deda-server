@@ -741,6 +741,50 @@ body { reason }
 - 外键 `ON DELETE CASCADE`：设备被 wipe 后白名单行一并删除，重新入库必须重新添加。
 - 撤销后再添加是同一行的恢复，不新建第二行；唯一索引只管设备，避免同一设备出现多条 active。
 
+## 图片素材（AppAsset，admin）
+
+> 实现：`src/modules/app-assets/`，管理接口前缀 `/analytics/app-assets/*`，全部要求 superadmin。
+> 公开 manifest `GET /app-assets/manifest` 无鉴权，只返回已发布且展示位启用的 key。
+> 一个展示位同一时刻最多一条 published；发布时旧 published 自动归档（保留历史，可回滚）。
+
+展示位注册表存 DB（`app_asset_slots`），key = `page/suffix`，page 是短 code 且必须等于 key 第一段。
+迁移只 seed 内置探针 `diagnostics/remote-probe`；业务展示位由 dashboard 创建，staging / prod 各自维护，不做跨环境搬运。
+不提供物理删除：建错的 key 只能停用；停用前必须先下架该 key 的线上素材。
+
+```
+GET /analytics/app-assets/keys
+→ [{ key, label, page, note, enabled, createdBy, updatedBy, createdAt, updatedAt }]
+
+POST /analytics/app-assets/keys
+body { page, suffix, label, note? }
+→ slot
+   // key = `${page}/${suffix}`；400 格式非法；409 已存在
+
+PATCH /analytics/app-assets/keys
+body { key, label?, note?, enabled? }
+→ slot
+   // 404 不存在；400 空更新；409 enabled=false 但仍有 published（先下架）
+   // note 传空串清除；key / page 创建后不可改
+
+GET /analytics/app-assets
+→ [{ key, label, page, enabled, orphan?, published, latestDraft, versions }]
+   // 注册表外的历史 key 以 orphan=true 追加，只读
+
+GET /analytics/app-assets/versions?key=
+→ [AppAsset]（version 降序）
+
+POST /analytics/app-assets/upload   (multipart: key/file/width/height/note?)
+→ draft AppAsset
+   // key 必须已注册且启用；文件只认 PNG/JPEG/WebP，≤2MiB
+
+POST /analytics/app-assets/:id/publish → published AppAsset
+POST /analytics/app-assets/:id/archive → archived AppAsset
+```
+
+- 版本号按同 key 递增；上传只新增 draft，不覆盖旧版本。
+- manifest 的 `assets` 形状不变；停用展示位后该 key 从 manifest 消失，小程序回退包内图。
+- 新增 key 还需在小程序 `miniprogram/constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 下发了也不会被使用。
+
 ## 冒险内容管理（Adventure Studio）
 
 > 例外：本节大量为写操作（POST），不适用「分析类接口均为 GET」的约定。

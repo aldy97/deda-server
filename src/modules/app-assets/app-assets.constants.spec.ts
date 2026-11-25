@@ -1,8 +1,11 @@
 import {
-  APP_ASSET_SLOTS,
+  APP_ASSET_KEY_PATTERN,
+  APP_ASSET_SLOT_MAX_KEY_LENGTH,
+  APP_ASSET_SLOT_PAGE_PATTERN,
+  APP_ASSET_SLOT_SEED,
+  APP_ASSET_SLOT_SUFFIX_PATTERN,
   detectImageType,
   isIpAddress,
-  isRegisteredAssetKey,
   isValidAssetKey,
   resolveAllowedHosts,
   resolveAssetLocalDir,
@@ -19,19 +22,24 @@ const webp = Buffer.concat([
 ]);
 
 describe("app-assets constants", () => {
-  it("注册表初始只有 remote-probe 一项", () => {
-    expect(APP_ASSET_SLOTS).toEqual([
+  it("种子只有 remote-probe 一项，page 是短 code", () => {
+    expect(APP_ASSET_SLOT_SEED).toEqual([
       {
         key: "diagnostics/remote-probe",
         label: "远程素材探针",
-        page: "asset-selftest",
+        page: "diagnostics",
       },
     ]);
   });
 
-  it("isRegisteredAssetKey 只认注册表内的 key", () => {
-    expect(isRegisteredAssetKey("diagnostics/remote-probe")).toBe(true);
-    expect(isRegisteredAssetKey("diagnostics/unknown")).toBe(false);
+  it("展示位校验正则与 key 长度上限", () => {
+    expect(APP_ASSET_SLOT_PAGE_PATTERN.test("device-home")).toBe(true);
+    expect(APP_ASSET_SLOT_PAGE_PATTERN.test("device/home")).toBe(false);
+    expect(APP_ASSET_SLOT_SUFFIX_PATTERN.test("section/hero")).toBe(true);
+    expect(APP_ASSET_SLOT_SUFFIX_PATTERN.test("section/")).toBe(false);
+    expect(APP_ASSET_KEY_PATTERN.test("device-home/section-hero")).toBe(true);
+    expect(APP_ASSET_KEY_PATTERN.test("Device-Home/hero")).toBe(false);
+    expect(APP_ASSET_SLOT_MAX_KEY_LENGTH).toBe(64);
   });
 
   it("isValidAssetKey 校验分段", () => {

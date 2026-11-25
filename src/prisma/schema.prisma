@@ -777,3 +777,20 @@ model AppAsset {
   @@index([key, status])
   @@map("app_assets")
 }
+
+// 展示型素材的展示位注册表：key = page/suffix，小程序按 key 取 manifest。
+model AppAssetSlot {
+  key       String   @id
+  label     String
+  page      String
+  note      String?
+  enabled   Boolean  @default(true)
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+  @@index([page])
+  @@map("app_asset_slots")
+}

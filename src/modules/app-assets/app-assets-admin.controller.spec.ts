@@ -1,30 +1,40 @@
 import { AppAssetsAdminController } from "./app-assets-admin.controller";
 import { AppAssetsAdminService } from "./app-assets-admin.service";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
 import { AnalyticsAuthGuard } from "../analytics/guards/analytics-auth.guard";
 import { SuperAdminGuard } from "../analytics/guards/super-admin.guard";
 
 describe("AppAssetsAdminController", () => {
   let controller: AppAssetsAdminController;
   let service: {
-    keys: jest.Mock;
     list: jest.Mock;
     versions: jest.Mock;
     upload: jest.Mock;
     publish: jest.Mock;
     archive: jest.Mock;
   };
+  let slots: {
+    listAll: jest.Mock;
+    create: jest.Mock;
+    update: jest.Mock;
+  };
 
   beforeEach(() => {
     service = {
-      keys: jest.fn().mockReturnValue([]),
       list: jest.fn().mockResolvedValue([]),
       versions: jest.fn().mockResolvedValue([]),
       upload: jest.fn().mockResolvedValue({}),
       publish: jest.fn().mockResolvedValue({}),
       archive: jest.fn().mockResolvedValue({}),
     };
+    slots = {
+      listAll: jest.fn().mockResolvedValue([]),
+      create: jest.fn().mockResolvedValue({}),
+      update: jest.fn().mockResolvedValue({}),
+    };
     controller = new AppAssetsAdminController(
       service as unknown as AppAssetsAdminService,
+      slots as unknown as AppAssetSlotsService,
     );
   });
 
@@ -37,14 +47,51 @@ describe("AppAssetsAdminController", () => {
     expect(guards).not.toContain(AnalyticsAuthGuard);
   });
 
-  it("keys/list/versions 委托 service", async () => {
+  it("keys 走 slots.listAll，list/versions 委托 service", async () => {
     await controller.keys();
     await controller.list();
     await controller.versions({ key: "diagnostics/remote-probe" });
 
-    expect(service.keys).toHaveBeenCalled();
+    expect(slots.listAll).toHaveBeenCalled();
     expect(service.list).toHaveBeenCalled();
     expect(service.versions).toHaveBeenCalledWith("diagnostics/remote-probe");
+  });
+
+  it("create/update 委托 slots 并透传 username", async () => {
+    await controller.create(
+      {
+        page: "device-home",
+        suffix: "hero",
+        label: "首页主视觉",
+      },
+      { user: { username: "superadmin" } } as never,
+    );
+    await controller.update({ key: "device-home/hero", label: "新标签" }, {
+      user: { username: "superadmin" },
+    } as never);
+
+    expect(slots.create).toHaveBeenCalledWith(
+      { page: "device-home", suffix: "hero", label: "首页主视觉" },
+      "superadmin",
+    );
+    expect(slots.update).toHaveBeenCalledWith(
+      { key: "device-home/hero", label: "新标签" },
+      "superadmin",
+    );
+  });
+
+  it("create/update 无 user 时操作人为 null", async () => {
+    await controller.create(
+      { page: "device-home", suffix: "hero", label: "首页主视觉" },
+      {} as never,
+    );
+    await controller.update(
+      { key: "device-home/hero", label: "新标签" },
+      {} as never,
+    );
+
+    expect(slots.create).toHaveBeenLastCalledWith(expect.anything(), null);
+    expect(slots.update).toHaveBeenLastCalledWith(expect.anything(), null);
   });
 
   it("upload 委托 service 并透传 username", async () => {

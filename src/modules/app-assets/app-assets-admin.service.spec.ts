@@ -10,6 +10,7 @@ import {
   AppAssetsAdminService,
   toAppAssetView,
 } from "./app-assets-admin.service";
+import { AppAssetSlotsService } from "./app-asset-slots.service";
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
 
@@ -50,10 +51,23 @@ function makeRow(overrides: Partial<FakeAppAsset> = {}): FakeAppAsset {
   };
 }
 
+const SLOT_VIEW = {
+  key: "diagnostics/remote-probe",
+  label: "远程素材探针",
+  page: "diagnostics",
+  note: null,
+  enabled: true,
+  createdBy: null,
+  updatedBy: null,
+  createdAt: "2026-11-25T00:00:00.000Z",
+  updatedAt: "2026-11-25T00:00:00.000Z",
+};
+
 function makeService(overrides: {
   prisma?: Record<string, unknown>;
   storage?: Record<string, unknown>;
   config?: Record<string, string | undefined>;
+  slots?: Record<string, unknown>;
 }) {
   const prisma = {
     appAsset: {
@@ -76,29 +90,26 @@ function makeService(overrides: {
   const config = {
     get: jest.fn((key: string) => (overrides.config ?? {})[key]),
   };
+  const slots = {
+    listAll: jest.fn().mockResolvedValue([]),
+    find: jest.fn().mockResolvedValue(null),
+    assertEnabled: jest.fn().mockResolvedValue(SLOT_VIEW),
+    ...(overrides.slots ?? {}),
+  };
 
   const service = new AppAssetsAdminService(
     prisma as unknown as PrismaService,
     storage as unknown as AssetStorage,
     config as unknown as ConfigService,
+    slots as unknown as AppAssetSlotsService,
   );
-  return { service, prisma, storage, config };
+  return { service, prisma, storage, config, slots };
 }
 
 describe("AppAssetsAdminService", () => {
-  it("keys 返回注册表", () => {
-    const { service } = makeService({});
-    expect(service.keys()).toEqual([
-      {
-        key: "diagnostics/remote-probe",
-        label: "远程素材探针",
-        page: "asset-selftest",
-      },
-    ]);
-  });
-
-  it("list 按 key 聚合并降序", async () => {
-    const { service, prisma } = makeService({});
+  it("list 按 key 聚合并降序，带 enabled", async () => {
+    const { service, prisma, slots } = makeService({});
+    slots.listAll.mockResolvedValue([SLOT_VIEW]);
     prisma.appAsset.findMany.mockResolvedValue([
       makeRow({ version: 2, status: "draft" }),
       makeRow({
@@ -111,24 +122,53 @@ describe("AppAssetsAdminService", () => {
     const list = await service.list();
     expect(list).toHaveLength(1);
     expect(list[0].key).toBe("diagnostics/remote-probe");
+    expect(list[0].enabled).toBe(true);
+    expect(list[0].orphan).toBeUndefined();
     expect(list[0].versions.map((v) => v.version)).toEqual([2, 1]);
     expect(list[0].published?.version).toBe(1);
     expect(list[0].latestDraft?.version).toBe(2);
   });
 
-  it("versions 降序且拒绝未注册 key", async () => {
+  it("list 把注册表外但库里有版本的 key 作为 orphan 追加", async () => {
     const { service, prisma } = makeService({});
     prisma.appAsset.findMany.mockResolvedValue([
-      makeRow({ version: 2 }),
-      makeRow({ version: 1 }),
+      makeRow({ key: "legacy/old", version: 3, status: "published" }),
     ]);
+
+    const list = await service.list();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      key: "legacy/old",
+      label: "legacy/old",
+      page: "",
+      enabled: false,
+      orphan: true,
+    });
+    expect(list[0].versions[0].version).toBe(3);
+  });
+
+  it("versions 降序；注册表外但仍有版本时放行，均无则 400", async () => {
+    const { service, prisma, slots } = makeService({});
+    prisma.appAsset.findMany.mockResolvedValueOnce([]);
 
     await expect(service.versions("diagnostics/unknown")).rejects.toThrow(
       BadRequestException,
     );
 
+    prisma.appAsset.findMany.mockResolvedValueOnce([
+      makeRow({ key: "legacy/old", version: 2 }),
+      makeRow({ key: "legacy/old", version: 1 }),
+    ]);
+    const orphan = await service.versions("legacy/old");
+    expect(orphan.map((r) => r.version)).toEqual([2, 1]);
+
+    slots.find.mockResolvedValue(SLOT_VIEW);
+    prisma.appAsset.findMany.mockResolvedValueOnce([
+      makeRow({ version: 2 }),
+      makeRow({ version: 1 }),
+    ]);
     const rows = await service.versions("diagnostics/remote-probe");
-    expect(prisma.appAsset.findMany).toHaveBeenCalledWith({
+    expect(prisma.appAsset.findMany).toHaveBeenLastCalledWith({
       where: { key: "diagnostics/remote-probe" },
       orderBy: { version: "desc" },
     });
@@ -136,7 +176,7 @@ describe("AppAssetsAdminService", () => {
   });
 
   it("upload 创建 draft 并返回 AppAsset 视图", async () => {
-    const { service, prisma, storage } = makeService({});
+    const { service, prisma, storage, slots } = makeService({});
     prisma.appAsset.findFirst.mockResolvedValue({ version: 3 });
     storage.save.mockResolvedValue({
       url: "https://staging.valleyletters.com/app-assets/files/diagnostics/remote-probe/v4-a.png",
@@ -157,6 +197,9 @@ describe("AppAssetsAdminService", () => {
       "superadmin",
     );
 
+    expect(slots.assertEnabled).toHaveBeenCalledWith(
+      "diagnostics/remote-probe",
+    );
     expect(storage.save).toHaveBeenCalledWith({
       key: "diagnostics/remote-probe",
       version: 4,
@@ -220,8 +263,11 @@ describe("AppAssetsAdminService", () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  it("upload 拒绝未注册 key 与缺失文件", async () => {
-    const { service } = makeService({});
+  it("upload 拒绝未注册/停用 key 与缺失文件", async () => {
+    const { service, slots } = makeService({});
+    slots.assertEnabled.mockRejectedValueOnce(
+      new BadRequestException("未知的素材 key：unknown/key"),
+    );
     await expect(
       service.upload(
         { key: "unknown/key", width: 512, height: 512 },
@@ -229,6 +275,18 @@ describe("AppAssetsAdminService", () => {
         null,
       ),
     ).rejects.toThrow(BadRequestException);
+
+    slots.assertEnabled.mockRejectedValueOnce(
+      new BadRequestException("展示位已停用"),
+    );
+    await expect(
+      service.upload(
+        { key: "diagnostics/remote-probe", width: 512, height: 512 },
+        { buffer: png },
+        null,
+      ),
+    ).rejects.toThrow(/停用/);
+
     await expect(
       service.upload(
         { key: "diagnostics/remote-probe", width: 512, height: 512 },
