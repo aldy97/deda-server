@@ -52,15 +52,47 @@ describe("FleetController", () => {
     expect(service.getChurnRisk).toHaveBeenCalledWith(query);
   });
 
-  it("getDevices 透传 query 给 service", async () => {
+  it("getDevices 透传 query 给 service（超管才要求带白名单备注）", async () => {
     const service = {
       getDevices: jest.fn().mockResolvedValue({}),
     } as unknown as FleetService;
     const controller = new FleetController(service);
 
     const query = { page: 1, pageSize: 20 };
-    await controller.getDevices(query);
-    expect(service.getDevices).toHaveBeenCalledWith(query);
+    await controller.getDevices(query, {
+      user: { role: "superadmin" },
+    });
+    expect(service.getDevices).toHaveBeenCalledWith(query, {
+      includeTestWhitelist: true,
+    });
+  });
+
+  it("getDevices：普通 admin 不要求白名单备注", async () => {
+    const service = {
+      getDevices: jest.fn().mockResolvedValue({}),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    const query = { page: 1, pageSize: 20 };
+    await controller.getDevices(query, {
+      user: { role: "admin" },
+    });
+    expect(service.getDevices).toHaveBeenCalledWith(query, {
+      includeTestWhitelist: false,
+    });
+  });
+
+  it("getDevices：token 里没有 role 时按普通 admin 处理（fail-closed）", async () => {
+    const service = {
+      getDevices: jest.fn().mockResolvedValue({}),
+    } as unknown as FleetService;
+    const controller = new FleetController(service);
+
+    await controller.getDevices({ page: 1, pageSize: 20 }, {});
+    expect(service.getDevices).toHaveBeenCalledWith(
+      { page: 1, pageSize: 20 },
+      { includeTestWhitelist: false },
+    );
   });
 
   it("getDeviceDetail 透传 deviceId 和 query 给 service，不存在返回 404", async () => {

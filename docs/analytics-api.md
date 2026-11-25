@@ -521,8 +521,11 @@ GET /analytics/fleet/devices?keyword=&page=1&pageSize=20
 → { page, pageSize, total,
     items: [{ deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
               macAddress, createdAt, boundUsers, realtime, presenceDays7d,
-              lastPresenceDate, turns7d }] }
+              lastPresenceDate, turns7d, testWhitelist }] }
    // keyword ≤ 50 字符；pageSize 最大 100 静默 clamp；createdAt 降序
+   // testWhitelist: { note } | null —— 仅 superadmin 拿到真实值（只认 active=true 的在册行），
+   //   普通 admin / 老 token 恒为 null（不把测试白名单扩散给普通 admin）；
+   //   note 为 null 或空串表示「在白名单但没写备注」，展示文案由前端决定
 
 GET /analytics/fleet/devices/:deviceId?days=30
 → { deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,

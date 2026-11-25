@@ -171,13 +171,19 @@ Query：
       },
       "presenceDays7d": 5,
       "lastPresenceDate": "2026-11-11",
-      "turns7d": 12
+      "turns7d": 12,
+      "testWhitelist": { "note": "3 号样机-熊枫" }
     }
   ]
 }
 ```
 
 - 排序固定 `createdAt` 降序（不接受 sort 参数）。
+- `testWhitelist`：测试设备白名单（`device_test_whitelist`）里的在册关系，**只认 `active = true`**。
+  值为 `{ note }`（`note` 可为 `null`，表示有资格但没写备注）；不在册为 `null`。
+  **仅 `role === superadmin` 的下发真实值**——白名单是超管专属资源，普通 admin 与老 token
+  （无 role 字段）一律拿到 `null`，等价于「不在册」。前端据 `null` / 非 `null` 决定是否渲染标签，
+  不需要再自行判角色。
 - `realtime` 判定：`DeviceLinkService.getStatusBatch` 返回的条目若 `lastSeenAt === null` 视为「无 Redis 记录」→ `realtime: null`；整个批量查询抛错时所有 item 的 `realtime` 都为 `null`（不得因此 500）。
 - MAC 口径：`getStatusBatch` 返回的 Map 以**归一化大写 MAC**（去分隔符）为 key，而 Prisma 侧 `macAddress` / `deviceId` 存的是小写。
   查询时传库里的原值 `device.macAddress ?? device.deviceId`，但**读 Map 必须先做同样的归一化**（见 `fleet.service.ts` 的 `normalizeMac`），否则全量 miss、`realtime` 恒为 `null`。

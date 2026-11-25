@@ -46,9 +46,11 @@ function buildPrisma(data: {
   messages: Row[];
   presence?: Row[];
   childProfiles?: Row[];
+  whitelists?: Row[];
 }) {
   const presence = data.presence ?? [];
   const childProfiles = data.childProfiles ?? [];
+  const whitelists = data.whitelists ?? [];
   return {
     device: {
       count: jest.fn(({ where }: { where?: Record<string, unknown> } = {}) => {
@@ -514,6 +516,29 @@ function buildPrisma(data: {
           count: childProfiles.filter((c) => c.deviceId === where?.deviceId)
             .length,
         }),
+      ),
+    },
+    deviceTestWhitelist: {
+      // 只认 active=true（与运行时闸同口径）；select 只回 deviceId / note
+      findMany: jest.fn(
+        ({
+          where,
+          select,
+        }: {
+          where?: { deviceId?: { in?: string[] } };
+          select?: Record<string, true>;
+        } = {}) => {
+          const ids = where?.deviceId?.in;
+          return whitelists
+            .filter((w) => w.active === true)
+            .filter((w) => !ids || ids.includes(w.deviceId as string))
+            .map((w) => {
+              if (!select) return w;
+              return Object.fromEntries(
+                Object.keys(select).map((key) => [key, w[key]]),
+              );
+            });
+        },
       ),
     },
   };
@@ -1263,6 +1288,82 @@ describe("FleetService.getDevices", () => {
     expect(result.page).toBe(1);
     expect(result.pageSize).toBe(20);
     expect(result.total).toBe(1);
+  });
+
+  it("超管视角：在册设备带 testWhitelist 备注，备注为空回 null，已撤销不算在册", async () => {
+    const prisma = buildPrisma({
+      devices: [
+        d("aa0000000001", { createdAt: spokeAtOn("2026-11-03") }),
+        d("aa0000000002", { createdAt: spokeAtOn("2026-11-02") }),
+        d("aa0000000003", { createdAt: spokeAtOn("2026-11-01") }),
+      ],
+      bindings: [],
+      messages: [],
+      whitelists: [
+        { deviceId: "aa0000000001", active: true, note: "3 号样机-熊枫" },
+        { deviceId: "aa0000000002", active: true, note: null },
+        { deviceId: "aa0000000003", active: false, note: "已收回" },
+      ],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getDevices(
+      { page: 1, pageSize: 20 },
+      { includeTestWhitelist: true },
+    );
+
+    expect(result.items[0].deviceId).toBe("aa0000000001");
+    expect(result.items[0].testWhitelist).toEqual({
+      note: "3 号样机-熊枫",
+    });
+    expect(result.items[1].testWhitelist).toEqual({ note: null });
+    expect(result.items[2].testWhitelist).toBeNull();
+    expect(prisma.deviceTestWhitelist.findMany).toHaveBeenCalledWith({
+      where: {
+        deviceId: {
+          in: ["aa0000000001", "aa0000000002", "aa0000000003"],
+        },
+        active: true,
+      },
+      select: { deviceId: true, note: true },
+    });
+  });
+
+  it("非超管视角：不查白名单，testWhitelist 恒为 null（不泄给普通 admin）", async () => {
+    const prisma = buildPrisma({
+      devices: [d("aa0000000001")],
+      bindings: [],
+      messages: [],
+      whitelists: [
+        { deviceId: "aa0000000001", active: true, note: "3 号样机-熊枫" },
+      ],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getDevices(
+      { page: 1, pageSize: 20 },
+      { includeTestWhitelist: false },
+    );
+
+    expect(result.items[0].testWhitelist).toBeNull();
+    expect(prisma.deviceTestWhitelist.findMany).not.toHaveBeenCalled();
+  });
+
+  it("调用方不传 options 时按非超管处理", async () => {
+    const prisma = buildPrisma({
+      devices: [d("aa0000000001")],
+      bindings: [],
+      messages: [],
+      whitelists: [
+        { deviceId: "aa0000000001", active: true, note: "3 号样机-熊枫" },
+      ],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getDevices({ page: 1, pageSize: 20 });
+
+    expect(result.items[0].testWhitelist).toBeNull();
+    expect(prisma.deviceTestWhitelist.findMany).not.toHaveBeenCalled();
   });
 
   it("getStatusBatch 抛出非 Error 值时 realtime 为 null 且不抛", async () => {
