@@ -16,7 +16,7 @@ import {
   RollbackPromptDto,
   SavePromptDraftDto,
 } from "./dto/prompt-admin.dto";
-import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { PromptAdminService, type PromptAuthor } from "./prompt-admin.service";
 
 /** analytics-jwt 策略挂在 req.user 上的载荷（与 analytics-auth.controller 同口径） */
@@ -39,7 +39,7 @@ function toAuthor(req: AnalyticsRequest): PromptAuthor {
  */
 @ApiTags("analytics-prompts")
 @ApiBearerAuth()
-@UseGuards(AnalyticsAuthGuard)
+@UseGuards(SuperAdminGuard)
 @Controller("analytics/prompts")
 export class PromptAdminController {
   constructor(private readonly promptAdmin: PromptAdminService) {}

@@ -8,7 +8,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { DeviceLinkService } from "../device-link/device-link.service";
-import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 
 /**
  * Dashboard 设备运维接口（管理员）
@@ -22,7 +22,7 @@ import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
  */
 @ApiTags("analytics-devices")
 @ApiBearerAuth()
-@UseGuards(AnalyticsAuthGuard)
+@UseGuards(SuperAdminGuard)
 @Controller("analytics/devices")
 export class DevicesAdminController {
   constructor(

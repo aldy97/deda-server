@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { shouldPersistAsrText } from "@/modules/safety/safety-policy";
 import {
   ASR_TEXT_MAX_LENGTH,
   DEFAULT_TURN_CHANNEL,
@@ -17,8 +18,9 @@ import {
  * 三条硬约束：
  * 1. fire-and-forget：不 await、异常只 warn。判定审计永远不能阻塞或打断对话，
  *    口径与 llm.service 的用量落库一致。
- * 2. PII 纪律：asrText 是儿童语音转写，只在「拦了」或「判成非 safe 类别」时落库，
- *    供人工复核；任何日志（含落库失败的 warn）都不得携带。
+ * 2. PII 纪律：asrText 是儿童语音转写，只在「拦了」「判成非 safe 类别」
+ *    或「实际触发了安全话术」时落库，供人工复核；任何日志（含落库失败的 warn）
+ *    都不得携带。
  * 3. upsert on turnId 幂等：主模型重试同一轮时覆写为最后一次结论，不产生第二行，
  *    否则拦截率与 fallback 率的分母会被重试灌水。
  */
@@ -48,7 +50,7 @@ export class TurnDecisionRecorder {
       safetyMatched: safety?.matched ?? null,
       intent: entry.intent ?? null,
       intentSource: entry.intentSource ?? null,
-      asrText: this.storableAsrText(entry, safetyBlocked, safetyCategory),
+      asrText: this.storableAsrText(entry),
     };
 
     this.prisma.turnDecisionLog
@@ -70,17 +72,14 @@ export class TurnDecisionRecorder {
 
   /**
    * 只有需要人工复核的轮次才留原文：被拦截，或被判成 safe 以外的类别
-   * （含 emotional_harm——它不拦截但会注入共情引导，属行为改变点，要看模型判得准不准）。
-   * 判 safe、标签非法、模型异常、未评估这几类放行轮次不留原文，正常流量不积累儿童语料。
+   * （含 emotional_harm——它不拦截但会注入共情引导，属行为改变点，要看模型判得准不准），
+   * 或本轮实际触发了安全话术（代码固定话术 / 模型回抄 / 仅注入谨慎指令）。
+   * 最后一条是冒险 fail-open 的补漏：L2 没给出结论，但代码已经用谨慎指令介入，
+   * 这类轮次必须可复核。判 safe、未触发任何安全话术的 fail-open/未评估轮次不留原文。
    */
-  private storableAsrText(
-    entry: TurnDecisionRecord,
-    safetyBlocked: boolean,
-    safetyCategory: string | null,
-  ): string | null {
-    const reviewable =
-      safetyBlocked || (safetyCategory !== null && safetyCategory !== "safe");
-    if (!reviewable || !entry.asrText) return null;
+  private storableAsrText(entry: TurnDecisionRecord): string | null {
+    if (!shouldPersistAsrText(entry.safety, entry.safetyReply)) return null;
+    if (!entry.asrText) return null;
     return entry.asrText.slice(0, ASR_TEXT_MAX_LENGTH);
   }
 }

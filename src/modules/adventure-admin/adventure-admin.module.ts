@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
+import { DeviceTestAccessModule } from "@/modules/device-test-access/device-test-access.module";
 import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureAdminController } from "./adventure-admin.controller";
 import { AdventureAuditService } from "./adventure-audit.service";
@@ -9,6 +10,7 @@ import { AdventureScriptImportService } from "./adventure-script-import.service"
 import { AdventureTestAssignService } from "./adventure-test-assign.service";
 import { AdventureTransferService } from "./adventure-transfer.service";
 import { ContentAdminGuard } from "./guards/content-admin.guard";
+import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
 
 /**
  * 冒险内容管理台模块。
@@ -30,10 +32,11 @@ import { ContentAdminGuard } from "./guards/content-admin.guard";
  * PrismaModule / RedisModule / ConfigModule 都是 @Global，无需在此重复导入。
  */
 @Module({
-  imports: [AdventureModule, LlmModule],
+  imports: [AdventureModule, DeviceTestAccessModule, LlmModule],
   controllers: [AdventureAdminController],
   providers: [
     ContentAdminGuard,
+    SuperAdminGuard,
     AdventureAuditService,
     AdventureContentQueryService,
     AdventureContentService,

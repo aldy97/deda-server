@@ -2,6 +2,7 @@ import { Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { scryptSync, timingSafeEqual } from "crypto";
+import { normalizeAdminRole } from "./admin-role";
 
 /**
  * 管理员 JWT 签发服务的注入 token。
@@ -20,6 +21,11 @@ interface AdminAccount {
    * 内容创作者需要显式加上 "adventure-content" 才能进冒险内容管理台。
    */
   scopes?: string[];
+  /**
+   * 管理员角色。缺省 admin（只能看报表）；只有 superadmin 能碰运维组
+   * （模型监控 / 冒险内容 / Prompt 管理 / 语速设置 / 设备 wipe）。
+   */
+  role?: string;
 }
 
 /**
@@ -86,6 +92,8 @@ export class AnalyticsAuthService {
       // scopes 是新增的能力清单，内容管理台守卫只看它。
       scope: "analytics",
       scopes: normalizeScopes(account.scopes),
+      // 运维组闸口的来源。缺省 / 配错都是 admin（见 normalizeAdminRole）。
+      role: normalizeAdminRole(account.role),
     });
 
     return {

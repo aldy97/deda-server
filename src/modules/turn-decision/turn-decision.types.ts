@@ -6,8 +6,11 @@ import type {
   ConversationIntent,
   IntentSource,
 } from "@/modules/vendor/conversation-session.service";
+import type { FillerEmotion } from "@/modules/llm/filler-bank";
+import type { SafetyReply } from "@/modules/safety/safety.types";
 
 export type { SafetySource, SafetyVerdict, ConversationIntent, IntentSource };
+export type { SafetyReply } from "@/modules/safety/safety.types";
 
 /**
  * 落库用的意图来源。会话服务自身的 9 种来源之外，编排层还有三种「本轮没走到意图路由」
@@ -64,6 +67,8 @@ export const ASR_TEXT_MAX_LENGTH = 200;
 export interface TurnIntentDecision {
   intent: ConversationIntent;
   source: TurnIntentSource;
+  /** 与 intent 同一次小模型调用产出的粗粒度情绪；缺省 = 未评估 */
+  emotion?: FillerEmotion;
 }
 
 export interface TurnDecisionRecord {
@@ -87,7 +92,12 @@ export interface TurnDecisionRecord {
   intent?: ConversationIntent | null;
   intentSource?: TurnIntentSource | null;
   /**
-   * 孩子的原话。只在「拦了」或「判成非 safe 类别」时落库，
+   * 本轮实际安全话术处置。只影响原文留存判断与消息快照，不落
+   * turn_decision_logs 列；消息 rawPayload.safety.reply 保存同一份值。
+   */
+  safetyReply?: SafetyReply | null;
+  /**
+   * 孩子的原话。只在「拦了」「判成非 safe 类别」或「触发了安全话术」时落库，
    * 且任何情况下都不进日志——见 recorder 的 PII 纪律。
    */
   asrText?: string | null;

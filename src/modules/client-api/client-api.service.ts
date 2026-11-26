@@ -162,8 +162,8 @@ export class ClientApiService {
    * 所以这里宁可抛 500 也不返回编造的兜底值：一个假的 vcn 会让设备用错音色
    * 且无人察觉，一个 500 至少在服务端日志里留下可归因的原因。
    *
-   * vcn 只取 `CHARACTER_TIMBRE_JSON`（IP → timbreId）：产品定义是一个机芯一个
-   * IP、一个 IP 一个专属音色，家长端不选音色。运维经
+   * vcn 只取 character_timbre 表（IP → timbreId，管理端 /analytics/voice-timbres）：
+   * 产品定义是一个机芯一个 IP、一个 IP 一个专属音色，家长端不选音色。运维经
    * `/device-configs/:deviceId/voice` 写入的 `desired.vcn` 在这里**刻意不采信**，
    * 否则同一个设备会出现「本轮实例用运维值、下一轮实例用角色值」的漂移；
    * 该端点的定位是实时修正与可观测归因，见 docs/voice-switching.md §2.1。
@@ -188,29 +188,33 @@ export class ClientApiService {
       throw new InternalServerErrorException("tts volume not configured");
     }
 
-    const vcn = this.voiceReconcile.getTimbreForCharacter(device.characterKey);
+    const vcn = await this.voiceReconcile.getTimbreForCharacter(
+      device.characterKey,
+    );
     if (!vcn) {
-      // TODO(Q1): timbreId 取值已定（熊总 2026-11-19：两个 IP 暂统一用 1000957），
-      // 但 staging/prod 的 env 都还没填；CHARACTER_TIMBRE_JSON 填上即恢复，
-      // 代码无需改动。这是 v1.4 落地的发布闸口——固件升级到 v1.4 前必须填好。
+      // 映射来源是 character_timbre 表（管理端 /analytics/voice-timbres）。
+      // 未配置即 fail-closed：固件按 v1.4 §4.3 停止本轮创建，不做兜底音色。
       this.logger.error(
-        `getvalue cannot resolve vcn: CHARACTER_TIMBRE_JSON has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
+        `getvalue cannot resolve vcn: character_timbre has no timbreId for characterKey=${device.characterKey}, mac=${mac}`,
       );
       throw new InternalServerErrorException("timbre not configured");
     }
 
-    // 哄睡会话内返回哄睡语速，否则返回非哄睡语速（都来自 DB 全局 voice_speed_config）。
+    // 哄睡会话内返回哄睡语速，否则返回非哄睡语速（判定集中在 reconcile）。
     // getvalue 每轮建实例前拉取，定时进入（设备空闲无实例）时下次建实例即生效。
-    const session = await this.prisma.conversationSession.findUnique({
-      where: { deviceId: device.id },
-    });
-    const inSleepMode =
-      session?.currentMode === "sleep_story" &&
-      (!session.expiresAt || session.expiresAt.getTime() > Date.now());
+    const spd = await this.voiceReconcile.resolveActiveSpd(device.id);
 
-    const spd = inSleepMode
-      ? await this.voiceReconcile.resolveSleepSpd()
-      : await this.voiceReconcile.resolveNormalSpd();
+    // 记录「已交付」，让紧随其后的 start 追平命中缓存直接跳过，避免重复
+    // switchSceneRole（Q20 音量重置的暴露点）。失败不影响 getvalue 响应。
+    try {
+      await this.voiceReconcile.noteApplied(mac, vcn, spd);
+    } catch (error) {
+      this.logger.warn(
+        `getvalue noteApplied failed, mac=${mac}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
 
     return { vcn, vol: this.ttsDefaultVol, spd };
   }
@@ -279,7 +283,10 @@ export class ClientApiService {
     // 不 await：出站调用百度云最长可阻塞 BAIDU_AGENT_TIMEOUT_MS（默认 5000ms），
     // 而 v1.4 §5.2 要求本接口幂等快速返回 {"code":200}。等追平完成再响应会把
     // 一次慢调用放大成设备的多轮重试（v1.4 §7.2）。
-    void this.reconcileVoice(mac, dto.instanceid, device.id);
+    void this.reconcileVoice(mac, dto.instanceid, {
+      id: device.id,
+      characterKey: device.characterKey,
+    });
   }
 
   /**
@@ -299,14 +306,10 @@ export class ClientApiService {
   private async reconcileVoice(
     mac: string,
     instanceId: string,
-    deviceInternalId: string,
+    device: { id: string; characterKey: string | null },
   ): Promise<void> {
     try {
-      await this.voiceReconcile.onInstanceRegistered(
-        mac,
-        instanceId,
-        deviceInternalId,
-      );
+      await this.voiceReconcile.onInstanceRegistered(mac, instanceId, device);
     } catch (error) {
       this.logger.warn(
         `voice reconcile hook failed, mac=${mac}, instanceId=${instanceId}, error=${

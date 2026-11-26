@@ -30,20 +30,38 @@ const NEGATION_LOOKBEHIND_CHARS = 4;
 const NEGATION_MARKERS = ["不", "别", "甭", "勿"];
 
 /**
- * 确定性匹配：只在「唯一命中且无否定」时给出结论，其余一律返回 null。
- *
- * @returns 唯一命中的选项下标，或 null 表示无法确定性判定。
+ * 匹配失败/命中的原因，写进 adventure_events 供报表区分
+ * 「孩子没回答」与「系统没听懂」。
  */
-export function matchChoiceDeterministic(
+export type ChoiceMatchReason =
+  | "empty_text"
+  | "no_choices"
+  | "no_hit"
+  | "multi_hit"
+  | "negation_guard"
+  | "matched";
+
+export interface ChoiceMatchDiagnosis {
+  index: number | null;
+  reason: ChoiceMatchReason;
+  /** 命中的选项下标；用于排查「多命中」和否定守卫误伤 */
+  hitIndices: number[];
+}
+
+/**
+ * 确定性匹配的诊断版：与 matchChoiceDeterministic 同一套规则，
+ * 额外返回失败原因与命中下标。matchChoiceDeterministic 是它的薄包装。
+ */
+export function diagnoseChoiceMatch(
   choices: readonly MatchableChoice[],
   asrText: string,
-): number | null {
+): ChoiceMatchDiagnosis {
   if (typeof asrText !== "string" || asrText.trim().length === 0) {
-    return null;
+    return { index: null, reason: "empty_text", hitIndices: [] };
   }
 
   if (!Array.isArray(choices) || choices.length === 0) {
-    return null;
+    return { index: null, reason: "no_choices", hitIndices: [] };
   }
 
   const hitIndices: number[] = [];
@@ -61,7 +79,11 @@ export function matchChoiceDeterministic(
 
   if (hitIndices.length !== 1) {
     // 0 命中 = 听不懂；≥2 命中 = 歧义；都不取第一个
-    return null;
+    return {
+      index: null,
+      reason: hitIndices.length === 0 ? "no_hit" : "multi_hit",
+      hitIndices,
+    };
   }
 
   const hitIndex = hitIndices[0];
@@ -74,11 +96,23 @@ export function matchChoiceDeterministic(
 
   for (const marker of NEGATION_MARKERS) {
     if (lookWindow.includes(marker)) {
-      return null;
+      return { index: null, reason: "negation_guard", hitIndices };
     }
   }
 
-  return hitIndex;
+  return { index: hitIndex, reason: "matched", hitIndices };
+}
+
+/**
+ * 确定性匹配：只在「唯一命中且无否定」时给出结论，其余一律返回 null。
+ *
+ * @returns 唯一命中的选项下标，或 null 表示无法确定性判定。
+ */
+export function matchChoiceDeterministic(
+  choices: readonly MatchableChoice[],
+  asrText: string,
+): number | null {
+  return diagnoseChoiceMatch(choices, asrText).index;
 }
 
 /**

@@ -44,14 +44,14 @@
 | 链路               | API                                                                                                                              | 前端文件                                                                                               | 后端文件                                                                                                                       | 备注                                |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
 | 微信登录换 JWT     | `POST /users/login`                                                                                                              | `pages/login/login.ts`                                                                                 | `src/modules/users/users.controller.ts`                                                                                        | code 来自 `wx.login`                |
-| 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序 |
+| 设备列表/绑定/排序/解绑 | `GET /devices`<br>`POST /devices/bind`<br>`PUT /devices/order`<br>`DELETE /devices/:id`                                                                  | `pages/device-list/device-list.ts`<br>`pages/device-bind/device-bind.ts`                               | `src/modules/devices/devices.controller.ts`                                                                                    | 空列表时前端自动绑定 DEV001；拖拽后提交完整顺序；`GET /devices` 自 2026-11-25 起返回 `todayUsage`（按设备时区统计当日 user 消息，统计失败为 null，旧客户端可忽略） |
 | 查询设备当前配置   | `GET /device-configs/:deviceId/current`                                                                                          | `pages/device-list/device-list.ts` 等                                                                  | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 多页面共用                          |
 | 切换对话模式       | `POST /device-configs/:deviceId/mode`                                                                                            | （小程序入口已下线）                                                                     | `src/modules/device-configs/device-configs.controller.ts`                                                                      | 设备 mode 仅 `free_chat / english_chat` |
 | 查询对话记录       | `GET /conversations?page&pageSize&deviceId`                                                                                      | `pages/chat-history/chat-history.ts`                                                                   | `src/modules/conversations/conversations.controller.ts`                                                                        | 一条 item=一条消息（turnId 关联成轮）；page=1 为最新一页，页内时间正序（顶老底新），前端勿再自行反转；删除接口已移除；URL 无语境参数时前端按设备当前配置推导过滤（后端只认显式传参、不读配置） |
 | 孩子档案查询/更新  | `GET /child-profiles/device/:deviceId`<br>`PATCH /child-profiles/device/:deviceId`                                               | `pages/owner-info/owner-info.ts`                                                                       | `src/modules/child-profiles/child-profiles.controller.ts`                                                                      | 一个设备对应一个孩子档案；`gender` 可选值为 `male/female`，`null` 表示未设置或清除，PATCH 省略时保留原值 |
 | 学习全览 MVP       | `GET /learning-stats/dashboard`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/topics`<br>`GET /learning-stats/timeline` | `pages/learning-data/learning-data.ts`                                                                 | `src/modules/learning-stats/learning-stats.controller.ts`<br>`src/modules/learning-stats/learning-stats.service.ts`            | 仪表盘/趋势/主题/时间线             |
 | 智能分析（单设备） | `GET /learning-stats/dashboard?range=`<br>`GET /learning-stats/daily`<br>`GET /learning-stats/activities` | `pages/device-analysis/device-analysis.ts`                                                             | 同上                                                                                                                            | 顶部语境选择器只读，不修改设备配置；缺省按当前模式过滤；topics 按 `mode` 全量分组 |
-| 设备状态/控制      | `GET /devices/:id/status`<br>`POST /devices/:id/control`                                               | 设备详情/控制页                                                                                         | `src/modules/devices/devices.controller.ts`<br>`src/modules/device-link/device-link.service.ts`                                  | 2026-11 起接机芯厂新 MQTT 协议（`docs/vendor-mqtt-protocol.md`）：status 为真实值（`online/offline`，`battery/volume/isCharging` 可 `null`，前端需容错）；`volume` 为设备真实音量，`control` 下发后回读 status 即可确认生效；control 仅 `volume` 真实下发，其余动作协议待补 |
+| 设备状态/控制      | `GET /devices/:id/status`<br>`POST /devices/:id/control`                                               | 设备详情/控制页                                                                                         | `src/modules/devices/devices.controller.ts`<br>`src/modules/device-link/device-link.service.ts`                                  | 2026-11 起接机芯厂新 MQTT 协议（`docs/vendor-mqtt-protocol.md`）：status 为真实值（`online/offline`，`battery/volume/isCharging` 可 `null`，前端需容错）；`volume` 为设备真实音量，`control` 下发后回读 status 即可确认生效；control 仅 `volume` 真实下发，其余动作协议待补。2026-11-24 起（MQTT v1.8）status 追加 `networkMode`（`wifi`/`4g`/`null`）与 `wifiRssi`（dBm 或 `null`）：`wifiRssi` 仅在 `networkMode="wifi"` 时有意义，4G 恒为 `null`；离线时两字段保留最后已知值，前端须在 `status="online"` 时展示 |
 
 ## 设备配网与认领链路（BLE + client-api，2026-11 起）
 
@@ -107,8 +107,8 @@
 | -------------- | ------------------ | ------------------------------------------------------------ |
 | deviceId       | string             | 设备业务 ID                                                  |
 | vcn            | string \| null     | 当前期望音色 timbreId；未设置时为 null                       |
-| speechRate     | string \| null     | 当前期望语速档位（`slow` / `normal` / `fast`）；未设置时为 null |
-| spd            | number \| null     | speechRate 对应的 spd 倍数；未设置或映射缺失时为 null        |
+| speechRate     | string \| null     | 兼容字段（`slow` / `normal` / `fast`）；**不再驱动实时下发**，未设置时为 null |
+| spd            | number \| null     | 当前生效语速倍数：哄睡会话内为 `sleepSpd`，否则为 `normalSpd` |
 | catalog        | array              | 可用音色列表，每项 `{ timbreId, name, language }`；目录为空时返回 `[]` |
 | available      | boolean            | 音色切换是否可用（`VOICE_CATALOG_JSON` 非空 且 目录内有至少一个 TRAINED 音色） |
 | canApplyLive   | boolean            | 当前能否实时下发到活跃实例；false 时 POST 必然返回 `applied="deferred"` |
@@ -136,7 +136,7 @@
 | deviceId   | string             | 设备业务 ID                                                  |
 | vcn        | string \| null     | 设置的音色 ID（与入参一致）                                  |
 | speechRate | string \| null     | 设置的语速档位（与入参一致）                                 |
-| spd        | number \| null     | speechRate 映射后的 spd 倍数                                 |
+| spd        | number \| null     | 当前会话实际生效的语速倍数（哄睡 sleepSpd / 非哄睡 normalSpd） |
 | applied    | string             | `live` / `deferred` / `noop`（见下方语义）                   |
 | reason     | string \| null     | `applied !== "live"` 时的原因（取值见 `VoiceApplyBlockReason`） |
 
@@ -158,9 +158,9 @@
 
 ### 前端对齐
 
-- **产品定义**（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色。因此**家长端不展示音色选择**，`vcn` 不由小程序设置；音色的权威来源是服务端配置 `CHARACTER_TIMBRE_JSON`（IP → timbreId），设备侧按《设备端接口文档》v1.4 的 `POST /client/bot/bot/getvalue` 每轮创建实例前拉取（不缓存）。本组接口保留为运维与联调的可观测/可干预入口（看 `applied` 与 `reason` 归因）。
-- **这里写入的 `vcn` 不会改变设备下一轮的音色**：设备每轮的 `vcn` 只来自服务端配置 `CHARACTER_TIMBRE_JSON`（按设备 IP 查表，见 `docs/voice-switching.md` §2.5）。本接口写入的 `vcn` 只对**当前正在进行的实例**做一次实时修正（`applied="live"`），下一轮新建实例仍回到该 IP 的专属音色。语速不同——`speechRate` 会被下一轮继承。
-- 语速是否在家长端开放由前端产品决定；后端两个字段都支持。若开放：`GET` 用 `speechRate` 回填当前档位，`POST` 传 `speechRate`（`slow`/`normal`/`fast`）。
+- **产品定义**（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色。因此**家长端不展示音色选择**，`vcn` 不由小程序设置；音色的权威来源是服务端 DB 表 `character_timbre`（IP → timbreId，管理端 `/analytics/voice-timbres`），设备侧按《设备端接口文档》v1.4 的 `POST /client/bot/bot/getvalue` 每轮创建实例前拉取（不缓存）。本组接口保留为运维与联调的可观测/可干预入口（看 `applied` 与 `reason` 归因）。
+- **这里写入的 `vcn` 不会改变设备下一轮的音色**：设备每轮的 `vcn` 只来自 `character_timbre` 表（按设备 IP 查表，见 `docs/voice-switching.md` §2.5）。本接口写入的 `vcn` 只对**当前正在进行的实例**做一次实时修正（`applied="live"`），下一轮新建实例仍回到该 IP 的专属音色。
+- **语速已收敛为全局两值**（`voice_speed_config` 的 `normalSpd` / `sleepSpd`）。`speechRate` 字段保留兼容，但不再驱动实时下发；本接口的 `spd` 返回当前会话实际生效值。运维需要立即改在线设备语速时用 `POST /analytics/voice-speed/apply`（见 `docs/analytics-api.md`「语速配置（admin）」）。
 - `applied="deferred"` 且 `reason` 非空时，应展示文案提示用户「将在下次对话开始时生效」。
 - `available=false` 表示音色目录未填充（`VOICE_CATALOG_JSON=[]`），此时任何 `vcn` 都会被 400 拒绝。
 - 剧情内按角色切音色（多 IP 同剧）是服务端内部行为，不需前端参与；尚未接入，见 `docs/voice-switching.md` 的 Q16。
@@ -199,7 +199,7 @@
 | 意图路由/模式切换/会话 TTL | ✅ | ✅ | 共享 ConversationSessionService |
 | 哄睡语音配置 | ✅ | ✅ | 共享 SleepVoiceConfigService 确定性短链路 |
 | 冒险状态机/每日门禁/审计事件 | ✅ | ✅ | 共享 AdventureService 单例 |
-| filler 打哈哈首响 | ✅ | ✅ | SSE 前导 chunk，LLM_ADAPTER_FILLER=false 可关 |
+| filler 打哈哈首响 | ✅ | ✅ | 确定性模板池（复用 intent 选桶 + 10 轮轮转），LLM_ADAPTER_FILLER=false 可关 |
 | 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
 | 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
 | 哄睡定时家长服务通知 | ❌ | ✅ | 一次性订阅消息额度池，到点全推绑定家长，见「哄睡服务通知推送」节 |
@@ -215,7 +215,7 @@
 
 语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端双模型流式生成 → **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
 
-**首响加速**：后端并行调用小模型（filler，打哈哈承接话题，如"原来你喜欢上海的天气呀"）与大模型（answer，正式回答）。两者均为 `stream: true`；filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
+**首响加速**：filler 由后端确定性模板池即时产出（复用 intent 选桶 + 最近 10 轮轮转，不调小模型）；主模型（answer）并行生成。filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
 
 **上传保序**：后端对每个 chunk 的发送等待机芯厂 WS ack 后再发下一个（`src/modules/vendor/vendor-reply.uploader.ts`），因此 WS 接口调用顺序与 `seq` 严格一致；单个 chunk 上传失败只记日志、不阻断本轮剩余回复。上传地址走 `VENDOR_WS_UPLOAD_URL`，未配置时不连真实云服务（内部编排照常运行，发送仅记 debug 日志）；鉴权接入时在 uploader 内补充。
 
@@ -312,9 +312,19 @@
 ## Prompt 管理（dashboard 后台编辑）
 
 - 机制：全部系统 prompt / 规则段 / 话术模板集中在 prompt registry（17 个 key），运行时按「DB published → 代码默认值 → 抛错」回落；首次上线行为零变化。详见 `docs/prompt-registry.md`。
-- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）与写策略；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- dashboard 侧：`GET /analytics/meta` 拿环境标识（左上角「本地 / 测试 / 生产」标签）、写策略与 `admin.role`；`/analytics/prompts*` 做 view / edit / publish。**meta 请求失败必须 fail-closed**：按未知环境处理并禁用发布。
+- 权限：`/analytics/prompts*`、`/analytics/llm/*`、`/analytics/voice-speed`、`/analytics/adventure-admin/*`、`POST /analytics/devices/:deviceId/wipe` 全部要求 `role === "superadmin"`（`SuperAdminGuard`）；普通 admin 只读报表。`/analytics/meta` 例外，只挂基础闸。
 - 契约：`docs/analytics-api.md` → 「Prompt 管理」。发布/回滚/恢复默认都要手动输入确认码，服务端校验，前端不得预填。
 - 边界：原「子模式模板」归 `conversation_modes.promptTemplate`；该表已随 mode 平级化迁移 `20261113141812_remove_conversation_mode_key` 删除，子模式模板概念一并废弃，可运营编辑的 prompt 文本现在只有 prompt registry 一个入口。儿童安全兜底、身份包装、L1 词表等属永久硬编码红线，不进注册表。
+
+## 展示型素材（AppAsset）
+
+- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布且展示位启用的 key；小程序按 key 渲染，失败回退包内 fallback。
+- 管理接口：`/analytics/app-assets/*`，仅 superadmin（SuperAdminGuard）；dashboard 入口在「运维与配置 → 图片素材」。
+- 存储：本期 local 驱动，文件经 `GET /app-assets/files/*` 输出；env 见 `docs/deployment.md` 第 8 节。
+- 展示位注册表在 DB（`app_asset_slots`）：key = `page/suffix`，page 是短 code 且等于 key 第一段；迁移只 seed `diagnostics/remote-probe`，业务展示位由 dashboard 创建（staging / prod 各自维护，不搬运）。
+- 生命周期：新建展示位 → 上传 draft（只新增版本，不覆盖旧版本）→ 发布（旧 published 自动归档，可回滚）→ 下架 → 停用（停用前必须先下架）。**不提供物理删除**，建错的 key 只能永久停用。
+- 小程序侧：`miniprogram/utils/app-assets.ts` + `components/elly-image`；新 key 必须先在小程序 `constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 下发了也不会展示。真机验证入口为体验版「关于设备」长按版本号进入素材自检页。
 
 ## 联调顺序
 

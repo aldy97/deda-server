@@ -434,6 +434,15 @@ export class TestAssignDto {
   reason?: string;
 }
 
+export class CharacterTestDevicesQueryDto {
+  @ApiProperty({ description: "IP 业务键（如 elly / polly）" })
+  @Transform(({ value }) => (typeof value === "string" ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  characterKey: string;
+}
+
 export class ScriptConvertDto {
   @ApiPropertyOptional({ description: "原始文件名，仅用于提示，不落库" })
   @IsOptional()

@@ -1,9 +1,16 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { AdventureService } from "./adventure.service";
-import { ADVENTURE_EXIT_TEXT } from "./adventure.constants";
+import {
+  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+  ADVENTURE_EXIT_TEXT,
+  ADVENTURE_SAFETY_CAUTION,
+  ADVENTURE_UNSAFE_LINE,
+} from "./adventure.constants";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { DeviceTestAccessService } from "@/modules/device-test-access/device-test-access.service";
+import type { SafetyHandle } from "@/modules/safety/safety.types";
 
 /**
  * 冒险引擎状态机单测（TDD 先行）
@@ -15,6 +22,7 @@ describe("AdventureService", () => {
   let prisma: any;
   let llm: any;
   let configService: { get: jest.Mock };
+  let testAccess: { isAllowed: jest.Mock };
 
   const episode = {
     id: "ep1",
@@ -170,6 +178,10 @@ describe("AdventureService", () => {
           provide: ConfigService,
           useValue: { get: jest.fn() },
         },
+        {
+          provide: DeviceTestAccessService,
+          useValue: { isAllowed: jest.fn().mockResolvedValue(true) },
+        },
       ],
     }).compile();
 
@@ -177,6 +189,7 @@ describe("AdventureService", () => {
     prisma = module.get(PrismaService);
     llm = module.get(LlmService);
     configService = module.get(ConfigService);
+    testAccess = module.get(DeviceTestAccessService);
 
     prisma.device.findUnique.mockResolvedValue({ characterKey: "elly" });
     prisma.adventureEpisode.findFirst.mockResolvedValue(episode);
@@ -422,6 +435,9 @@ describe("AdventureService", () => {
     const reply = await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋");
 
     expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(llm.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ temperature: 0.3 }),
+    );
     expect(reply.texts[0]).toBe("哇，你说得真有意思！");
     expect(prisma.adventureProgress.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -430,6 +446,41 @@ describe("AdventureService", () => {
     );
     // 引回后仍停在当前交互点等待，不推进主线
     expect(reply.action).toBe("await_reply");
+    expect(reply.matchReason).toBe("no_hit");
+  });
+
+  it("forwards turnId to the bridge LLM call", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+      turnId: "turn-bridge",
+    });
+
+    expect(llm.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scene: "adventure_interaction",
+        turnId: "turn-bridge",
+      }),
+    );
+  });
+
+  it("records negation_guard when a negated option mention falls through", async () => {
+    prisma.adventureProgress.findFirst.mockResolvedValue({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    const reply = await service.handleChildReply("dev-uuid-1", "不要走河边");
+
+    expect(reply.result).toBe("off_topic");
+    expect(reply.matchReason).toBe("negation_guard");
   });
 
   it("should fall back to the canned fallback text on the second off-topic answer without calling the LLM", async () => {
@@ -493,6 +544,29 @@ describe("AdventureService", () => {
           maxTokens: 160,
           scene: "adventure_interaction",
           model: "small-llm",
+          temperature: 0,
+        }),
+      );
+    });
+
+    it("forwards turnId to the choice-match LLM call", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue({
+        ...baseProgress,
+        status: "awaiting_reply",
+        nextSegmentOrder: 3,
+        waitingSince: new Date(),
+      });
+
+      llm.complete.mockResolvedValueOnce({ text: "0\n好呀，我们去森林吧！" });
+
+      await service.handleChildReply("dev-uuid-1", "我要去大树那边", {
+        turnId: "turn-choice",
+      });
+
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scene: "adventure_interaction",
+          turnId: "turn-choice",
         }),
       );
     });
@@ -530,6 +604,7 @@ describe("AdventureService", () => {
           maxTokens: 160,
           scene: "adventure_interaction",
           model: "small-llm",
+          temperature: 0,
         }),
       );
     });
@@ -1277,6 +1352,222 @@ describe("AdventureService", () => {
   // answered / off_topic / fallback / timeout 这四个 result 由 two_choice、
   // open_question、repeat_after_me、reward 四种交互类型共用。事件上不带类型与段号，
   // 报表就算不出「二选一的兜底率」——分母会把开放提问的处置一起算进去。
+  describe("lazy L2 safety provider", () => {
+    const awaiting = () => ({
+      ...baseProgress,
+      status: "awaiting_reply",
+      nextSegmentOrder: 3,
+      waitingSince: new Date(),
+    });
+
+    it("returns the canned safety line without calling the LLM when L2 blocks", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+      const getSafety = jest
+        .fn()
+        .mockResolvedValue({ blocked: true, category: "violence" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我要拿刀伤人",
+        { getSafety },
+      );
+
+      expect(getSafety).toHaveBeenCalledTimes(1);
+      // 乐观并发生成的接话被丢弃；不重试、不采用模型输出
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(reply.texts).toEqual([ADVENTURE_UNSAFE_LINE]);
+      expect(reply.action).toBe("await_reply");
+      expect(reply.result).toBe("off_topic");
+      expect(reply.safetyBlocked).toBe(true);
+      expect(prisma.adventureProgress.update).not.toHaveBeenCalled();
+    });
+
+    it("injects caution instruction when L2 is unavailable (fail-open)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+      const getSafety = jest
+        .fn()
+        .mockRejectedValue(new Error("small model down"));
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我想吃冰淇淋",
+        { getSafety },
+      );
+
+      expect(reply.safetyBlocked).toBeUndefined();
+      // 先乐观并发生成一次，拿到 fail-open 结论后带谨慎指令重试一次
+      expect(llm.complete).toHaveBeenCalledTimes(2);
+      expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+        role: "system",
+        content: ADVENTURE_SAFETY_CAUTION,
+      });
+    });
+
+    it("treats an l2_fail_open verdict as fail-open and injects caution", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+      const getSafety = jest.fn().mockResolvedValue({
+        blocked: false,
+        category: null,
+        source: "l2_fail_open",
+      });
+
+      await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+        getSafety,
+      });
+
+      expect(llm.complete).toHaveBeenCalledTimes(2);
+      expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+        role: "system",
+        content: ADVENTURE_SAFETY_CAUTION,
+      });
+    });
+
+    it("injects empathy guidance for emotional_harm without blocking", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+      const getSafety = jest
+        .fn()
+        .mockResolvedValue({ blocked: false, category: "emotional_harm" });
+
+      await service.handleChildReply("dev-uuid-1", "我讨厌弟弟", { getSafety });
+
+      expect(llm.complete).toHaveBeenCalledTimes(2);
+      expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+        role: "system",
+        content: ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+      });
+    });
+
+    it("uses the first bridge result when L2 says safe (no retry)", async () => {
+      prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+      const getSafety = jest
+        .fn()
+        .mockResolvedValue({ blocked: false, category: "safe" });
+
+      const reply = await service.handleChildReply(
+        "dev-uuid-1",
+        "我想吃冰淇淋",
+        { getSafety },
+      );
+
+      expect(llm.complete).toHaveBeenCalledTimes(1);
+      expect(reply.texts[0]).toBe("哇，你说得真有意思！");
+    });
+
+    describe("with safetyHandle", () => {
+      const makeHandle = (
+        verdictValue: unknown,
+        instruction?: string,
+      ): SafetyHandle & {
+        evaluateIfNeeded: jest.Mock;
+        promptInstruction: jest.Mock;
+      } =>
+        ({
+          evaluateIfNeeded: jest.fn().mockResolvedValue(verdictValue),
+          promptInstruction: jest.fn().mockReturnValue(instruction),
+          finalize: jest.fn(),
+        }) as unknown as SafetyHandle & {
+          evaluateIfNeeded: jest.Mock;
+          promptInstruction: jest.Mock;
+        };
+
+      it("handle 优先于 getSafety，拦截轮打出显式处置", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle({ blocked: true, category: "violence" });
+        const getSafety = jest.fn();
+
+        const reply = await service.handleChildReply(
+          "dev-uuid-1",
+          "我要拿刀伤人",
+          { getSafety, safetyHandle: handle },
+        );
+
+        expect(getSafety).not.toHaveBeenCalled();
+        expect(handle.evaluateIfNeeded).toHaveBeenCalledTimes(1);
+        expect(reply.texts).toEqual([ADVENTURE_UNSAFE_LINE]);
+        expect(reply.safetyDisposition).toBe("canned_block");
+      });
+
+      it("开放提问的谨慎指令来自 handle.promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue({
+          ...baseProgress,
+          status: "awaiting_reply",
+          nextSegmentOrder: 5,
+          waitingSince: new Date(),
+        });
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("二选一 LLM 重试的指令来自 handle.promptInstruction", async () => {
+        configService.get.mockImplementation((key: string) =>
+          key === "ADVENTURE_CHOICE_LLM_ENABLED" ? "true" : undefined,
+        );
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        llm.complete.mockResolvedValueOnce({ text: "0" });
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我要去大树那边", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("首次跑题 redirect 的指令来自 handle.promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle(
+          { blocked: false, category: null, source: "l2_fail_open" },
+          "HANDLE_CAUTION",
+        );
+
+        await service.handleChildReply("dev-uuid-1", "我想吃冰淇淋", {
+          safetyHandle: handle,
+        });
+
+        expect(handle.promptInstruction).toHaveBeenCalledTimes(1);
+        expect(llm.complete).toHaveBeenCalledTimes(2);
+        expect(llm.complete.mock.calls[1][0].messages).toContainEqual({
+          role: "system",
+          content: "HANDLE_CAUTION",
+        });
+      });
+
+      it("确定性命中不触发评估，也不问 promptInstruction", async () => {
+        prisma.adventureProgress.findFirst.mockResolvedValue(awaiting());
+        const handle = makeHandle({ blocked: false, category: "safe" });
+
+        const reply = await service.handleChildReply("dev-uuid-1", "森林", {
+          safetyHandle: handle,
+        });
+
+        expect(reply.result).toBe("answered");
+        expect(handle.evaluateIfNeeded).not.toHaveBeenCalled();
+        expect(handle.promptInstruction).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   describe("interaction attribution on result events", () => {
     beforeEach(() => {
       prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
@@ -1316,6 +1607,26 @@ describe("AdventureService", () => {
         expect.objectContaining({
           segmentOrder: 4,
           payload: { interactionType: "open_question" },
+        }),
+      );
+    });
+
+    it("stamps matchReason onto off_topic result events", async () => {
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["我们先回到故事里，好吗？"],
+        action: "await_reply",
+        result: "off_topic",
+        interaction: { type: "two_choice", order: 2 },
+        matchReason: "negation_guard",
+      });
+
+      expect(resultCreate("off_topic")).toEqual(
+        expect.objectContaining({
+          segmentOrder: 2,
+          payload: {
+            interactionType: "two_choice",
+            matchReason: "negation_guard",
+          },
         }),
       );
     });
@@ -1411,6 +1722,55 @@ describe("AdventureService", () => {
       prisma.adventureEvent.upsert.mock.calls,
     );
     expect(eventPayload).not.toContain("故事原文");
+  });
+
+  describe("pinned adventure version on turn events", () => {
+    beforeEach(() => {
+      prisma.adventureDailyRecord.findFirst.mockResolvedValue(baseDaily);
+    });
+
+    it("stamps the progress-pinned version onto every event of the turn", async () => {
+      prisma.adventureProgress.findUnique.mockResolvedValue({
+        episodeVersionId: "ver-2",
+      });
+
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["森林里有一只小松鼠。"],
+        action: "await_reply",
+        result: "answered",
+        interaction: { type: "open_question", order: 4 },
+      });
+
+      const creates = prisma.adventureEvent.upsert.mock.calls.map(
+        (call) => call[0].create,
+      );
+      expect(creates).toHaveLength(2);
+      creates.forEach((create) => {
+        expect(create.episodeVersionId).toBe("ver-2");
+      });
+    });
+
+    it("prefers the matchedChoice pinned version when the progress row is gone", async () => {
+      prisma.adventureProgress.findUnique.mockResolvedValue(null);
+
+      await service.recordPresented("dev-uuid-1", "turn-1", {
+        texts: ["好呀，我们去森林！"],
+        action: "await_reply",
+        result: "answered",
+        matchedChoice: {
+          index: 0,
+          source: "deterministic",
+          key: "forest",
+          segmentOrder: 2,
+          episodeVersionId: "ver-1",
+        },
+      });
+
+      const choiceCreate = prisma.adventureEvent.upsert.mock.calls.find(
+        (call) => call[0].create?.eventType === "choice_matched",
+      )![0].create;
+      expect(choiceCreate.episodeVersionId).toBe("ver-1");
+    });
   });
 
   describe("choice_matched telemetry", () => {
@@ -2435,19 +2795,50 @@ describe("AdventureService", () => {
       expect(service.isTestStoryEnabled()).toBe(false);
     });
 
-    it("环境未开启时触发词返回 null（落回正常链路）", async () => {
+    it("环境未开启时触发词返回 null（落回正常链路），也不查白名单", async () => {
       configService.get.mockReturnValue(undefined);
 
       await expect(
         service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
       ).resolves.toBeNull();
+      expect(testAccess.isAllowed).not.toHaveBeenCalled();
     });
 
-    it("不是触发词返回 null", async () => {
+    it("不是触发词返回 null，也不查白名单", async () => {
       enableTestStory();
 
       await expect(
         service.tryTestStoryTrigger("dev-uuid-1", "我想听故事"),
+      ).resolves.toBeNull();
+      expect(testAccess.isAllowed).not.toHaveBeenCalled();
+    });
+
+    it("触发词命中但设备不在白名单 → null，且不读下发字段", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockResolvedValue(false);
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
+      ).resolves.toBeNull();
+
+      expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-uuid-1");
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("直接调用 playTestEpisode 时非白名单同样返回 null（第二道兜底）", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockResolvedValue(false);
+
+      await expect(service.playTestEpisode("dev-uuid-1")).resolves.toBeNull();
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("白名单查询失败时静默回落，不让测试开关拖垮这一轮", async () => {
+      enableTestStory();
+      testAccess.isAllowed.mockRejectedValue(new Error("db down"));
+
+      await expect(
+        service.tryTestStoryTrigger("dev-uuid-1", "测试冒险故事"),
       ).resolves.toBeNull();
     });
 

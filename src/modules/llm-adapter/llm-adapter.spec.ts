@@ -2,12 +2,16 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { LlmAdapterService } from "./llm-adapter.service";
 import { LlmAdapterController } from "./llm-adapter.controller";
-import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
+import {
+  ADVENTURE_DEGRADED_REPLIES,
+  ADVENTURE_UNSAFE_LINE,
+} from "@/modules/adventure/adventure.constants";
 import {
   parseChatCompletionRequest,
   ChatCompletionRequest,
 } from "./dto/chat-completion.dto";
 import { LlmService, LlmUpstreamError } from "@/modules/llm/llm.service";
+import { FILLER_POOLS } from "@/modules/llm/filler-bank";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
@@ -17,6 +21,11 @@ import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
+import { SafetyGateService } from "@/modules/safety/safety-gate.service";
+import type {
+  SafetyEvaluation,
+  SafetyHandleEvaluation,
+} from "@/modules/safety/safety.types";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 
@@ -58,6 +67,7 @@ describe("LlmAdapterModule", () => {
   };
   let session: { resolveWithSource: jest.Mock; reset: jest.Mock };
   let turnDecisions: { record: jest.Mock };
+  let safetyGate: { interpret: jest.Mock; openLazyHandle: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
@@ -148,6 +158,10 @@ describe("LlmAdapterModule", () => {
       reset: jest.fn().mockResolvedValue(undefined),
     };
     turnDecisions = { record: jest.fn() };
+    safetyGate = {
+      interpret: jest.fn(),
+      openLazyHandle: jest.fn(),
+    };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -186,6 +200,7 @@ describe("LlmAdapterModule", () => {
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
+        { provide: SafetyGateService, useValue: safetyGate },
         {
           provide: ConfigService,
           useValue: { get: configGet },
@@ -294,8 +309,11 @@ describe("LlmAdapterModule", () => {
       expect(sleepVoice.handle).toHaveBeenCalledWith(
         "dev-internal-1",
         "哄睡改成二十分钟",
+        expect.any(String),
       );
       expect(llm.completeStream).not.toHaveBeenCalled();
+      const userCall = prisma.message.create.mock.calls[0][0];
+      expect(sleepVoice.handle.mock.calls[0][2]).toBe(userCall.data.turnId);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toMatchObject({
         sleepConfig: "durationMinutes",
@@ -562,6 +580,10 @@ describe("LlmAdapterModule", () => {
         mode: "adventure_story",
       });
       expect(assistantCall.data.turnId).toBe(userCall.data.turnId);
+      // 消息与判定记录必须共用同一外层 turnId（不能另起随机 ID）
+      expect(turnDecisions.record.mock.calls[0][0].turnId).toBe(
+        userCall.data.turnId,
+      );
       // 审计事件落库
       expect(adventure.recordPresented).toHaveBeenCalledWith(
         "dev-internal-1",
@@ -628,6 +650,10 @@ describe("LlmAdapterModule", () => {
       expect(adventure.startToday).toHaveBeenCalledWith("dev-internal-1", true);
       expect(session.reset).toHaveBeenCalledWith("dev-internal-1");
       expect(llm.completeStream).not.toHaveBeenCalled();
+      const userCall = prisma.message.create.mock.calls[0][0];
+      expect(turnDecisions.record.mock.calls[0][0].turnId).toBe(
+        userCall.data.turnId,
+      );
     });
 
     it("blocks entry and records it when today's adventure is completed", async () => {
@@ -718,276 +744,218 @@ describe("LlmAdapterModule", () => {
         key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
       );
 
-    /** filler 与主模型都走 completeStream，按 scene 分流 mock */
-    const mockStreamsByScene = (
-      fillerChunks: string[] | Error,
-      mainChunks: string[],
-    ) => {
-      llm.completeStream.mockImplementation((opts: { scene: string }) => {
-        if (opts.scene === "filler") {
-          if (fillerChunks instanceof Error) {
-            return (async function* () {
-              throw fillerChunks;
-            })();
-          }
-          return makeStream(fillerChunks)();
-        }
-        return makeStream(mainChunks)();
-      });
-    };
-
-    /** 只看 filler 场景的调用（completeStream 同时服务主模型） */
-    const fillerCalls = () =>
-      llm.completeStream.mock.calls.filter(
-        (call: Array<{ scene: string }>) => call[0].scene === "filler",
-      );
     const mainCalls = () =>
       llm.completeStream.mock.calls.filter(
         (call: Array<{ scene: string }>) => call[0].scene === "chat_main",
       );
 
-    it("流式 filler 头部校验后先行播出并持久化边界，原文经 handoff 消息注入主模型", async () => {
-      // 显式开启 filler（生产默认开，测试默认关）
+    it("模板池 filler 先行播出，原文经 handoff 注入主模型，落库边界带来源", async () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      // filler 分三段：首段满 8 字头部缓冲 → 校验通过立即外发，后续直通
-      mockStreamsByScene(
-        ["嗯——冒险呀，让", "我想想呢", "……"],
-        ["正式", "答案"],
-      );
+      llm.completeStream.mockReturnValue(makeStream(["正式", "答案"])());
+
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual([
-        "嗯——冒险呀，让",
-        "我想想呢",
-        "……",
-        "正式",
-        "答案",
-      ]);
-      // filler 改走小模型流式（首音提前到 TTFT）：scene/model/上限/超时
-      expect(llm.completeStream).toHaveBeenCalledWith(
-        expect.objectContaining({
-          scene: "filler",
-          model: "small-model",
-          maxTokens: 60,
-          timeoutMs: expect.any(Number),
-        }),
-      );
-      // 串行：filler 流先完成，主模型才启动
-      expect(llm.completeStream.mock.calls[0][0].scene).toBe("filler");
-      expect(llm.completeStream.mock.calls[1][0].scene).toBe("chat_main");
-      // handoff（方案 B）：filler 原文作为独立 system 消息贴在本轮 user
-      // 消息前注入，离生成点最近
+
+      expect(chunks).toHaveLength(3);
+      expect(chunks.slice(1)).toEqual(["正式", "答案"]);
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(llm.completeStream).toHaveBeenCalledTimes(1);
+      expect(llm.completeStream.mock.calls[0][0].scene).toBe("chat_main");
+      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
+
       const mainMessages = mainCalls()[0][0].messages;
       expect(mainMessages[mainMessages.length - 2]).toEqual({
         role: "system",
-        content: "handoff:嗯——冒险呀，让我想想呢……",
+        content: `handoff:${chunks[0]}`,
       });
-      expect(mainMessages[mainMessages.length - 1]).toEqual({
-        role: "user",
-        content: "我想玩每日冒险",
-      });
-      // buildEnglishTutorPrompt 不再携带 fillerHeard（handoff 已外移）
-      const promptOptions = llm.buildEnglishTutorPrompt.mock.calls[0][2];
-      expect(promptOptions).not.toHaveProperty("fillerHeard");
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
-        "我想玩每日冒险",
-        [],
-        expect.objectContaining({
-          intent: "free_chat",
-          adventureDeclined: false,
-        }),
-      );
-      // 落库边界：content 为播报全文，filler/answer 结构化存 rawPayload
+
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toEqual({
-        filler: "嗯——冒险呀，让我想想呢……",
+        filler: chunks[0],
         answer: "正式答案",
+        fillerSource: "bank",
+        fillerBucket: "neutral",
+        fillerEmotion: "neutral",
       });
-      expect(assistantCall.data.content).toBe(
-        "嗯——冒险呀，让我想想呢……\n正式答案",
+      expect(assistantCall.data.content).toBe(`${chunks[0]}\n正式答案`);
+    });
+
+    it("连续两轮 filler 不同，且开头不撞", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const recentRows: Array<{ rawPayload: { filler: string } }> = [];
+      prisma.message.findMany.mockImplementation(
+        (args: { where?: { role?: string } }) =>
+          args?.where?.role === "assistant"
+            ? Promise.resolve(recentRows)
+            : Promise.resolve([]),
       );
+      llm.completeStream.mockReturnValue(makeStream(["答一"])());
+      const first = (await collect(service.streamReply(boundRequest)))[0];
+      recentRows.push({ rawPayload: { filler: first } });
+      llm.completeStream.mockReturnValue(makeStream(["答二"])());
+      const second = (await collect(service.streamReply(boundRequest)))[0];
+
+      expect(second).not.toBe(first);
+      const opener = (text: string) =>
+        text.replace(/[\s\p{P}\p{S}]/gu, "").slice(0, 4);
+      expect(opener(second)).not.toBe(opener(first));
     });
 
-    it("filler 生成失败时回落兜底模板池，过渡音覆盖不缺席", async () => {
-      // dashboard 实测：filler 缺失轮完全没有防死空气缓冲。
-      // 失败不再静默跳过，兜底模板（≥15 字）保证每轮都有覆盖
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      mockStreamsByScene(new Error("small model down"), ["答案"]);
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toHaveLength(2);
-      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15);
-      expect(chunks[1]).toBe("答案");
-      // 模板 filler 同样注入 handoff 并落库
-      const mainMessages = mainCalls()[0][0].messages;
-      expect(mainMessages[mainMessages.length - 2]).toEqual({
-        role: "system",
-        content: `handoff:${chunks[0]}`,
+    it("LLM_ADAPTER_FILLER=false 时完全无 filler", async () => {
+      configGet.mockImplementation((key: string) => {
+        if (key === "LLM_ADAPTER_API_KEY") return VALID_TOKEN;
+        if (key === "LLM_ADAPTER_FILLER") return "false";
+        return undefined;
       });
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload.filler).toBe(chunks[0]);
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["答"])());
+
+      const chunks = await collect(service.streamReply(boundRequest));
+
+      expect(chunks).toEqual(["答"]);
+      expect(llm.completeStream).toHaveBeenCalledTimes(1);
     });
 
-    it("filler 以孩子名字开头时中止重试，违规内容一字不外发", async () => {
-      // 实机事故：每句 filler 都以「贝果，」开头，结构性复读
+    it("最近 10 轮用过的 filler 不会再次出现", async () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      prisma.childProfile.findUnique.mockResolvedValue({
-        name: "贝果",
-        englishName: null,
-        birthday: "2020-06-01",
-        gender: "female",
-      });
-      let attempt = 0;
-      llm.completeStream.mockImplementation((opts: { scene: string }) => {
-        if (opts.scene === "filler") {
-          attempt += 1;
-          // 首次：语气词+孩子名开头（规避不了——剥离语气词后仍是名字）
-          return makeStream(
-            attempt === 1
-              ? ["呀，贝果是不是心里有点闷闷的呀……"]
-              : ["听到你说心里闷闷的呀，我陪你呢……"],
-          )();
-        }
-        return makeStream(["答"])();
-      });
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks[0]).toBe("听到你说心里闷闷的呀，我陪你呢……");
-      expect(chunks.join("")).not.toContain("贝果");
-      expect(fillerCalls()).toHaveLength(2);
-      // 重试带强禁令
-      const retryMessages = fillerCalls()[1][0].messages;
-      expect(retryMessages[retryMessages.length - 1].content).toContain(
-        "被拒绝了",
+      const recentRows = FILLER_POOLS.neutral.slice(0, 10).map((filler) => ({
+        rawPayload: { filler },
+      }));
+      prisma.message.findMany.mockImplementation(
+        (args: { where?: { role?: string } }) =>
+          args?.where?.role === "assistant"
+            ? Promise.resolve(recentRows)
+            : Promise.resolve([]),
       );
-    });
+      llm.completeStream.mockReturnValue(makeStream(["答"])());
 
-    it("filler 以英文名开头同样硬禁（childName 优先 englishName）", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      prisma.childProfile.findUnique.mockResolvedValue({
-        name: "莉莉",
-        englishName: "Lily",
-        birthday: "2020-06-01",
-        gender: "female",
-      });
-      let attempt = 0;
-      llm.completeStream.mockImplementation((opts: { scene: string }) => {
-        if (opts.scene === "filler") {
-          attempt += 1;
-          return makeStream(
-            attempt === 1
-              ? ["Lily, you drew a cat? Lovely!"]
-              : ["Drawing a cat sounds so much fun!"],
-          )();
-        }
-        return makeStream(["答"])();
-      });
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks[0]).toBe("Drawing a cat sounds so much fun!");
-      expect(fillerCalls()).toHaveLength(2);
+
+      expect(FILLER_POOLS.neutral.slice(0, 10)).not.toContain(chunks[0]);
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
     });
 
-    it("filler 含人设名时中止重试；重试仍违规回落兜底模板池", async () => {
-      // 实机事故：连续 8 轮「小象 Elly：X 真 Y 呀」同构口癖（名标签开头）；
-      // 以及「小象 Elly 听到风在笑呢」式第三人称自称（头部出现人设名）
+    it("身份问句走 identity 桶，不调用小模型", async () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      mockStreamsByScene(["小象 Elly：蓝色真美呢"], ["答"]);
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(fillerCalls()).toHaveLength(2); // 初次 + 一次重试，有上限
-      expect(chunks[0]).not.toContain("小象 Elly");
-      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15); // 模板池兜底
-      expect(chunks[1]).toBe("答");
-    });
-
-    it("filler 与近 5 轮逐字重复时仍播出（流式不可撤回），告警并依赖 prompt 禁用清单", async () => {
-      // 流式权衡：全文去重无法在外发前定论，硬门让位给首音延迟，
-      // 防线 = prompt 禁用清单 + 事后 warn 供 dashboard/日志观测
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      prisma.message.findMany.mockResolvedValue([
-        {
-          role: "assistant",
-          content: "嗯——冒险真让人期待呀……\n上一轮回答",
-          rawPayload: {
-            filler: "嗯——冒险真让人期待呀……",
-            answer: "上一轮回答",
-          },
-        },
-      ]);
-      const warnSpy = jest
-        .spyOn(
-          (service as unknown as { logger: { warn: (m: string) => void } })
-            .logger,
-          "warn",
-        )
-        .mockImplementation(() => undefined);
-      mockStreamsByScene(["嗯——冒险真让人期待呀……"], ["答"]);
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks[0]).toBe("嗯——冒险真让人期待呀……");
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("repeated"));
-      warnSpy.mockRestore();
-    });
-
-    it("filler 低于 15 字下限时仍播出但告警（流式不可撤回）", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      const warnSpy = jest
-        .spyOn(
-          (service as unknown as { logger: { warn: (m: string) => void } })
-            .logger,
-          "warn",
-        )
-        .mockImplementation(() => undefined);
-      mockStreamsByScene(["嗯——我在听"], ["答"]);
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks[0]).toBe("嗯——我在听");
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("floor"));
-      warnSpy.mockRestore();
-    });
-
-    it("filler 外发后断流：保留已播部分，不重试不回补，主模型照常", async () => {
-      // 半截 filler 已播给孩子，撤回/重试都会让孩子听到冲突内容
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockImplementation((opts: { scene: string }) => {
-        if (opts.scene === "filler") {
-          return (async function* () {
-            yield "哇，你说的话真有意思";
-            throw new Error("socket hang up");
-          })();
-        }
-        return makeStream(["答"])();
-      });
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["哇，你说的话真有意思", "答"]);
-      expect(fillerCalls()).toHaveLength(1); // 不重试
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload.filler).toBe("哇，你说的话真有意思");
-    });
-
-    it("身份/偏好问句的 filler 走确定性模板（≥15 字），不调用小模型", async () => {
-      // 实机事故：「你叫什么名字」filler 抢答出名字，主模型又答一遍；
-      // 「你最喜欢什么颜色」filler 主客颠倒成「你喜欢什么颜色呀」
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockReturnValue(makeStream(["我叫小象 Elly"])());
+      llm.completeStream.mockReturnValue(makeStream(["我叫 Elly 呀"])());
       const req: ChatCompletionRequest = {
         ...boundRequest,
-        messages: [{ role: "user", content: "你叫什么名字" }],
+        messages: [{ role: "user", content: "你叫什么名字？" }],
       };
+
       const chunks = await collect(service.streamReply(req));
-      expect(fillerCalls()).toHaveLength(0);
+
+      expect(FILLER_POOLS.identity).toContain(chunks[0]);
+      expect(llm.completeStream).toHaveBeenCalledTimes(1);
       expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
-      expect(chunks[0]).toContain("名字");
-      expect([...chunks[0]].length).toBeGreaterThanOrEqual(15);
-      // 模板 filler 同样注入主模型 handoff
-      const mainMessages = mainCalls()[0][0].messages;
-      expect(mainMessages[mainMessages.length - 2]).toEqual({
-        role: "system",
-        content: `handoff:${chunks[0]}`,
+    });
+
+    it("intent 小模型给的情绪标签会传给 filler 选桶", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+        emotion: "sad",
       });
+      llm.completeStream.mockReturnValue(makeStream(["我陪着你"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "我没事" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.comfort).toContain(chunks[0]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        fillerBucket: "comfort",
+        fillerEmotion: "sad",
+      });
+    });
+
+    it("停止轮走 stop 桶、情绪归 neutral，handoff 带 stop 动作", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "model",
+        emotion: "sad",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["那我们就不听啦"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "我不要听了" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.stop).toContain(chunks[0]);
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        fillerBucket: "stop",
+        fillerEmotion: "neutral",
+      });
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("stop");
+    });
+
+    it("故事轮走重写后的 story 桶，handoff 带 story_tell", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["小河水往前流"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "给我讲个故事" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.story).toContain(chunks[0]);
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("story_tell");
+    });
+
+    it("继续轮走 continue 桶，handoff 带 continue 动作", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_chat",
+        source: "continuation",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["接着往下讲"])());
+      const req: ChatCompletionRequest = {
+        ...boundRequest,
+        messages: [{ role: "user", content: "继续" }],
+      };
+
+      const chunks = await collect(service.streamReply(req));
+
+      expect(FILLER_POOLS.continue).toContain(chunks[0]);
+      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("continue");
+    });
+
+    it("主模型失败时 filler 已播，仍走兜底文案", async () => {
+      enableFiller();
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockImplementation(() =>
+        (async function* () {
+          throw new Error("down");
+        })(),
+      );
+
+      const chunks = await collect(service.streamReply(boundRequest));
+
+      expect(chunks).toHaveLength(2);
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks[1]).toContain("走神");
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.filler).toBe(chunks[0]);
     });
 
     it("never touches the adventure engine when anonymous", async () => {
@@ -1035,23 +1003,23 @@ describe("LlmAdapterModule", () => {
       // 不兜底，孩子听完半句 filler 后死寂
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockImplementation((opts: { scene: string }) =>
-        opts.scene === "filler"
-          ? makeStream(["嗯——"])()
-          : failingStream(
-              new LlmUpstreamError(
-                "upstream_error",
-                "ECONNRESET: socket hang up",
-                false,
-              ),
-            ),
+      llm.completeStream.mockReturnValue(
+        failingStream(
+          new LlmUpstreamError(
+            "upstream_error",
+            "ECONNRESET: socket hang up",
+            false,
+          ),
+        ),
       );
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual(["嗯——", FALLBACK]);
+      expect(chunks).toHaveLength(2);
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks[1]).toBe(FALLBACK);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.status).toBe("failed");
-      expect(assistantCall.data.rawPayload).toEqual({
-        filler: "嗯——",
+      expect(assistantCall.data.rawPayload).toMatchObject({
+        filler: chunks[0],
         answer: FALLBACK,
       });
     });
@@ -1098,10 +1066,7 @@ describe("LlmAdapterModule", () => {
       enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       let mainAttempts = 0;
-      llm.completeStream.mockImplementation((opts: { scene: string }) => {
-        if (opts.scene === "filler") {
-          return makeStream(["嗯——"])();
-        }
+      llm.completeStream.mockImplementation(() => {
         mainAttempts += 1;
         return mainAttempts === 1
           ? failingStream(
@@ -1114,13 +1079,11 @@ describe("LlmAdapterModule", () => {
           : makeStream(["正式", "答案"])();
       });
       const chunks = await collect(service.streamReply(boundRequest));
-      // 主模型初次 + 一次重试（filler 不算在内）
-      expect(
-        llm.completeStream.mock.calls.filter(
-          (call: Array<{ scene: string }>) => call[0].scene === "chat_main",
-        ),
-      ).toHaveLength(2);
-      expect(chunks).toEqual(["嗯——", "正式", "答案"]);
+      // 主模型初次 + 一次重试（filler 不占用 completeStream）
+      expect(llm.completeStream).toHaveBeenCalledTimes(2);
+      expect(chunks).toHaveLength(3);
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks.slice(1)).toEqual(["正式", "答案"]);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.status).toBe("completed");
     });
@@ -1636,27 +1599,19 @@ describe("LlmAdapterModule", () => {
         source: "model",
       });
       adventure.isCompletedToday.mockResolvedValue(true);
-      llm.completeStream.mockImplementation((opts: { scene: string }) =>
-        opts.scene === "filler"
-          ? makeStream(["嗯——"])()
-          : makeStream(["今天冒险完成啦"])(),
-      );
+      llm.completeStream.mockReturnValue(makeStream(["今天冒险完成啦"])());
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "继续冒险故事" }],
       };
-      await collect(service.streamReply(req));
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
-        "继续冒险故事",
-        expect.any(Array),
-        expect.objectContaining({
-          intent: "adventure_story",
-          adventureDeclined: true,
-        }),
-      );
+      const chunks = await collect(service.streamReply(req));
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks[0]).not.toContain("冒险");
+      expect(llm.completeStream).toHaveBeenCalledTimes(1);
+      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
     });
 
-    it("passes the character persona to the filler for identity consistency", async () => {
+    it("filler 不读取 persona，也不会出现角色名", async () => {
       configGet.mockImplementation((key: string) =>
         key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
       );
@@ -1664,23 +1619,16 @@ describe("LlmAdapterModule", () => {
         ...deviceRow,
         characterKey: "polly",
       });
-      llm.completeStream.mockImplementation((opts: { scene: string }) =>
-        opts.scene === "filler"
-          ? makeStream(["画小猫听起来真棒呀"])()
-          : makeStream(["画得真好"])(),
-      );
+      llm.completeStream.mockReturnValue(makeStream(["画得真好"])());
       const req: ChatCompletionRequest = {
         ...boundRequest,
         messages: [{ role: "user", content: "我今天画了一只小猫" }],
       };
-      await collect(service.streamReply(req));
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
-        "我今天画了一只小猫",
-        expect.any(Array),
-        expect.objectContaining({
-          persona: expect.stringContaining("小马 Polly"),
-        }),
-      );
+      const chunks = await collect(service.streamReply(req));
+      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks[0]).not.toContain("Polly");
+      expect(chunks[0]).not.toContain("Elly");
+      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
     });
 
     it("孩子档案（含性别）传主模型，精简摘要传 filler", async () => {
@@ -1699,13 +1647,9 @@ describe("LlmAdapterModule", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       });
-      llm.completeStream.mockImplementation((opts: { scene: string }) =>
-        opts.scene === "filler"
-          ? makeStream(["你好呀你在做什么呢"])()
-          : makeStream(["Hi Lily"])(),
-      );
+      llm.completeStream.mockReturnValue(makeStream(["Hi Lily"])());
 
-      await collect(service.streamReply(boundRequest));
+      const chunks = await collect(service.streamReply(boundRequest));
 
       expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         expect.any(String),
@@ -1719,13 +1663,10 @@ describe("LlmAdapterModule", () => {
           },
         }),
       );
-      expect(llm.buildFillerPrompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(Array),
-        expect.objectContaining({
-          childBrief: expect.stringContaining("名叫 Lily"),
-        }),
-      );
+      expect(FILLER_POOLS.en_neutral).toContain(chunks[0]);
+      expect(chunks[0]).not.toContain("Lily");
+      expect(chunks[0]).not.toContain("莉莉");
+      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
     });
 
     it("raises main-stream maxTokens to 800 for story turns", async () => {
@@ -1870,16 +1811,31 @@ describe("LlmAdapterModule", () => {
         blocked: true,
         category: "violence",
         layer: "L1",
+        source: "l1_regex",
         matched: "x",
       });
       const chunks = await collect(service.streamReply(boundRequest));
       expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
       expect(llm.completeStream).not.toHaveBeenCalled();
       expect(prisma.message.create).toHaveBeenCalledTimes(2);
+      const userCall = prisma.message.create.mock.calls[0][0];
       const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L1",
+        category: "violence",
+        reply: "canned_block",
+      });
       expect(assistantCall.data.rawPayload).toMatchObject({
         safetyCategory: "violence",
         safetyLayer: "L1",
+        safety: {
+          layer: "L1",
+          category: "violence",
+          blocked: true,
+          source: "l1_regex",
+          reply: "canned_block",
+          inferred: false,
+        },
       });
     });
 
@@ -1928,6 +1884,7 @@ describe("LlmAdapterModule", () => {
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
+          { provide: SafetyGateService, useValue: safetyGate },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
       }).compile();
@@ -2213,6 +2170,45 @@ describe("LlmAdapterModule", () => {
       expect(childSafety.classifyL2).not.toHaveBeenCalled();
     });
 
+    it("冒险接管且接话层触发 L2：记录真实 safety 结论，不再记盲区", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return { texts: ["段落一"], action: "await_reply" };
+        },
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: "safe",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      await collect(service.streamReply(boundReq("我选第一个")));
+
+      expect(childSafety.classifyL2).toHaveBeenCalledWith(
+        "我选第一个",
+        "dev-internal-1",
+        expect.any(String),
+      );
+      expect(recorded()).toMatchObject({
+        deviceId: "dev-internal-1",
+        safety: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+        },
+        intent: null,
+        intentSource: "adventure_takeover",
+      });
+    });
+
     it("L2 拦截：记 l2_model 与类别，intent 记 not_routed，原话交给 recorder 判定是否留存", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       childSafety.classifyL2.mockResolvedValue({
@@ -2249,6 +2245,404 @@ describe("LlmAdapterModule", () => {
         intent: "free_chat",
         intentSource: "model",
       });
+    });
+
+    it("SAFETY_GATE_NORMAL=off：不调用 gate，保持旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+    });
+
+    it("SAFETY_GATE_SLEEP=on：free_chat 仍读 NORMAL 键，不被哄睡开关接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("假数据-暴力表达")),
+      );
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(chunks).toEqual(["这个话题不适合小朋友聊哦。"]);
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+    });
+
+    it("SAFETY_GATE_NORMAL=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "unsafe_line_echo",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(
+        service.streamReply(boundReq("今天天气不错")),
+      );
+
+      expect(chunks).toEqual(["好的呀"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(childSafety.classifyL2).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_NORMAL=shadow：两解释器一致时不告警", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(
+        service.streamReply(boundReq("今天天气不错")),
+      );
+
+      expect(chunks).toEqual(["好的呀"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_NORMAL=on：普通聊天由 gate 决策接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "default",
+        verdict: {
+          blocked: true,
+          category: "violence",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked",
+        promptInstruction: undefined,
+        snapshot: {
+          layer: "L2",
+          category: "violence",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("假数据-暴力表达")),
+      );
+
+      expect(chunks).toEqual(["gate blocked"]);
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
+    });
+
+    it("SAFETY_GATE_SLEEP=off：哄睡不调用 gate", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("晚安")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+    });
+
+    it("SAFETY_GATE_NORMAL=on：哄睡仍读 SLEEP 键，不被普通聊天开关接管", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_NORMAL" ? "on" : original(key),
+      );
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(safetyGate.interpret).not.toHaveBeenCalled();
+      expect(chunks).toEqual(["晚安故事来了"]);
+    });
+
+    it("SAFETY_GATE_SLEEP=shadow：一次 L2 + 双解释器 diff，输出仍走旧链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "unsafe_line_echo",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["晚安故事来了"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(childSafety.classifyL2).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_SLEEP=shadow：两解释器一致时不告警", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "shadow" : original(key),
+      );
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+      });
+      const warnSpy = jest.spyOn(
+        (service as unknown as { logger: { warn: (m: string) => void } })
+          .logger,
+        "warn",
+      );
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["晚安故事来了"]);
+      expect(safetyGate.interpret).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("SAFETY_GATE_SLEEP=on：哄睡故事由 gate 拦截", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: true,
+          category: "violence",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked sleep",
+        promptInstruction: undefined,
+        snapshot: {
+          layer: "L2",
+          category: "violence",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
+      });
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["gate blocked sleep"]);
+      expect(llm.completeStream).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked sleep");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
+    });
+
+    it("SAFETY_GATE_SLEEP=on：sleep_config 被 gate 拦截时不进短链路", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_config",
+        source: "model",
+      });
+      const original = configGet.getMockImplementation() as (
+        key: string,
+      ) => string | undefined;
+      configGet.mockImplementation((key: string) =>
+        key === "SAFETY_GATE_SLEEP" ? "on" : original(key),
+      );
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "self_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+      safetyGate.interpret.mockReturnValue({
+        profile: "sleep",
+        verdict: {
+          blocked: true,
+          category: "self_harm",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: true,
+        safetyReply: "canned_block",
+        cannedReply: "gate blocked config",
+        promptInstruction: undefined,
+        snapshot: {
+          layer: "L2",
+          category: "self_harm",
+          blocked: true,
+          source: "l2_model",
+          matched: null,
+          reply: "canned_block",
+          inferred: false,
+        },
+      });
+
+      const chunks = await collect(
+        service.streamReply(boundReq("哄睡改成二十分钟")),
+      );
+
+      expect(chunks).toEqual(["gate blocked config"]);
+      expect(sleepVoice.handle).not.toHaveBeenCalled();
+      expect(recorded()).toMatchObject({ safetyReply: "canned_block" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.content).toBe("gate blocked config");
+      expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
     });
 
     it("哄睡设置短链路：intent 记 sleep_config 并透传会话服务给出的 source", async () => {
@@ -2382,6 +2776,542 @@ describe("LlmAdapterModule", () => {
         intent: "free_chat",
         intentSource: "no_device",
       });
+    });
+
+    it("冒险 L2 拦截：记录 canned_block 与原文，assistant rawPayload 带 safety", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "violence",
+        layer: "L2",
+        source: "l2_model",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: [ADVENTURE_UNSAFE_LINE],
+            action: "await_reply",
+            result: "off_topic",
+            safetyBlocked: true,
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "canned_block",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "violence",
+        blocked: true,
+        reply: "canned_block",
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "violence",
+        blocked: true,
+        source: "l2_model",
+        reply: "canned_block",
+        inferred: false,
+      });
+    });
+
+    describe("SAFETY_GATE_ADVENTURE 三档", () => {
+      const stubEvaluation = (
+        over: Partial<SafetyHandleEvaluation> = {},
+      ): SafetyHandleEvaluation => ({
+        profile: "adventure",
+        verdict: {
+          blocked: false,
+          category: "safe",
+          layer: "L2",
+          source: "l2_model",
+          matched: null,
+        },
+        blocked: false,
+        safetyReply: "none",
+        cannedReply: undefined,
+        promptInstruction: undefined,
+        snapshot: null,
+        evaluated: true,
+        ...over,
+      });
+
+      const makeHandle = (evaluation: SafetyEvaluation) => ({
+        evaluateIfNeeded: jest.fn().mockResolvedValue(evaluation.verdict),
+        promptInstruction: jest.fn(),
+        finalize: jest.fn().mockReturnValue(evaluation),
+      });
+
+      const withGateMode = (mode: string) => {
+        const original = configGet.getMockImplementation() as (
+          key: string,
+        ) => string | undefined;
+        configGet.mockImplementation((key: string) =>
+          key === "SAFETY_GATE_ADVENTURE" ? mode : original(key),
+        );
+      };
+
+      it("off：不建 handle，仍把 getSafety 交给引擎", async () => {
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(safetyGate.openLazyHandle).not.toHaveBeenCalled();
+        const options = adventure.handleChildReply.mock.calls[0][2] as {
+          getSafety?: unknown;
+          safetyHandle?: unknown;
+        };
+        expect(options.getSafety).toEqual(expect.any(Function));
+        expect(options.safetyHandle).toBeUndefined();
+        expect(recorded()).toMatchObject({
+          safetySource: "not_evaluated",
+          safetyReply: "none",
+        });
+      });
+
+      it("其它两档开关打开不影响冒险：仍读 ADVENTURE 键", async () => {
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const original = configGet.getMockImplementation() as (
+          key: string,
+        ) => string | undefined;
+        configGet.mockImplementation((key: string) =>
+          key === "SAFETY_GATE_NORMAL" || key === "SAFETY_GATE_SLEEP"
+            ? "on"
+            : original(key),
+        );
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(safetyGate.openLazyHandle).not.toHaveBeenCalled();
+        expect(adventure.handleChildReply).toHaveBeenCalledWith(
+          deviceRow.id,
+          "我选第一个",
+          expect.objectContaining({ getSafety: expect.any(Function) }),
+        );
+      });
+
+      it("shadow：一次 finalize + 双解释器 diff，落库与播出仍走 legacy", async () => {
+        withGateMode("shadow");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+        const evaluation = stubEvaluation({
+          blocked: true,
+          safetyReply: "canned_block",
+          cannedReply: ADVENTURE_UNSAFE_LINE,
+          snapshot: {
+            layer: "L2",
+            category: "safe",
+            blocked: true,
+            source: "l2_model",
+            matched: null,
+            reply: "canned_block",
+            inferred: false,
+          },
+        });
+        const handle = makeHandle(evaluation);
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        const warnSpy = jest.spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        );
+
+        const chunks = await collect(
+          service.streamReply(boundReq("我选第一个")),
+        );
+
+        expect(safetyGate.openLazyHandle).toHaveBeenCalledWith(
+          expect.objectContaining({
+            profile: "adventure",
+            getVerdict: expect.any(Function),
+          }),
+        );
+        expect(handle.finalize).toHaveBeenCalledWith({
+          texts: ["段落一"],
+          safetyBlocked: undefined,
+          safetyDisposition: undefined,
+        });
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+        );
+        expect(chunks).toEqual(["段落一"]);
+        expect(recorded()).toMatchObject({ safetyReply: "none" });
+        warnSpy.mockRestore();
+      });
+
+      it("shadow：两解释器一致时不告警", async () => {
+        withGateMode("shadow");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: ["段落一"],
+          action: "await_reply",
+        });
+        const handle = makeHandle(stubEvaluation());
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        const warnSpy = jest.spyOn(
+          (service as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          "warn",
+        );
+
+        await collect(service.streamReply(boundReq("我选第一个")));
+
+        expect(warnSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining("SAFETY_GATE_SHADOW_MISMATCH"),
+        );
+        warnSpy.mockRestore();
+      });
+
+      it("on：record 与 assistant 快照来自 finalize，播出文本不被替换", async () => {
+        withGateMode("on");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const blockedVerdict = {
+          blocked: true,
+          category: "violence" as const,
+          layer: "L2" as const,
+          source: "l2_model" as const,
+          matched: null,
+        };
+        const evaluation = stubEvaluation({
+          verdict: blockedVerdict,
+          blocked: true,
+          safetyReply: "canned_block",
+          cannedReply: ADVENTURE_UNSAFE_LINE,
+          snapshot: {
+            layer: "L2",
+            category: "violence",
+            blocked: true,
+            source: "l2_model",
+            matched: null,
+            reply: "canned_block",
+            inferred: false,
+          },
+        });
+        const handle = makeHandle(evaluation);
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        adventure.handleChildReply.mockResolvedValue({
+          texts: [ADVENTURE_UNSAFE_LINE],
+          action: "await_reply",
+          result: "off_topic",
+          safetyBlocked: true,
+          safetyDisposition: "canned_block",
+        });
+
+        const chunks = await collect(
+          service.streamReply(boundReq("我要拿刀伤人")),
+        );
+
+        expect(chunks).toEqual([ADVENTURE_UNSAFE_LINE]);
+        expect(handle.finalize).toHaveBeenCalledWith({
+          texts: [ADVENTURE_UNSAFE_LINE],
+          safetyBlocked: true,
+          safetyDisposition: "canned_block",
+        });
+        expect(recorded()).toMatchObject({
+          safety: blockedVerdict,
+          safetyReply: "canned_block",
+          intent: null,
+          intentSource: "adventure_takeover",
+        });
+        const assistantCall = prisma.message.create.mock.calls[1][0];
+        expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
+      });
+
+      it("on：引擎抛错降级时复用 verdict，不平白多调 L2", async () => {
+        withGateMode("on");
+        prisma.device.findFirst.mockResolvedValue(deviceRow);
+        const safeVerdict = {
+          blocked: false,
+          category: "safe" as const,
+          layer: "L2" as const,
+          source: "l2_model" as const,
+          matched: null,
+        };
+        const handle = makeHandle(stubEvaluation({ verdict: safeVerdict }));
+        safetyGate.openLazyHandle.mockReturnValue(handle);
+        adventure.handleChildReply.mockRejectedValue(new Error("boom"));
+        llm.completeStream.mockReturnValue(makeStream(["嗯，我在听"])());
+
+        const chunks = await collect(
+          service.streamReply(boundReq("今天想聊什么")),
+        );
+
+        expect(handle.evaluateIfNeeded).toHaveBeenCalledTimes(1);
+        expect(childSafety.classifyL2).not.toHaveBeenCalled();
+        expect(chunks).toEqual(["嗯，我在听"]);
+      });
+    });
+
+    it("冒险 fail-open 且模型回抄安全句：记录 unsafe_line_echo 与原文", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: [`嗯……${ADVENTURE_UNSAFE_LINE}`],
+            action: "await_reply",
+            result: "answered",
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "unsafe_line_echo",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: false,
+        source: "l2_fail_open",
+        reply: "unsafe_line_echo",
+        inferred: false,
+      });
+    });
+
+    it("冒险未评估但模型回抄安全句：消息也写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "unsafe_line_echo",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      for (const call of [userCall, assistantCall]) {
+        expect(call.data.rawPayload.safety).toMatchObject({
+          layer: null,
+          category: null,
+          blocked: false,
+          source: "inferred_from_reply",
+          reply: "unsafe_line_echo",
+          inferred: true,
+        });
+      }
+    });
+
+    it("冒险未评估且未触发安全话术：不写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: ["我们继续去森林吧。"],
+        action: "await_reply",
+        result: "answered",
+      });
+
+      await collect(service.streamReply(boundReq("我觉得他会害怕")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetySource: "not_evaluated",
+        safetyReply: "none",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload).not.toHaveProperty("safety");
+      expect(assistantCall.data.rawPayload).not.toHaveProperty("safety");
+    });
+
+    it("防御：无 verdict 但代码返回安全话术，仍写退化快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      adventure.handleChildReply.mockResolvedValue({
+        texts: [ADVENTURE_UNSAFE_LINE],
+        action: "await_reply",
+        result: "off_topic",
+        safetyBlocked: true,
+      });
+
+      await collect(service.streamReply(boundReq("你不应该偷拿别人的东西哦")));
+
+      expect(recorded()).toMatchObject({
+        safety: null,
+        safetyReply: "canned_block",
+        asrText: "你不应该偷拿别人的东西哦",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: true,
+        source: "not_evaluated",
+        reply: "canned_block",
+        inferred: true,
+      });
+    });
+
+    it("冒险 fail-open 未回抄：记录 caution_injected 与原文", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      adventure.handleChildReply.mockImplementation(
+        async (
+          _deviceId: string,
+          _text: string,
+          options?: { getSafety?: () => Promise<unknown> },
+        ) => {
+          await options?.getSafety?.();
+          return {
+            texts: ["我们继续去森林吧。"],
+            action: "await_reply",
+            result: "answered",
+          };
+        },
+      );
+
+      await collect(service.streamReply(boundReq("我觉得他会害怕")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "caution_injected",
+        asrText: "我觉得他会害怕",
+      });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        source: "l2_fail_open",
+        reply: "caution_injected",
+      });
+    });
+
+    it("普通 L2 拦截：assistant rawPayload 也带 safety 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: true,
+        category: "self_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+
+      await collect(service.streamReply(boundReq("假数据-自伤表达")));
+
+      expect(recorded()).toMatchObject({
+        safetyReply: "canned_block",
+        asrText: "假数据-自伤表达",
+      });
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "self_harm",
+        reply: "canned_block",
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "self_harm",
+        blocked: true,
+        source: "l2_model",
+        reply: "canned_block",
+      });
+    });
+
+    it("普通链路 L2 不可用：assistant rawPayload 记 fail-open 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: null,
+        layer: null,
+        source: "l2_fail_open",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["我们聊点别的吧"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      expect(recorded()).toMatchObject({ safetyReply: "none" });
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: null,
+        category: null,
+        blocked: false,
+        source: "l2_fail_open",
+        reply: "none",
+      });
+    });
+
+    it("哄睡模式 emotional_harm：assistant rawPayload 带 safety 快照", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      childSafety.classifyL2.mockResolvedValue({
+        blocked: false,
+        category: "emotional_harm",
+        layer: "L2",
+        source: "l2_model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("我要听睡前故事")));
+
+      const userCall = prisma.message.create.mock.calls[0][0];
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(userCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "emotional_harm",
+        blocked: false,
+      });
+      expect(assistantCall.data.rawPayload.safety).toMatchObject({
+        layer: "L2",
+        category: "emotional_harm",
+        blocked: false,
+        source: "l2_model",
+        reply: "none",
+      });
+    });
+
+    it("正常 safe 轮次不写 safety 快照，避免每条消息膨胀", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      llm.completeStream.mockReturnValue(makeStream(["好的呀"])());
+
+      await collect(service.streamReply(boundReq("今天天气不错")));
+
+      const assistantCall = prisma.message.create.mock.calls[1][0];
+      expect(assistantCall.data.rawPayload).not.toHaveProperty("safety");
     });
   });
 

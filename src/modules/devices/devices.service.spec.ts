@@ -35,6 +35,9 @@ describe("DevicesService", () => {
             childProfile: {
               findUnique: jest.fn(),
             },
+            message: {
+              groupBy: jest.fn().mockResolvedValue([]),
+            },
             userDeviceBinding: {
               findUnique: jest.fn(),
               findMany: jest.fn(),
@@ -357,6 +360,27 @@ describe("DevicesService", () => {
   });
 
   describe("list", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date("2026-11-25T04:00:00.000Z"));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    const mockBindings = (devices: Array<Record<string, unknown>>) => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue(
+        devices.map((device, index) => ({
+          device: {
+            id: `device-uuid-${index + 1}`,
+            deviceId: `dev-00${index + 1}`,
+            ...device,
+          },
+        })),
+      );
+    };
+
     it("should return devices bound to user with child profile", async () => {
       prisma.userDeviceBinding.findMany.mockResolvedValue([
         {
@@ -386,6 +410,18 @@ describe("DevicesService", () => {
           { deviceId: "asc" },
         ],
       });
+      expect(prisma.message.groupBy).toHaveBeenCalledWith({
+        by: ["deviceId"],
+        where: {
+          deviceId: { in: ["device-uuid-001", "device-uuid-002"] },
+          role: "user",
+          spokeAt: {
+            gte: new Date("2026-11-24T16:00:00.000Z"),
+            lt: new Date("2026-11-25T16:00:00.000Z"),
+          },
+        },
+        _count: { _all: true },
+      });
       expect(result).toEqual([
         {
           id: "dev-001",
@@ -395,6 +431,11 @@ describe("DevicesService", () => {
           networkType: undefined,
           firmwareVersion: undefined,
           childProfile: { name: "二狗", englishName: "Lebron" },
+          todayUsage: {
+            date: "2026-11-25",
+            durationMinutes: 0,
+            turnCount: 0,
+          },
         },
         {
           id: "dev-002",
@@ -404,8 +445,89 @@ describe("DevicesService", () => {
           networkType: undefined,
           firmwareVersion: undefined,
           childProfile: null,
+          todayUsage: {
+            date: "2026-11-25",
+            durationMinutes: 0,
+            turnCount: 0,
+          },
         },
       ]);
+    });
+
+    it("aggregates today's user messages into duration and turn count", async () => {
+      mockBindings([{ childProfile: null }]);
+      prisma.message.groupBy.mockResolvedValue([
+        { deviceId: "device-uuid-1", _count: { _all: 7 } },
+      ]);
+
+      const result = await service.list("user-001");
+
+      expect(result[0].todayUsage).toEqual({
+        date: "2026-11-25",
+        durationMinutes: 4,
+        turnCount: 7,
+      });
+    });
+
+    it("uses each device's timezone to define today", async () => {
+      mockBindings([
+        { timezone: "Asia/Shanghai", childProfile: null },
+        { timezone: "America/Toronto", childProfile: null },
+      ]);
+      prisma.message.groupBy
+        .mockResolvedValueOnce([
+          { deviceId: "device-uuid-1", _count: { _all: 3 } },
+        ])
+        .mockResolvedValueOnce([]);
+
+      const result = await service.list("user-001");
+
+      expect(prisma.message.groupBy).toHaveBeenCalledTimes(2);
+      const [shanghaiCall, torontoCall] = prisma.message.groupBy.mock.calls;
+      expect(shanghaiCall[0].where.deviceId).toEqual({
+        in: ["device-uuid-1"],
+      });
+      expect(shanghaiCall[0].where.spokeAt).toEqual({
+        gte: new Date("2026-11-24T16:00:00.000Z"),
+        lt: new Date("2026-11-25T16:00:00.000Z"),
+      });
+      expect(torontoCall[0].where.deviceId).toEqual({
+        in: ["device-uuid-2"],
+      });
+      expect(torontoCall[0].where.spokeAt).toEqual({
+        gte: new Date("2026-11-24T05:00:00.000Z"),
+        lt: new Date("2026-11-25T05:00:00.000Z"),
+      });
+      expect(result[0].todayUsage).toEqual({
+        date: "2026-11-25",
+        durationMinutes: 2,
+        turnCount: 3,
+      });
+      expect(result[1].todayUsage).toEqual({
+        date: "2026-11-24",
+        durationMinutes: 0,
+        turnCount: 0,
+      });
+    });
+
+    it("degrades todayUsage to null when aggregation fails", async () => {
+      mockBindings([{ childProfile: { name: "二狗" } }]);
+      prisma.message.groupBy.mockRejectedValue(new Error("db down"));
+
+      const result = await service.list("user-001");
+
+      expect(result).toHaveLength(1);
+      expect(result[0].todayUsage).toBeNull();
+      expect(result[0].childProfile).toEqual({ name: "二狗" });
+    });
+
+    it("skips the usage query when the user has no devices", async () => {
+      prisma.userDeviceBinding.findMany.mockResolvedValue([]);
+
+      const result = await service.list("user-001");
+
+      expect(result).toEqual([]);
+      expect(prisma.message.groupBy).not.toHaveBeenCalled();
     });
   });
 
@@ -564,6 +686,8 @@ describe("DevicesService", () => {
         volume: 50,
         version: "1.2.3",
         charging: true,
+        networkMode: "wifi",
+        wifiRssi: -48,
         lastSeenAt,
         online: true,
       });
@@ -577,8 +701,69 @@ describe("DevicesService", () => {
         battery: 80,
         volume: 50,
         isCharging: true,
+        networkMode: "wifi",
+        wifiRssi: -48,
         lastActiveAt: new Date(lastSeenAt).toISOString(),
       });
+    });
+
+    it("should expose 4G mode with null RSSI", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 100,
+        volume: 75,
+        version: "1.0.4",
+        charging: false,
+        networkMode: "4g",
+        wifiRssi: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.networkMode).toBe("4g");
+      expect(result.wifiRssi).toBeNull();
+    });
+
+    it("should keep last known signal when the device is offline", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 40,
+        volume: 50,
+        version: "1.0.4",
+        charging: false,
+        networkMode: "wifi",
+        wifiRssi: -72,
+        lastSeenAt: Date.now() - 90_000,
+        online: false,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.status).toBe("offline");
+      expect(result.networkMode).toBe("wifi");
+      expect(result.wifiRssi).toBe(-72);
+    });
+
+    it("should normalize missing network keys to null (old cache shape)", async () => {
+      mockDevice();
+      deviceLink.getStatus.mockResolvedValue({
+        mac: "AABBCCDDEEFF",
+        battery: 80,
+        volume: 50,
+        version: "1.2.3",
+        charging: null,
+        lastSeenAt: Date.now(),
+        online: true,
+      });
+
+      const result = await service.status("dev-001");
+
+      expect(result.networkMode).toBeNull();
+      expect(result.wifiRssi).toBeNull();
     });
 
     it("should expose volume so the mini program renders the real device volume", async () => {
@@ -654,6 +839,8 @@ describe("DevicesService", () => {
         battery: null,
         volume: null,
         isCharging: null,
+        networkMode: null,
+        wifiRssi: null,
         lastActiveAt: null,
       });
     });

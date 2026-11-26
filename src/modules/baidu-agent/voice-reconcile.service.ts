@@ -7,18 +7,22 @@ import {
   VoiceCatalogPort,
   BAIDU_AGENT_CLIENT_PORT,
   BaiduAgentClientPort,
+  CHARACTER_TIMBRE_PORT,
+  CharacterTimbrePort,
   DesiredVoiceState,
   VoiceApplyOutcome,
   VoiceReconcilePort,
   VoiceApplyBlockReason,
-  parseVoicePayload,
   TTS_SPD_MIN,
   TTS_SPD_MAX,
   DEFAULT_NORMAL_SPD,
   DEFAULT_SLEEP_SPD,
   VOICE_SPEED_CONFIG_ID,
+  VOICE_APPLIED_KEY_PREFIX,
+  VOICE_APPLIED_TTL_SECONDS,
 } from "./baidu-agent.types";
 import { buildTtsConfig } from "./tts-config.util";
+import { isActiveSleepSession } from "./sleep-session.util";
 import {
   botCurrentKey,
   botInstanceKey,
@@ -44,27 +48,15 @@ interface BotInstanceRecordView {
  * 1. 从 DeviceConfig 读取设备当前期望的音色与语速；
  * 2. 对活跃百度实例实时下发（通过 switchSceneRole），或在条件不满足时返回
  *    可归因的 deferred 原因，留给下一轮 bot/start 追平；
- * 3. 提供 IP/角色 → timbreId 查表（CHARACTER_TIMBRE_JSON），是平台侧「某个 IP 用哪个
- *    音色」的唯一真相。设备端协议 v1.4（2026-11-18）新增 POST /client/bot/bot/getvalue：
- *    固件每轮创建百度实例前拉取 vcn/vol/spd 且**不缓存**，vcn 即取自这张表；
- *    剧情内多 IP 同剧时按角色切音色也查同一张表。
+ * 3. 提供 IP/角色 → timbreId 查表（character_timbre 表，见 CharacterTimbreService），
+ *    是平台侧「某个 IP 用哪个音色」的唯一真相。设备端协议 v1.4（2026-11-18）新增
+ *    POST /client/bot/bot/getvalue：固件每轮创建百度实例前拉取 vcn/vol/spd 且**不缓存**，
+ *    vcn 即取自这张表；剧情内多 IP 同剧时按角色切音色也查同一张表。
  *    getvalue 的服务端实现见 ClientApiService.botGetValue。
  */
 @Injectable()
 export class VoiceReconcileService implements VoiceReconcilePort {
   private readonly logger = new Logger(VoiceReconcileService.name);
-
-  /**
-   * IP（Device.characterKey，如 elly / polly）→ timbreId 权威映射。
-   *
-   * 产品决策，走配置注入：音色目录本身还是 placeholder（TODO(Q1)），把具体 id
-   * 写进代码等于把待确认值固化。默认空表 → 查表一律返回 null，由调用方决定降级。
-   *
-   * 产品定义（熊总 2026-11-17）：一个机芯对应一个 IP，一个 IP 只有一个专属音色，
-   * 家长不在小程序端选择音色——所以本映射的键就是 IP，值就是它唯一的音色。
-   * 消费方见 getTimbreForCharacter（getvalue 与剧情内切音色共用）。
-   */
-  private readonly characterTimbre: ReadonlyMap<string, string>;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -73,32 +65,23 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     @Inject(VOICE_CATALOG_PORT) private readonly catalog: VoiceCatalogPort,
     @Inject(BAIDU_AGENT_CLIENT_PORT)
     private readonly client: BaiduAgentClientPort,
-  ) {
-    this.characterTimbre = this.parseCharacterTimbre(
-      this.configService.get<string>("CHARACTER_TIMBRE_JSON"),
-    );
-  }
+    @Inject(CHARACTER_TIMBRE_PORT)
+    private readonly characterTimbre: CharacterTimbrePort,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // VoiceReconcilePort
   // ---------------------------------------------------------------------------
 
-  /** 查该设备 isActive:true 且 createdAt 最新的 DeviceConfig，返回期望音色/语速。 */
-  async readDesired(deviceInternalId: string): Promise<DesiredVoiceState> {
-    const config = await this.prisma.deviceConfig.findFirst({
-      where: { deviceId: deviceInternalId, isActive: true },
-      orderBy: { createdAt: "desc" },
+  /** 当前会话应生效的语速：哄睡中 sleepSpd，否则 normalSpd。 */
+  async resolveActiveSpd(deviceInternalId: string): Promise<number> {
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { deviceId: deviceInternalId },
+      select: { currentMode: true, expiresAt: true },
     });
-
-    if (!config) {
-      return { vcn: null, speechRate: null };
-    }
-
-    const voice = parseVoicePayload(config.payload);
-    return {
-      vcn: voice?.vcn ?? null,
-      speechRate: (config.speechRate as string | null) ?? null,
-    };
+    return isActiveSleepSession(session)
+      ? this.resolveSleepSpd()
+      : this.resolveNormalSpd();
   }
 
   /** 非哄睡语速倍数；DB 无行或越界时回落 DEFAULT_NORMAL_SPD（不猜）。 */
@@ -126,14 +109,25 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   }
 
   /**
-   * 角色/IP → timbreId 查表；未配置或未命中返回 null，由调用方决定降级。
+   * 角色/IP → timbreId 查表；null/空 key 或未命中返回 null，由调用方决定降级。
    *
-   * 纯查表，不校验 timbreId 是否在音色目录内：目录本身还是 placeholder
-   * （TODO(Q1)），此刻校验只会把「待确认」误判为「不合法」。
+   * 委托 CharacterTimbreService（内存缓存），保留「永不抛错」的旧语义：
+   * 缓存内部已吞 DB 异常，这里再兜一层，防止端口实现异常打断 getvalue。
    */
-  getTimbreForCharacter(characterKey: string | null): string | null {
-    if (!characterKey) return null;
-    return this.characterTimbre.get(characterKey) ?? null;
+  async getTimbreForCharacter(
+    characterKey: string | null,
+  ): Promise<string | null> {
+    if (!characterKey || characterKey.trim().length === 0) return null;
+    try {
+      return await this.characterTimbre.get(characterKey);
+    } catch (error) {
+      this.logger.warn(
+        `timbre lookup failed, characterKey=${characterKey}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -145,6 +139,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   async applyToActiveInstance(
     mac: string,
     desired: DesiredVoiceState,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome> {
     if (desired.vcn === null) {
       return { applied: "noop" };
@@ -163,7 +158,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       return { applied: "deferred", reason: "no_active_instance" };
     }
 
-    return this.dispatchToInstance(mac, instanceId, desired);
+    return this.dispatchToInstance(mac, instanceId, desired, deviceInternalId);
   }
 
   /**
@@ -175,26 +170,33 @@ export class VoiceReconcileService implements VoiceReconcilePort {
   async onInstanceRegistered(
     mac: string,
     instanceId: string,
-    deviceInternalId?: string,
+    device?: { id: string; characterKey: string | null },
   ): Promise<VoiceApplyOutcome> {
     try {
       // bot/start 已经查过 Device（401 校验），传进来就免掉这次重复查询。
-      let internalId = deviceInternalId;
-      if (!internalId) {
-        const device = await this.prisma.device.findUnique({
+      const resolved =
+        device ??
+        (await this.prisma.device.findUnique({
           where: { deviceId: mac },
-        });
-        if (!device) {
-          this.logger.warn(
-            `Voice reconcile deferred: device not found, mac=${mac}`,
-          );
-          return { applied: "deferred", reason: "invalid_request" };
-        }
-        internalId = device.id;
+          select: { id: true, characterKey: true },
+        }));
+      if (!resolved) {
+        this.logger.warn(
+          `Voice reconcile deferred: device not found, mac=${mac}`,
+        );
+        return { applied: "deferred", reason: "invalid_request" };
       }
 
-      const desired = await this.readDesired(internalId);
-      return this.dispatchToInstance(mac, instanceId, desired);
+      const vcn = await this.getTimbreForCharacter(resolved.characterKey);
+      if (!vcn) {
+        this.logger.warn(
+          `Voice reconcile skipped: no timbre for characterKey=${resolved.characterKey}, mac=${mac}`,
+        );
+        return { applied: "noop" };
+      }
+
+      const spd = await this.resolveActiveSpd(resolved.id);
+      return await this.applyToInstance(mac, instanceId, vcn, spd, false);
     } catch (error) {
       this.logger.warn(
         `Voice reconcile deferred: error, mac=${mac}, instanceId=${instanceId}, error=${
@@ -214,6 +216,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     mac: string,
     vcn: string,
     spd: number,
+    options: { force?: boolean } = {},
   ): Promise<VoiceApplyOutcome> {
     if (!this.client.enabled) {
       this.logger.debug(`Voice apply deferred: client disabled, mac=${mac}`);
@@ -226,12 +229,107 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       return { applied: "deferred", reason: "no_active_instance" };
     }
 
-    return this.dispatchSpd(mac, instanceId, vcn, spd);
+    return this.applyToInstance(
+      mac,
+      instanceId,
+      vcn,
+      spd,
+      options.force === true,
+    );
+  }
+
+  /** 记录 getvalue 已交付的 TTS 状态，避免紧随其后的 start 追平重复出站。 */
+  async noteApplied(mac: string, vcn: string, spd: number): Promise<void> {
+    await this.markApplied(mac, vcn, spd);
   }
 
   // ---------------------------------------------------------------------------
   // private helpers
   // ---------------------------------------------------------------------------
+
+  private appliedKey(mac: string): string {
+    return `${VOICE_APPLIED_KEY_PREFIX}${mac}`;
+  }
+
+  private async readApplied(
+    mac: string,
+  ): Promise<{ vcn: string; spd: number } | null> {
+    try {
+      const raw = await this.redis.getValue(this.appliedKey(mac));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { vcn?: unknown; spd?: unknown };
+      if (typeof parsed?.vcn !== "string" || typeof parsed?.spd !== "number") {
+        return null;
+      }
+      return { vcn: parsed.vcn, spd: parsed.spd };
+    } catch {
+      // 缓存不可用按 miss 处理：宁可多下发一次，也不阻断设备对话。
+      return null;
+    }
+  }
+
+  private async markApplied(
+    mac: string,
+    vcn: string,
+    spd: number,
+  ): Promise<void> {
+    try {
+      await this.redis.setValue(
+        this.appliedKey(mac),
+        JSON.stringify({ vcn, spd }),
+        VOICE_APPLIED_TTL_SECONDS,
+      );
+    } catch (error) {
+      this.logger.debug(
+        `Voice applied cache write failed, mac=${mac}, error=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * 已拿到 instanceId 后的缓存检查 + 下发。
+   * 缓存一致直接 noop；force 用于手动下发/显式修正，跳过缓存。
+   */
+  private async applyToInstance(
+    mac: string,
+    instanceId: string,
+    vcn: string,
+    spd: number,
+    force: boolean,
+  ): Promise<VoiceApplyOutcome> {
+    if (!this.client.enabled) {
+      this.logger.debug(`Voice apply deferred: client disabled, mac=${mac}`);
+      return { applied: "deferred", reason: "disabled" };
+    }
+
+    const trimmed = vcn?.trim();
+    if (!trimmed) {
+      this.logger.warn(
+        `Voice apply deferred: incomplete tts target, mac=${mac}, instanceId=${instanceId}`,
+      );
+      return { applied: "deferred", reason: "incomplete_tts_target" };
+    }
+    if (!Number.isFinite(spd) || spd < TTS_SPD_MIN || spd > TTS_SPD_MAX) {
+      this.logger.warn(
+        `Voice apply deferred: invalid spd, mac=${mac}, instanceId=${instanceId}, spd=${spd}`,
+      );
+      return { applied: "deferred", reason: "invalid_request" };
+    }
+
+    if (!force) {
+      const applied = await this.readApplied(mac);
+      if (applied && applied.vcn === trimmed && applied.spd === spd) {
+        this.logger.debug(
+          `Voice apply skipped: unchanged, mac=${mac}, instanceId=${instanceId}, spd=${spd}`,
+        );
+        return { applied: "noop" };
+      }
+    }
+
+    return this.dispatchSpd(mac, instanceId, trimmed, spd);
+  }
 
   /**
    * 读取并校验 Redis 中的实例登记记录。
@@ -278,6 +376,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     mac: string,
     instanceId: string,
     desired: DesiredVoiceState,
+    deviceInternalId?: string,
   ): Promise<VoiceApplyOutcome> {
     if (desired.vcn === null) {
       return { applied: "noop" };
@@ -316,7 +415,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       }
     }
 
-    // per-device 语速档位已被全局两值取代：这里只切音色，spd 恒用全局非哄睡语速。
+    // per-device 语速档位已被全局两值取代：spd 按当前会话模式取全局值。
     const vcn = desired.vcn;
     if (!vcn) {
       this.logger.warn(
@@ -324,7 +423,9 @@ export class VoiceReconcileService implements VoiceReconcilePort {
       );
       return { applied: "deferred", reason: "incomplete_tts_target" };
     }
-    const spd = await this.resolveNormalSpd();
+    const spd = deviceInternalId
+      ? await this.resolveActiveSpd(deviceInternalId)
+      : await this.resolveNormalSpd();
 
     let tts: string;
     try {
@@ -357,6 +458,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     this.logger.log(
       `Voice reconcile live, mac=${mac}, instanceId=${instanceId}`,
     );
+    await this.markApplied(mac, vcn, spd);
     return { applied: "live" };
   }
 
@@ -423,57 +525,7 @@ export class VoiceReconcileService implements VoiceReconcilePort {
     this.logger.log(
       `Voice apply spd live, mac=${mac}, instanceId=${instanceId}, spd=${spd}`,
     );
+    await this.markApplied(mac, trimmed, spd);
     return { applied: "live" };
-  }
-
-  // ---------------------------------------------------------------------------
-  // config parsing
-  // ---------------------------------------------------------------------------
-
-  /**
-   * 解析 IP/角色 → timbreId 映射（供剧情内切音色时查表）。
-   *
-   * timbreId 在百度侧是 Long，配置里写数字或字符串都接受（与
-   * VoiceCatalogService 对 timbreId 的宽容度保持一致），统一转字符串。
-   * 结构非法或值为空一律跳过该条，不整体失败——一个 IP 配错不该拖垮另一个。
-   */
-  private parseCharacterTimbre(
-    raw: string | undefined,
-  ): ReadonlyMap<string, string> {
-    if (!raw || raw.trim().length === 0) return new Map();
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      this.logger.warn(
-        "CHARACTER_TIMBRE_JSON is not valid JSON; character timbre lookups will always miss",
-      );
-      return new Map();
-    }
-
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      this.logger.warn(
-        "CHARACTER_TIMBRE_JSON must be a JSON object of characterKey -> timbreId",
-      );
-      return new Map();
-    }
-
-    const map = new Map<string, string>();
-    for (const [key, value] of Object.entries(
-      parsed as Record<string, unknown>,
-    )) {
-      if (typeof value === "string") {
-        const trimmed = value.trim();
-        if (trimmed.length > 0) map.set(key, trimmed);
-      } else if (typeof value === "number" && Number.isFinite(value)) {
-        map.set(key, String(value));
-      }
-    }
-    return map;
   }
 }

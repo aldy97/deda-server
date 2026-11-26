@@ -12,21 +12,32 @@
 管理员 JWT 与小程序 JWT 物理隔离：独立 secret（`ANALYTICS_JWT_SECRET`）、payload 必须带 `scope: "analytics"`。
 一期账号来源为环境变量白名单 `ANALYTICS_ADMIN_USERS`（JSON 数组，scrypt 哈希，格式见 `.env.example`）。
 
-`ANALYTICS_ADMIN_USERS` 里每个账号可带可选的 `scopes` 数组，声明该账号能碰哪些**专项模块**；
-签发时写入 JWT 的 `scopes` 声明，缺省为 `["analytics"]`。目前唯一的专项作用域是
-`adventure-content`（冒险内容管理台）——没有它的账号对 `/analytics/adventure-admin/*`
-**连读都是 403**。本次改动之前签发的 token 没有 `scopes` 字段，会被补成 `["analytics"]`，
-即「重新登录之前拿不到内容权限」。
+`ANALYTICS_ADMIN_USERS` 里每个账号可带可选的 `role`（`superadmin` / `admin`，缺省 `admin`）。
+它决定**能不能碰运维组**——模型监控、Prompt 管理、语速设置、冒险内容管理台、
+设备 wipe 全部要求 `role === "superadmin"`；其余报表页两类角色都能读。
+旧账号没有这个字段 → `admin`；非法值也回落 `admin`（fail-closed）。
+**改 role 或升级之后必须重新登录**：角色写在 JWT 里，7 天有效期内不会热更新。
+
+可选的 `scopes` 数组声明专项模块能力。`adventure-content` 是历史口径，
+现已不再单独构成入口：冒险内容管理台同时挂 `SuperAdminGuard`，只有 superadmin 能进。
 
 ```
 GET /analytics/auth/login?username=&password=
 → { token, adminInfo: { username, displayName } }
 
 GET /analytics/auth/profile   (Authorization: Bearer <token>)
-→ { username, displayName }
+→ { username, displayName, role }
+
+GET /analytics/meta           (Authorization: Bearer <token>)
+→ { nodeEnv, promptWriteEnabled, publishConfirmCode,
+    admin: { username, displayName, role } }
 ```
 
-错误码：401 未登录 / 凭据错误；403 token 非 analytics scope；400 参数非法（日期格式、metrics、granularity、范围倒置）。
+`admin` 块是前端判断运维组权限的唯一来源：dashboard 不解析 JWT。
+`meta` 只挂基础闸，普通 admin 也能读——否则环境标签会退化成「未知环境」并连带禁用发布按钮。
+
+错误码：401 未登录 / 凭据错误；403 token 非 analytics scope，或角色不足（运维组返回
+`message: "需要超级管理员权限"`）；400 参数非法（日期格式、metrics、granularity、范围倒置）。
 
 ## 总览（P1）
 
@@ -188,6 +199,8 @@ GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
 
 ## 模型监控（LLM）
 
+> 闸口：`SuperAdminGuard`，整组只对 superadmin 开放（含费用同步 POST）。
+
 数据源 `llm_usage_logs`：`LlmService.complete()/completeStream()` 单点埋点（fire-and-forget，
 写库失败只记日志不影响主链路）。scene 枚举：safety_l2 / intent_classify / filler /
 adventure_interaction / memory_extract / sleep_config_extract / sleep_story_generate /
@@ -343,10 +356,11 @@ POST /analytics/llm/cost/sync
 | `l2_fail_open`     | 小模型调用异常 → 放行，靠 L3 大模型 prompt 兜底   | 是       | **静默降级**，升高=模型不可用  |
 | `not_evaluated`    | 本轮根本没做 L2（冒险状态机在编排上早于 L2 接管） | 是       | **已知盲区**，见下方警示       |
 
-> ⚠️ 盲区警示：编排顺序是 L1 → 冒险接管 → `Promise.all([L2, intent])`，
-> 所以**冒险互动轮次完全绕过 L2**，只有 L1 正则兜着，而 L1 刻意不收「杀/打/揍/枪/刀/去死」
-> 这类孩子的气话（见 `child-safety.service.ts` 头部校准原则）。本期按熊总决定**只监控不改行为**：
-> `not_evaluated` + `adventure_takeover` 的占比就是这块盲区的暴露面。
+> ⚠️ 盲区警示：冒险接管仍早于常规 L2，但接话层/二选一 LLM 路径现在会**惰性触发 L2**：
+> 触发并判出结论 → `l2_model`；触发但分类器异常 → `l2_fail_open`；
+> 确定性匹配/跟读/退出等不调 LLM 的路径才记 `not_evaluated`。
+> 因此 `not_evaluated` + `adventure_takeover` 的占比只代表「冒险接管且未触发 L2」的轮次，
+> 不再等于全部冒险轮次。
 
 > 口径警示：埋点在每个 `return` 之前而非 `finally`——`streamReply` 是 async generator，
 > 消费方直接丢弃迭代器时 `finally` 不保证执行。代价是未捕获异常中断的轮次没有判定记录，
@@ -377,7 +391,7 @@ GET /analytics/decisions/intent-summary?startDate=&endDate=
     modelInvokedCount, modelInvokedRate,    // source=model 的占比，跌了说明小模型在失效
     fallbackCount, fallbackRate,            // fallback_invalid_label + fallback_error
     notRoutedCount,                         // 被 L1/L2 拦截，未分类
-    adventureTakeoverCount,                 // 冒险接管，未分类（与 not_evaluated 同一批轮次）
+    adventureTakeoverCount,                 // 冒险接管且未触发 L2 的轮次（not_evaluated 同一批）
     matrix: [{ intent, source, count }] }   // intent × source 交叉，排查「说要听故事却在闲聊」用这张表
    // intentSource 枚举：model / fallback_invalid_label / fallback_error / pre_filter_skip（已停用，仅历史数据）/
    //   continuation / session_sticky / explicit_exit / force_sleep / sleep_window_closed /
@@ -446,6 +460,15 @@ GET /analytics/messages/interruption-rate?startDate=&endDate=
 
 GET /analytics/messages/:id
 → 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
+   // 2026-11-23 起，历史回补会在 rawPayload.safety 放入本轮安全判定快照；
+   // 形状与 inferred 语义见 docs/message-safety-backfill.md。
+   // inferred=true = 没有判定行、由 AI 回复内容推断，前端必须标注「推断回补」。
+   // adventureEpisode：仅 mode=adventure_story 时非空，形状
+   //   { episodeId, businessKey, characterKey, season, episodeNumber,
+   //     title, versionId, version }
+   // 通过 adventure_events(deviceId, turnId) 关联 adventure_episodes；
+   // versionId/version 是该轮播放时锁定的版本快照（无记录为 null，不做时间推断）；
+   // title 有版本时取版本 payload 的标题（当时的标题），否则回落集当前标题。
 ```
 
 打断判定（`interrupted`）为**服务端推断口径**（`common/interruption/interruption.util.ts`，
@@ -457,13 +480,14 @@ fire-and-forget 不阻塞首音；孩子话密/家长插话都会计入，dashbo
 ## 设备运维（admin 手动操作）
 
 > 例外：本节为写操作（POST），不适用上文「所有接口均为 GET」的约定。
+> 闸口：`SuperAdminGuard`——wipe 是最重的破坏性操作，只有 superadmin 能打。
 
 ```
 POST /analytics/devices/:deviceId/wipe
 → { success, deviceId, deviceOnline }
 ```
 
-- 用途：退货／设备流转。admin 拿到机芯后手动触发。
+- 用途：退货／设备流转。superadmin 拿到机芯后手动触发。
 - 行为：先经机芯厂 MQTT 协议向设备下发 `recover`（恢复出厂），再删除 Device 记录；
   设备关联的绑定、对话消息、孩子档案、长期记忆、配置等随删除级联清除
   （schema 全部 `onDelete: Cascade`）。设备重新配网上报 `loginMac` 后作为全新设备入库。
@@ -497,8 +521,11 @@ GET /analytics/fleet/devices?keyword=&page=1&pageSize=20
 → { page, pageSize, total,
     items: [{ deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
               macAddress, createdAt, boundUsers, realtime, presenceDays7d,
-              lastPresenceDate, turns7d }] }
+              lastPresenceDate, turns7d, testWhitelist }] }
    // keyword ≤ 50 字符；pageSize 最大 100 静默 clamp；createdAt 降序
+   // testWhitelist: { note } | null —— 仅 superadmin 拿到真实值（只认 active=true 的在册行），
+   //   普通 admin / 老 token 恒为 null（不把测试白名单扩散给普通 admin）；
+   //   note 为 null 或空串表示「在白名单但没写备注」，展示文案由前端决定
 
 GET /analytics/fleet/devices/:deviceId?days=30
 → { deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
@@ -508,6 +535,17 @@ GET /analytics/fleet/devices/:deviceId?days=30
     dailyTurns: [{ date, turns }],
     totals: { presenceDays, turns } }
    // days 范围 1–90；404 on missing；boundUsers 不含 PII
+
+GET /analytics/fleet/devices/:deviceId/child-profile
+→ { profile: { name, birthday, englishName, gender } | null }
+   // dashboard 设备详情 drawer 孩子信息 section；档案未设置是合法空态（profile=null，
+   //   与设备 404 区分）；只回展示四字段，不含 userId（PII 最小化）；
+   //   业务 deviceId 精确匹配优先、大小写不敏感兜底（与详情接口同口径）
+
+DELETE /analytics/fleet/devices/:deviceId/child-profile
+→ { deleted: boolean }
+   // 仅 superadmin（SuperAdminGuard）；幂等：无档案 deleted=false；
+   //   deleteMany 免疫并发竞态；404 on missing device
 ```
 
 全局口径：
@@ -520,13 +558,17 @@ GET /analytics/fleet/devices/:deviceId?days=30
 
 > 例外：本节含写操作（PATCH / POST），不适用上文「所有接口均为 GET」的约定。
 > 背景、回落链、版本语义、不可编辑红线见 `docs/prompt-registry.md`。
-> 路由全部挂 `analytics/` 前缀 + `AnalyticsAuthGuard`：dashboard 的 vite dev proxy
+> 路由全部挂 `analytics/` 前缀 + `SuperAdminGuard`：dashboard 的 vite dev proxy
 > 与生产 nginx 都只转发 `/analytics`，换前缀就要改部署配置。
+> 普通 admin 连 catalog 都读不到（403）——页面本身在 dashboard 侧已经被雾挡住。
 
 ```
 GET /analytics/meta
-→ { nodeEnv, promptWriteEnabled, publishConfirmCode }
+→ { nodeEnv, promptWriteEnabled, publishConfirmCode,
+    admin: { username, displayName, role } }
 ```
+
+`meta` 例外：只挂基础闸，普通 admin 也要能读（环境标签需要）。
 
 - `nodeEnv`：`development` / `staging` / `production`，dashboard 左上角环境标签据此渲染
   （配色与中文标签由前端决定，后端只给环境名）。
@@ -543,7 +585,7 @@ GET /analytics/prompts
       deviatesFromDefault } ]
 ```
 
-- 恒返回全部 17 个 key：catalog 以代码 `PROMPT_DEFAULTS` 为准，与 DB 是否已有行无关。
+- 恒返回全部内置 key（`PROMPT_KEYS`，18 个），并追加 `character_timbre` 里已注册角色派生的动态人设行（`persona_<key>`）；catalog 以代码默认值 + DB 为准，与是否已有模板行无关。动态行 `isDynamic=true`、`defaultContent=null`、`source` 为 `none`（未发布）或 `db`。
 - `source`：`"db"` = 生效值来自已发布版本；`"default"` = 回落代码默认值。
 - `effectiveContent` 是**运行时真正生效**的正文；`deviatesFromDefault=true` 表示它
   与 `defaultContent` 不一致（dashboard 标「已偏离默认」）。
@@ -605,14 +647,143 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 ## 语速配置（admin）
 
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放（改一次影响所有在线设备）。
+
 全局语速两个倍数（非哄睡 `normalSpd` + 哄睡 `sleepSpd`），存 DB `voice_speed_config` 单行表（固定主键 `default`）。读路径（`getvalue` / 进入退出哄睡）每轮实时查库，改后无需重启。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/analytics/voice-speed` | 返回 `{ normalSpd, sleepSpd }`；DB 无行回落 0.7/0.5 |
 | PATCH | `/analytics/voice-speed` | body `{ normalSpd, sleepSpd }`（两者必填，`[0.5, 2.0]`）；返回更新后的 `{ normalSpd, sleepSpd }` |
+| POST | `/analytics/voice-speed/apply` | 把**当前 DB 配置**立即下发到有活跃实例的设备；body 可选 `{ macs?: string[] }`（最多 50 个，用于只测指定样机） |
 
-校验失败（非数字 / 越界 / 缺字段）→ 400。
+`PATCH` 只落库：设备的下一轮由 `getvalue` 拉取，或由 `bot/start` 追平（与 `voice:applied` 缓存不一致时才出站）。`POST apply` 是运维/联调的加速器，只影响「当前有活跃百度实例」的设备；离线设备仍走下一轮。
+
+`POST apply` 返回：
+
+```json
+{
+  "targeted": 2,
+  "live": 1,
+  "deferred": 1,
+  "skipped": 3,
+  "results": [
+    { "deviceId": "aabbccddeeff", "mac": "aabbccddeeff", "applied": "live" },
+    { "deviceId": "112233445566", "mac": "112233445566", "applied": "deferred", "reason": "no_active_instance" }
+  ]
+}
+```
+
+`skipped` 包含无活跃实例、角色表无该 `characterKey` 音色两类；`deferred` 带 `reason`（取值见 `VoiceApplyBlockReason`）。手动下发强制跳过 `voice:applied` 缓存。
+
+校验失败（非数字 / 越界 / 缺字段 / mac 格式非法）→ 400。
+
+## 角色音色映射（admin）
+
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放。
+
+IP/角色 → timbreId 权威映射，存 DB `character_timbre` 表。`getvalue` 每轮从内存缓存读取（启动预加载 + 60s TTL），管理端写后立即失效，下一轮生效，无需重启。prod 与 staging 同样可写（运维配置，非内容台）。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/analytics/voice-timbres` | 数组：`[{ characterKey, timbreId, updatedAt, personaConfigured, devicesInUse }]` |
+| POST | `/analytics/voice-timbres` | body `{ characterKey, timbreId }`；重复 key → 409 |
+| PUT | `/analytics/voice-timbres/:characterKey` | body `{ timbreId }`；不存在 → 404 |
+| DELETE | `/analytics/voice-timbres/:characterKey?force=true` | 仍有设备在用且未带 `force=true` → 409，message 说明在用设备数；确认后带 `force=true` 重试 |
+
+- `characterKey` 归一化为小写，校验 `[a-z][a-z0-9_-]{1,31}`；`timbreId` 为 1–19 位数字字符串。
+- `personaConfigured=false` 表示该角色没有对应 `persona_<key>` 人设，对话会回落 elly；新增角色时界面必须提示。
+- 删除仍有设备在用的角色后，那些设备下一轮 `getvalue` 会 fail-closed 返回 500（不编兜底音色）。
+- 新增角色的完整流程（音色可自助、人设/冒险白名单/设备归属需发版或运维）见 `docs/voice-switching.md` §6。
+
+## 测试设备白名单（admin，仅 superadmin）
+
+> 闸口：`SuperAdminGuard`，读写都只对 superadmin 开放。
+> 实现：`src/modules/device-test-access/`，路由前缀 `/analytics/test-devices`。
+> 不并入冒险内容台：这份名单管冒险测试，归入「运维与配置」独立入口。
+
+只有 `active=true` 的设备才能：
+
+- 被 `POST /analytics/adventure-admin/episodes/:episodeId/test-assign` 下发测试冒险故事；
+- 用语音触发词「测试冒险故事」（非白名单设备命中触发词按普通对话处理，
+  不返回「未下发」的确定性话术，避免暴露测试功能）。
+
+```
+GET /analytics/test-devices?keyword=&includeRevoked=&page=&pageSize=
+→ {
+    enabled: { adventure: boolean },
+    items: [{
+      id, active, note, addedBy, addedAt, addedReason,
+      revokedBy, revokedAt, revokeReason,
+      device: { id, deviceId, deviceCode, macAddress, characterKey, firmwareVersion }
+    }],
+    total
+  }
+   // enabled 如实反映 ADVENTURE_TEST_MODE_ENABLED。
+   // 默认只看 active；includeRevoked=true 连已撤销记录一起返回。pageSize 缺省 50、最大 200。
+
+POST /analytics/test-devices
+body { deviceId, note?, reason }
+→ { item, reactivated }
+   // deviceId 按业务 deviceId → deviceCode → macAddress 顺序精确匹配（大小写不敏感）。
+   // 设备必须已入库，否则 404。已 active → 409；已撤销 → 原地恢复，reactivated=true。
+   // reason >= 8 字。冒险测试开关关闭时 403（prod 白名单只读）。
+
+POST /analytics/test-devices/:deviceId/revoke
+body { reason }
+→ { ok: true, clearedAdventureAssignment }
+   // 软删除：保留添加/撤销人与时间，重新放开走 POST 原地恢复。
+   // 同时清空该设备的 testAdventureEpisodeId / testAdventureEpisodeVersionId。
+   // 不重置会话、不中断已经开始的测试故事；只阻断下一次触发。
+   // 不在白名单 → 404；已撤销 → 409。
+```
+
+- 外键 `ON DELETE CASCADE`：设备被 wipe 后白名单行一并删除，重新入库必须重新添加。
+- 撤销后再添加是同一行的恢复，不新建第二行；唯一索引只管设备，避免同一设备出现多条 active。
+
+## 图片素材（AppAsset，admin）
+
+> 实现：`src/modules/app-assets/`，管理接口前缀 `/analytics/app-assets/*`，全部要求 superadmin。
+> 公开 manifest `GET /app-assets/manifest` 无鉴权，只返回已发布且展示位启用的 key。
+> 一个展示位同一时刻最多一条 published；发布时旧 published 自动归档（保留历史，可回滚）。
+
+展示位注册表存 DB（`app_asset_slots`），key = `page/suffix`，page 是短 code 且必须等于 key 第一段。
+迁移只 seed 内置探针 `diagnostics/remote-probe`；业务展示位由 dashboard 创建，staging / prod 各自维护，不做跨环境搬运。
+不提供物理删除：建错的 key 只能停用；停用前必须先下架该 key 的线上素材。
+
+```
+GET /analytics/app-assets/keys
+→ [{ key, label, page, note, enabled, createdBy, updatedBy, createdAt, updatedAt }]
+
+POST /analytics/app-assets/keys
+body { page, suffix, label, note? }
+→ slot
+   // key = `${page}/${suffix}`；400 格式非法；409 已存在
+
+PATCH /analytics/app-assets/keys
+body { key, label?, note?, enabled? }
+→ slot
+   // 404 不存在；400 空更新；409 enabled=false 但仍有 published（先下架）
+   // note 传空串清除；key / page 创建后不可改
+
+GET /analytics/app-assets
+→ [{ key, label, page, enabled, orphan?, published, latestDraft, versions }]
+   // 注册表外的历史 key 以 orphan=true 追加，只读
+
+GET /analytics/app-assets/versions?key=
+→ [AppAsset]（version 降序）
+
+POST /analytics/app-assets/upload   (multipart: key/file/width/height/note?)
+→ draft AppAsset
+   // key 必须已注册且启用；文件只认 PNG/JPEG/WebP，≤2MiB
+
+POST /analytics/app-assets/:id/publish → published AppAsset
+POST /analytics/app-assets/:id/archive → archived AppAsset
+```
+
+- 版本号按同 key 递增；上传只新增 draft，不覆盖旧版本。
+- manifest 的 `assets` 形状不变；停用展示位后该 key 从 manifest 消失，小程序回退包内图。
+- 新增 key 还需在小程序 `miniprogram/constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 下发了也不会被使用。
 
 ## 冒险内容管理（Adventure Studio）
 
@@ -628,8 +799,12 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 | 闸 | 跟着谁走 | 由什么决定 | 不满足时 |
 | --- | --- | --- | --- |
-| scope | 人 | JWT 的 `scopes` 是否含 `adventure-content` | 读写一律 403 |
+| role | 人 | JWT 的 `role === "superadmin"` | 读写一律 403 |
 | profile | 环境 | `CONTENT_ADMIN_PROFILE=authoring` | 只读；所有写操作 403 |
+
+冒险内容管理台已整体归入运维组：入口只对 superadmin 开放。历史 `adventure-content`
+scope 不再单独构成入口——controller 同时挂 `SuperAdminGuard` 与 `ContentAdminGuard`，
+scope 只保留在后者里兼容旧账号的单元语义。
 
 两者必须同时满足才能写。即使 prod 的账号白名单被误配成和 staging 一样，prod 依然写不动。
 `CONTENT_ADMIN_PROFILE` **缺省 / 拼错 / 大小写不对一律按 readonly 处理**（fail-safe）：
@@ -880,11 +1055,32 @@ body { deviceId, reason }
 → { ok, audited, assignment: { episodeId, title, episodeVersionId, versionStatus } }
    // 仅 staging（ADVENTURE_TEST_MODE_ENABLED=true）。把当前集下发到设备，优先锁草稿快照，
    // 否则锁当前发布版本。孩子说「测试冒险故事」即播放被下发的集，不限次数/顺序/阶段。
+   // 设备必须在「测试设备白名单」里且 active=true，否则 403（见上节）。
 
 POST /analytics/adventure-admin/episodes/:episodeId/test-clear
 body { deviceId, reason }
 → { ok, audited }
    // 清除设备当前下发；仅当它正是这一集（否则 409）。审计写失败只返回 audited=false。
+
+GET /analytics/adventure-admin/device-test/assignments?characterKey=elly
+→ {
+    enabled,
+    characterKey,
+    total,
+    devices: [{
+      deviceId, deviceCode,
+      episode: { id, businessKey, title, characterKey, season, episodeNumber, retiredAt },
+      version: { id, version, status } | null,
+      followsCurrent, stale, lastAssignedAt
+    }]
+  }
+   // 按 IP 列出当前所有被下发的样机（每台设备同时只记一集）。真相是 device 字段，
+   // 不是审计流水——下发会覆盖、清除会清空，拿历史推导会列出早已换走的设备。
+   // followsCurrent=true：未锁快照，播放跟随该集 currentVersionId。
+   // stale=true：锁的快照已不是「现在重新下发会选的版本」（最新草稿优先，否则当前发布版）。
+   // lastAssignedAt：该设备最近一条 device_test_assign 审计；审计写失败（audited=false）时可能为 null。
+   // prod（未启用）返回 { enabled: false, characterKey, total: 0, devices: [] }，不暴露明细。
+   // 最多返回 500 台；total 是实际总数，用于提示截断。
 
 GET /analytics/adventure-admin/device-test/assignment/:deviceId
 → { enabled, assignment: { device, episode, episodeVersion } | null }

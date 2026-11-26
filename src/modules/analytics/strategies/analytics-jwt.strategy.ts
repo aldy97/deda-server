@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
+import { normalizeAdminRole } from "../admin-role";
 
 export interface AnalyticsJwtPayload {
   sub: string;
@@ -14,6 +15,11 @@ export interface AnalyticsJwtPayload {
    * 等价于「重新登录之前拿不到任何专项权限」——向后兼容且偏保守。
    */
   scopes?: string[];
+  /**
+   * 管理员角色。与 scopes 同一套兼容原则：老 token 没有该字段时回落 admin，
+   * 等价于「重新登录之前进不了运维组」（fail-closed）。
+   */
+  role?: string;
 }
 
 /**
@@ -50,6 +56,7 @@ export class AnalyticsJwtStrategy extends PassportStrategy(
             (scope) => typeof scope === "string" && scope.trim(),
           )
         : ["analytics"],
+      role: normalizeAdminRole(payload.role),
     };
   }
 }

@@ -15,13 +15,24 @@ import { AdventureTestAssignService } from "./adventure-test-assign.service";
 describe("AdventureTestAssignService", () => {
   let service: AdventureTestAssignService;
   let prisma: {
-    device: { findFirst: jest.Mock; update: jest.Mock };
+    device: {
+      findFirst: jest.Mock;
+      findMany: jest.Mock;
+      count: jest.Mock;
+      update: jest.Mock;
+    };
     adventureEpisode: { findUnique: jest.Mock };
-    adventureEpisodeVersion: { findFirst: jest.Mock; findUnique: jest.Mock };
+    adventureEpisodeVersion: {
+      findFirst: jest.Mock;
+      findUnique: jest.Mock;
+      findMany: jest.Mock;
+    };
+    adventureContentAuditLog: { findMany: jest.Mock };
     conversationSession: { upsert: jest.Mock };
   };
   let config: { get: jest.Mock };
   let audit: { record: jest.Mock };
+  let testAccess: { isAllowed: jest.Mock };
 
   const actor: AuditActor = {
     username: "alice",
@@ -39,6 +50,8 @@ describe("AdventureTestAssignService", () => {
           testAdventureEpisodeId: null,
           testAdventureEpisodeVersionId: null,
         }),
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
         update: jest.fn().mockResolvedValue({}),
       },
       adventureEpisode: {
@@ -55,15 +68,19 @@ describe("AdventureTestAssignService", () => {
           version: 2,
           status: "draft",
         }),
+        findMany: jest.fn().mockResolvedValue([]),
       },
+      adventureContentAuditLog: { findMany: jest.fn().mockResolvedValue([]) },
       conversationSession: { upsert: jest.fn().mockResolvedValue({}) },
     };
     config = { get: jest.fn().mockReturnValue("true") };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
+    testAccess = { isAllowed: jest.fn().mockResolvedValue(true) };
     service = new AdventureTestAssignService(
       prisma as never,
       config as never,
       audit as never,
+      testAccess as never,
     );
   });
 
@@ -84,6 +101,22 @@ describe("AdventureTestAssignService", () => {
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.device.update).not.toHaveBeenCalled();
+  });
+
+  it("assign 403s when the device is not on the test whitelist", async () => {
+    testAccess.isAllowed.mockResolvedValue(false);
+
+    await expect(
+      service.assign(
+        "ep1",
+        { deviceId: "dev-1001", reason: "测试环境验收这一集" },
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-internal-1");
+    expect(prisma.device.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
   it("assign 404s when the episode is unknown", async () => {
@@ -132,6 +165,7 @@ describe("AdventureTestAssignService", () => {
       },
     });
     expect(prisma.conversationSession.upsert).toHaveBeenCalled();
+    expect(testAccess.isAllowed).toHaveBeenCalledWith("dev-internal-1");
     expect(audit.record).toHaveBeenCalledWith(
       actor,
       expect.objectContaining({ action: "device_test_assign" }),
@@ -232,6 +266,8 @@ describe("AdventureTestAssignService", () => {
       actor,
       expect.objectContaining({ action: "device_test_clear" }),
     );
+    // 清除是给脏数据兜底的，不要求设备仍在白名单里。
+    expect(testAccess.isAllowed).not.toHaveBeenCalled();
     expect(result.ok).toBe(true);
   });
 
@@ -248,6 +284,7 @@ describe("AdventureTestAssignService", () => {
   it("assignment returns null for an unassigned device", async () => {
     await expect(service.assignment("dev-1001")).resolves.toEqual({
       enabled: true,
+      whitelisted: true,
       assignment: null,
     });
   });
@@ -271,10 +308,34 @@ describe("AdventureTestAssignService", () => {
     const result = await service.assignment("dev-1001");
 
     expect(result.enabled).toBe(true);
+    expect(result.whitelisted).toBe(true);
     expect(result.assignment).toMatchObject({
       episode: { id: "ep1", title: "听风原野第一天" },
       episodeVersion: { id: "draft-1", status: "draft" },
     });
+  });
+
+  it("assignment reports whitelisted=false but still returns details for cleanup", async () => {
+    testAccess.isAllowed.mockResolvedValue(false);
+    prisma.device.findFirst.mockResolvedValue({
+      id: "dev-internal-1",
+      deviceId: "dev-1001",
+      deviceCode: "CN-001",
+      testAdventureEpisodeId: "ep1",
+      testAdventureEpisodeVersionId: "draft-1",
+    });
+    prisma.adventureEpisode.findUnique.mockResolvedValue({
+      id: "ep1",
+      title: "听风原野第一天",
+      episodeNumber: 1,
+      characterKey: "elly",
+      season: 1,
+    });
+
+    const result = await service.assignment("dev-1001");
+
+    expect(result.whitelisted).toBe(false);
+    expect(result.assignment).toMatchObject({ episode: { id: "ep1" } });
   });
 
   it("assignment returns a null version when the assigned episode has no pinned snapshot", async () => {
@@ -299,5 +360,177 @@ describe("AdventureTestAssignService", () => {
       episode: { id: "ep1" },
       episodeVersion: null,
     });
+  });
+
+  it("list reports disabled without querying when the env gate is off", async () => {
+    enable(undefined);
+
+    await expect(service.listByCharacter("elly")).resolves.toEqual({
+      enabled: false,
+      characterKey: "elly",
+      total: 0,
+      devices: [],
+    });
+    expect(prisma.device.findMany).not.toHaveBeenCalled();
+    expect(prisma.device.count).not.toHaveBeenCalled();
+  });
+
+  it("list returns every device under the IP with episode, pinned version and assignment time", async () => {
+    prisma.device.findMany.mockResolvedValue([
+      {
+        deviceId: "dev-1002",
+        deviceCode: null,
+        testAdventureEpisodeId: "ep2",
+        testAdventureEpisodeVersionId: null,
+        testAdventureEpisode: {
+          id: "ep2",
+          businessKey: "elly/1/2",
+          title: "听风原野第二天",
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 2,
+          retiredAt: null,
+          currentVersionId: "v9",
+        },
+        testAdventureEpisodeVersion: null,
+      },
+      {
+        deviceId: "dev-1001",
+        deviceCode: "CN-001",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: "draft-1",
+        testAdventureEpisode: {
+          id: "ep1",
+          businessKey: "elly/1/1",
+          title: "听风原野第一天",
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 1,
+          retiredAt: null,
+          currentVersionId: "v3",
+        },
+        testAdventureEpisodeVersion: {
+          id: "draft-1",
+          version: 2,
+          status: "draft",
+        },
+      },
+    ]);
+    prisma.device.count.mockResolvedValue(2);
+    prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
+      { id: "draft-2", episodeId: "ep1" },
+    ]);
+    prisma.adventureContentAuditLog.findMany.mockResolvedValue([
+      {
+        businessKey: "dev-1001",
+        createdAt: new Date("2026-11-20T10:00:00.000Z"),
+      },
+    ]);
+
+    const result = await service.listByCharacter("elly");
+
+    expect(prisma.device.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { testAdventureEpisode: { is: { characterKey: "elly" } } },
+      }),
+    );
+    expect(result).toMatchObject({
+      enabled: true,
+      characterKey: "elly",
+      total: 2,
+    });
+    // 按集号排序，不跟着数据库返回顺序走
+    expect(result.devices.map((row) => row.deviceId)).toEqual([
+      "dev-1001",
+      "dev-1002",
+    ]);
+    expect(result.devices[0]).toMatchObject({
+      deviceId: "dev-1001",
+      deviceCode: "CN-001",
+      episode: { businessKey: "elly/1/1", episodeNumber: 1 },
+      version: { id: "draft-1", version: 2, status: "draft" },
+      followsCurrent: false,
+      stale: true,
+      lastAssignedAt: "2026-11-20T10:00:00.000Z",
+    });
+    expect(result.devices[1]).toMatchObject({
+      deviceId: "dev-1002",
+      deviceCode: null,
+      version: null,
+      followsCurrent: true,
+      stale: false,
+      lastAssignedAt: null,
+    });
+  });
+
+  it("list keeps a pinned snapshot fresh when it is the version that would be assigned now", async () => {
+    prisma.device.findMany.mockResolvedValue([
+      {
+        deviceId: "dev-1001",
+        deviceCode: "CN-001",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: "draft-2",
+        testAdventureEpisode: {
+          id: "ep1",
+          businessKey: "elly/1/1",
+          title: "听风原野第一天",
+          characterKey: "elly",
+          season: 1,
+          episodeNumber: 1,
+          retiredAt: null,
+          currentVersionId: "v3",
+        },
+        testAdventureEpisodeVersion: {
+          id: "draft-2",
+          version: 3,
+          status: "draft",
+        },
+      },
+    ]);
+    prisma.device.count.mockResolvedValue(1);
+    prisma.adventureEpisodeVersion.findMany.mockResolvedValue([
+      { id: "draft-2", episodeId: "ep1" },
+    ]);
+
+    const result = await service.listByCharacter("elly");
+
+    expect(result.devices[0]).toMatchObject({
+      followsCurrent: false,
+      stale: false,
+    });
+  });
+
+  it("list does not ask for drafts or audits when nobody is assigned", async () => {
+    prisma.device.findMany.mockResolvedValue([]);
+    prisma.device.count.mockResolvedValue(0);
+
+    const result = await service.listByCharacter("elly");
+
+    expect(result).toEqual({
+      enabled: true,
+      characterKey: "elly",
+      total: 0,
+      devices: [],
+    });
+    expect(prisma.adventureEpisodeVersion.findMany).not.toHaveBeenCalled();
+    expect(prisma.adventureContentAuditLog.findMany).not.toHaveBeenCalled();
+  });
+
+  it("list skips a device whose episode relation is missing", async () => {
+    prisma.device.findMany.mockResolvedValue([
+      {
+        deviceId: "dev-1001",
+        deviceCode: "CN-001",
+        testAdventureEpisodeId: "ep1",
+        testAdventureEpisodeVersionId: null,
+        testAdventureEpisode: null,
+        testAdventureEpisodeVersion: null,
+      },
+    ]);
+    prisma.device.count.mockResolvedValue(1);
+
+    const result = await service.listByCharacter("elly");
+
+    expect(result).toMatchObject({ enabled: true, total: 1, devices: [] });
   });
 });

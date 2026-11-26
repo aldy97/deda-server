@@ -437,7 +437,10 @@ export class FleetService {
 
   // ── 5. Devices List ───────────────────────────────────────────────────
 
-  async getDevices(query: FleetDevicesQueryDto) {
+  async getDevices(
+    query: FleetDevicesQueryDto,
+    options: { includeTestWhitelist?: boolean } = {},
+  ) {
     const page = query.page ?? 1;
     let pageSize = query.pageSize ?? 20;
     if (pageSize > MAX_PAGE_SIZE) pageSize = MAX_PAGE_SIZE;
@@ -490,7 +493,16 @@ export class FleetService {
       -6,
     );
     const deviceUuids = items.map((d) => d.id);
-    const [presenceRows, messageCounts] = await Promise.all([
+    // 测试白名单是与运行时闸同一口径的 active=true 行；备注原文回传，
+    // 「有资格但没写备注」由调用方补展示文案。
+    const whitelistQuery: Promise<{ deviceId: string; note: string | null }[]> =
+      options.includeTestWhitelist
+        ? this.prisma.deviceTestWhitelist.findMany({
+            where: { deviceId: { in: deviceUuids }, active: true },
+            select: { deviceId: true, note: true },
+          })
+        : Promise.resolve([]);
+    const [presenceRows, messageCounts, whitelistRows] = await Promise.all([
       this.prisma.devicePresenceDaily.findMany({
         where: {
           deviceId: { in: deviceUuids },
@@ -509,6 +521,7 @@ export class FleetService {
         },
         _count: { _all: true },
       }),
+      whitelistQuery,
     ]);
 
     // 构建 presence 映射: deviceId -> Set<date>
@@ -537,6 +550,11 @@ export class FleetService {
     const messageMap = new Map<string, number>();
     for (const m of messageCounts) {
       messageMap.set(m.deviceId, m._count._all);
+    }
+
+    const whitelistNotes = new Map<string, string | null>();
+    for (const row of whitelistRows) {
+      whitelistNotes.set(row.deviceId, row.note);
     }
 
     // 已绑定用户数
@@ -572,6 +590,9 @@ export class FleetService {
         presenceDays7d,
         lastPresenceDate,
         turns7d: messageMap.get(d.id) ?? 0,
+        testWhitelist: whitelistNotes.has(d.id)
+          ? { note: whitelistNotes.get(d.id) ?? null }
+          : null,
       };
     });
 
@@ -705,5 +726,53 @@ export class FleetService {
         turns: Array.from(turnsByDay.values()).reduce((a, b) => a + b, 0),
       },
     };
+  }
+
+  // ── 7. Device Child Profile（admin 侧；/child-profiles 走家长 JWT，看板够不到） ──
+
+  /**
+   * 业务 deviceId → 设备行：精确匹配优先，大小写不敏感兜底（与 getDeviceDetail 同口径）。
+   * 新端点只需要内部 id，不带 DEVICE_DETAIL_SELECT 投影。
+   */
+  private async findDeviceByBusinessId(deviceId: string) {
+    return (
+      (await this.prisma.device.findUnique({ where: { deviceId } })) ??
+      (await this.prisma.device.findFirst({
+        where: { deviceId: { equals: deviceId, mode: "insensitive" } },
+      }))
+    );
+  }
+
+  /**
+   * 查询单台设备的孩子档案（dashboard 设备详情 drawer）。
+   * 设备不存在返回 null（controller 转 404）；档案未设置返回 { profile: null }——
+   * 未设置是合法状态，与 404 必须可区分。
+   * 只 select 展示四字段，不回传 userId（PII 最小化）。
+   */
+  async getDeviceChildProfile(deviceId: string) {
+    const device = await this.findDeviceByBusinessId(deviceId);
+    if (!device) return null;
+
+    const profile = await this.prisma.childProfile.findUnique({
+      where: { deviceId: device.id },
+      select: { name: true, birthday: true, englishName: true, gender: true },
+    });
+
+    return { profile };
+  }
+
+  /**
+   * 清空单台设备的孩子档案（仅 superadmin；controller 挂 SuperAdminGuard）。
+   * 幂等：无档案返回 { deleted: false }；deleteMany 免疫并发创建竞态（P2025）。
+   */
+  async deleteDeviceChildProfile(deviceId: string) {
+    const device = await this.findDeviceByBusinessId(deviceId);
+    if (!device) return null;
+
+    const result = await this.prisma.childProfile.deleteMany({
+      where: { deviceId: device.id },
+    });
+
+    return { deleted: result.count > 0 };
   }
 }

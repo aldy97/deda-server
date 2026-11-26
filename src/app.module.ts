@@ -28,6 +28,7 @@ import { DeviceLinkModule } from "./modules/device-link/device-link.module";
 
 import { AdventureModule } from "./modules/adventure/adventure.module";
 import { AdventureAdminModule } from "./modules/adventure-admin/adventure-admin.module";
+import { DeviceTestAccessModule } from "./modules/device-test-access/device-test-access.module";
 import { FeedbacksModule } from "./modules/feedbacks/feedbacks.module";
 import { SleepConfigsModule } from "./modules/sleep-configs/sleep-configs.module";
 import { SleepSchedulerModule } from "./modules/sleep-configs/sleep-scheduler.module";
@@ -37,6 +38,7 @@ import { ClientApiModule } from "./modules/client-api/client-api.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
 import { TurnDecisionModule } from "./modules/turn-decision/turn-decision.module";
 import { BaiduAgentModule } from "./modules/baidu-agent/baidu-agent.module";
+import { AppAssetsModule } from "./modules/app-assets/app-assets.module";
 
 /**
  * deda-dashboard SPA 静态托管（备案期间 staging 直连 :3001/dashboard 的承载方式；
@@ -93,6 +95,7 @@ const staticImports = existsSync(dashboardDistPath)
     LlmModule,
     AdventureModule,
     AdventureAdminModule,
+    DeviceTestAccessModule,
     FeedbacksModule,
     SleepConfigsModule,
     SleepSchedulerModule,
@@ -102,6 +105,7 @@ const staticImports = existsSync(dashboardDistPath)
     AnalyticsModule,
     TurnDecisionModule,
     BaiduAgentModule,
+    AppAssetsModule,
     ...staticImports,
   ],
 })

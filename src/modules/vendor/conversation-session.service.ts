@@ -1,16 +1,13 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { isInSleepWindow } from "@/modules/sleep-configs/sleep-window.util";
-import {
-  SLEEP_TEST_MODE_ENV,
-  SLEEP_TEST_MODE_TRIGGER,
-  SleepModeService,
-} from "@/modules/sleep-configs/sleep-mode.service";
+import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { isAdventureExitRequest } from "@/modules/adventure/adventure.constants";
+import { FILLER_EMOTIONS, type FillerEmotion } from "@/modules/llm/filler-bank";
+import { isStorySwitchRequest } from "@/modules/llm/filler-act";
 
 export type ConversationIntent =
   | "free_chat"
@@ -54,7 +51,6 @@ const CONVERSATION_INTENTS: ConversationIntent[] = [
  * - session_sticky：活跃会话中调了模型，但模型判为 free_chat → 维持原模式
  * - force_sleep：家长开了强制哄睡且在哄睡时段内，未调模型直接覆写为 sleep_story
  * - sleep_window_closed：模型判为 sleep_story 但当前不在哄睡时段 → 降级 free_chat
- * - test_sleep：staging 下命中「测试哄睡模式」触发词，绕过时段门禁直接进 sleep_story
  */
 export type IntentSource =
   | "model"
@@ -65,12 +61,13 @@ export type IntentSource =
   | "session_sticky"
   | "explicit_exit"
   | "force_sleep"
-  | "sleep_window_closed"
-  | "test_sleep";
+  | "sleep_window_closed";
 
 export interface IntentDecision {
   intent: ConversationIntent;
   source: IntentSource;
+  /** 与 intent 同一次小模型调用产出的粗粒度情绪；缺省 = 未评估 */
+  emotion?: FillerEmotion;
 }
 
 /**
@@ -92,7 +89,6 @@ export class ConversationSessionService {
     private readonly llmService: LlmService,
     private readonly sleepConfigs: SleepConfigsService,
     private readonly promptRegistry: PromptRegistryService,
-    private readonly configService: ConfigService,
     private readonly sleepMode: SleepModeService,
   ) {}
 
@@ -137,13 +133,6 @@ export class ConversationSessionService {
     if (this.isForceSleepActive(sleepConfig)) {
       await this.activate(deviceId, "sleep_story");
       return { intent: "sleep_story", source: "force_sleep" };
-    }
-
-    // 测试哄睡模式（仅 staging）：命中触发词 + 开关开启时绕过时段门禁直接进哄睡。
-    // 排在被判 sleep_story 之前，保证白天也能用这个触发词验证降速/降音量。
-    if (this.isTestSleepTrigger(asrText)) {
-      await this.activate(deviceId, "sleep_story");
-      return { intent: "sleep_story", source: "test_sleep" };
     }
 
     const sleepTime = sleepConfig?.sleepTime ?? null;
@@ -203,14 +192,6 @@ export class ConversationSessionService {
     await this.activate(deviceId, "sleep_story");
   }
 
-  /** 「测试哄睡模式」触发词 + staging 开关：命中即无条件进哄睡，绕过时段门禁。 */
-  private isTestSleepTrigger(asrText: string): boolean {
-    return (
-      this.configService.get<string>(SLEEP_TEST_MODE_ENV.enabled) === "true" &&
-      asrText.includes(SLEEP_TEST_MODE_TRIGGER)
-    );
-  }
-
   /** 退出哄睡：恢复进入前的音速/音量（下一轮非 sleep_story 意图时调用）。 */
   private async exitSleepMode(deviceId: string): Promise<void> {
     await this.sleepMode.exit(deviceId);
@@ -244,7 +225,11 @@ export class ConversationSessionService {
     if (decision.intent === "free_chat") {
       // 故事作答、二选一和普通接话默认留在当前模式，并滑动续期。
       await this.activate(deviceId, activeMode);
-      return { intent: activeMode, source: "session_sticky" };
+      return {
+        intent: activeMode,
+        source: "session_sticky",
+        emotion: decision.emotion,
+      };
     }
     return this.applyDecision(deviceId, decision, true, sleepTime);
   }
@@ -279,7 +264,11 @@ export class ConversationSessionService {
   ): IntentDecision {
     if (decision.intent !== "sleep_story") return decision;
     if (isInSleepWindow(new Date(), sleepTime)) return decision;
-    return { intent: "free_chat", source: "sleep_window_closed" };
+    return {
+      ...decision,
+      intent: "free_chat",
+      source: "sleep_window_closed",
+    };
   }
 
   /**
@@ -324,7 +313,7 @@ export class ConversationSessionService {
         turnId,
         model: this.llmService.smallModelName,
         temperature: 0,
-        maxTokens: 10,
+        maxTokens: 16,
         messages: [
           {
             role: "system",
@@ -334,11 +323,17 @@ export class ConversationSessionService {
         ],
       });
       const text = result.text.trim().toLowerCase();
-      const matched = CONVERSATION_INTENTS.find((intent) =>
-        text.includes(intent),
-      );
+      const [intentPart, emotionPart] = text
+        .split("|")
+        .map((part) => part.trim());
+      const matched =
+        CONVERSATION_INTENTS.find((intent) => intentPart === intent) ??
+        CONVERSATION_INTENTS.find((intent) => text.includes(intent));
       if (matched) {
-        return { intent: matched, source: "model" };
+        const emotion = FILLER_EMOTIONS.find((value) => value === emotionPart);
+        return emotion
+          ? { intent: matched, source: "model", emotion }
+          : { intent: matched, source: "model" };
       }
       // 模型有响应但标签不在七标签契约内：走关键词兜底并单独标记，
       // 这样「模型判错」和「模型没响应」在看板上不会混成同一种 fallback。
@@ -411,6 +406,9 @@ export class ConversationSessionService {
    * 合并之后任何一侧加词都自动对另一侧生效。
    */
   private isExplicitExit(asrText: string): boolean {
+    // 「换一个/再讲一个」是换故事，不是退出；否则会被退出词表里的
+    // 「不想听」抢先命中，孩子要新故事反而被送回 free_chat。
+    if (isStorySwitchRequest(asrText)) return false;
     return isAdventureExitRequest(asrText);
   }
 

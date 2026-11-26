@@ -18,14 +18,6 @@ export const SLEEP_SNAPSHOT_TTL_SECONDS = 45 * 60;
 /** 哄睡音量快照 Redis key 前缀：`sleep:volume-snapshot:{mac}` */
 export const SLEEP_VOLUME_SNAPSHOT_KEY_PREFIX = "sleep:volume-snapshot:";
 
-/** 「测试哄睡模式」语音触发词（仅 staging） */
-export const SLEEP_TEST_MODE_TRIGGER = "测试哄睡模式";
-
-/** 测试哄睡模式的环境开关（仅 staging compose 硬写 true，prod 刻意不转发） */
-export const SLEEP_TEST_MODE_ENV = {
-  enabled: "SLEEP_TEST_MODE_ENABLED",
-} as const;
-
 function sleepVolumeSnapshotKey(mac: string): string {
   return `${SLEEP_VOLUME_SNAPSHOT_KEY_PREFIX}${mac}`;
 }
@@ -64,12 +56,18 @@ export class SleepModeService {
       if (!device) return;
       const mac = device.macAddress ?? device.deviceId;
 
+      // 进入哄睡在每个 sleep 轮都会调用；快照只在第一次写，否则退出会把
+      // 「已压到 50 的音量」当成进入前音量恢复，原始音量永久丢失。
+      const snapshotKey = sleepVolumeSnapshotKey(mac);
+      const existingSnapshot = await this.redis.getValue(snapshotKey);
       const status = await this.deviceLink.getStatus(mac);
-      await this.redis.setValue(
-        sleepVolumeSnapshotKey(mac),
-        JSON.stringify({ volume: status.volume ?? null }),
-        SLEEP_SNAPSHOT_TTL_SECONDS,
-      );
+      if (!existingSnapshot) {
+        await this.redis.setValue(
+          snapshotKey,
+          JSON.stringify({ volume: status.volume ?? null }),
+          SLEEP_SNAPSHOT_TTL_SECONDS,
+        );
+      }
 
       const target = Math.min(
         status.volume ?? SLEEP_MODE_VOLUME_CAP,
@@ -77,12 +75,17 @@ export class SleepModeService {
       );
       this.deviceLink.setVolume(mac, target);
 
-      const vcn = this.voiceReconcile.getTimbreForCharacter(
+      const vcn = await this.voiceReconcile.getTimbreForCharacter(
         device.characterKey,
       );
       if (vcn) {
         const sleepSpd = await this.voiceReconcile.resolveSleepSpd();
-        await this.voiceReconcile.applySpd(mac, vcn, sleepSpd);
+        const outcome = await this.voiceReconcile.applySpd(mac, vcn, sleepSpd);
+        // Q20 未确认：switchSceneRole 的 tts 串不带 vol，可能把当前实例音量
+        // 重置为百度默认值。live 后用 MQTT 再断言一次上限，保证最终音量正确。
+        if (outcome?.applied === "live") {
+          this.deviceLink.setVolume(mac, target);
+        }
       }
     } catch (error) {
       this.logger.warn(
@@ -100,21 +103,21 @@ export class SleepModeService {
       if (!device) return;
       const mac = device.macAddress ?? device.deviceId;
 
-      const snapshotRaw = await this.redis.getValue(
-        sleepVolumeSnapshotKey(mac),
-      );
+      const snapshotKey = sleepVolumeSnapshotKey(mac);
+      const snapshotRaw = await this.redis.getValue(snapshotKey);
+      let restoreVolume: number | null = null;
       if (snapshotRaw) {
         try {
           const parsed = JSON.parse(snapshotRaw) as { volume?: number | null };
           if (typeof parsed.volume === "number") {
-            this.deviceLink.setVolume(mac, parsed.volume);
+            restoreVolume = parsed.volume;
           }
         } catch {
           // 快照损坏时忽略，不影响语速恢复与快照清理
         }
       }
 
-      const vcn = this.voiceReconcile.getTimbreForCharacter(
+      const vcn = await this.voiceReconcile.getTimbreForCharacter(
         device.characterKey,
       );
       if (vcn) {
@@ -122,7 +125,13 @@ export class SleepModeService {
         await this.voiceReconcile.applySpd(mac, vcn, spd);
       }
 
-      await this.redis.deleteValue(sleepVolumeSnapshotKey(mac));
+      // 语速下发之后再恢复音量：若 Q20 成立，switchSceneRole 会重置音量，
+      // 放在后面才能保证最终音量是进入哄睡前的那一档。
+      if (restoreVolume !== null) {
+        this.deviceLink.setVolume(mac, restoreVolume);
+      }
+
+      await this.redis.deleteValue(snapshotKey);
     } catch (error) {
       this.logger.warn(
         `Sleep mode exit failed for ${deviceId}: ${

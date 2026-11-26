@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   HttpException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -14,6 +15,12 @@ import { RedisService } from "@/common/redis/redis.service";
 import { DeviceStatusService } from "../device-status/device-status.service";
 import { DeviceLinkService } from "../device-link/device-link.service";
 import { ManufacturerService } from "../manufacturer/manufacturer.service";
+import { estimateDurationMinutes } from "../learning-stats/calculators/conversation-metrics.calculator";
+import {
+  reportDateInTimezone,
+  reportDayRange,
+  resolveReportTimezone,
+} from "../learning-stats/parent-report-date.util";
 import {
   PROVISION_RECENT_KEY,
   resolveProvisionWindowMs,
@@ -30,6 +37,7 @@ const BINDING_TRANSACTION_OPTIONS = {
 @Injectable()
 export class DevicesService {
   private readonly provisionWindowMs: number;
+  private readonly logger = new Logger(DevicesService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -177,6 +185,9 @@ export class DevicesService {
         { deviceId: "asc" },
       ],
     });
+    const usageByDevice = await this.getTodayUsageByDevice(
+      bindings.map((binding) => binding.device),
+    );
     return bindings.map((b) => ({
       id: b.device.deviceId,
       name: b.device.deviceCode || b.device.deviceId,
@@ -190,7 +201,66 @@ export class DevicesService {
             englishName: b.device.childProfile.englishName,
           }
         : null,
+      todayUsage: usageByDevice.get(b.device.id) ?? null,
     }));
+  }
+
+  /**
+   * 今日陪伴摘要：按设备时区统计当日 role=user 消息条数，并换算成分钟。
+   * 统计失败时整体返回空 Map（列表降级为 todayUsage=null），不影响设备列表可用性。
+   */
+  private async getTodayUsageByDevice(
+    devices: Array<{ id: string; timezone?: string | null }>,
+  ): Promise<
+    Map<string, { date: string; durationMinutes: number; turnCount: number }>
+  > {
+    const usageByDevice = new Map<
+      string,
+      { date: string; durationMinutes: number; turnCount: number }
+    >();
+    if (devices.length === 0) return usageByDevice;
+
+    const devicesByTimezone = new Map<string, typeof devices>();
+    for (const device of devices) {
+      const timezone = resolveReportTimezone(device.timezone);
+      const group = devicesByTimezone.get(timezone) ?? [];
+      group.push(device);
+      devicesByTimezone.set(timezone, group);
+    }
+
+    try {
+      for (const [timezone, group] of devicesByTimezone) {
+        const date = reportDateInTimezone(new Date(), timezone);
+        const { start, end } = reportDayRange(date, timezone);
+        const rows = await this.prisma.message.groupBy({
+          by: ["deviceId"],
+          where: {
+            deviceId: { in: group.map((device) => device.id) },
+            role: "user",
+            spokeAt: { gte: start, lt: end },
+          },
+          _count: { _all: true },
+        });
+        const counts = new Map(
+          rows.map((row) => [row.deviceId, row._count._all]),
+        );
+        for (const device of group) {
+          const turnCount = counts.get(device.id) ?? 0;
+          usageByDevice.set(device.id, {
+            date,
+            durationMinutes: estimateDurationMinutes(turnCount),
+            turnCount,
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `today usage aggregation failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return new Map();
+    }
+
+    return usageByDevice;
   }
 
   async updateOrder(userId: string, dto: UpdateDeviceOrderDto) {
@@ -298,6 +368,10 @@ export class DevicesService {
       battery: link.battery,
       volume: link.volume,
       isCharging: link.charging,
+      // MQTT v1.8 网络信息：null 同时表示「切网中」与「老固件未知」，
+      // API 层不区分；离线时保留最后已知值，由前端按 status 决定是否展示。
+      networkMode: link.networkMode ?? null,
+      wifiRssi: link.wifiRssi ?? null,
       lastActiveAt: link.lastSeenAt
         ? new Date(link.lastSeenAt).toISOString()
         : null,

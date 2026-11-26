@@ -69,7 +69,7 @@
 {"code":200,"data":{"vcn":"<timbreId>","vol":1,"spd":1,"lang":"zh"},"msg":"success"}
 ```
 
-- `vcn`：取自平台配置 `CHARACTER_TIMBRE_JSON`（IP/角色 → timbreId），按该设备绑定的 IP 查表。**我方不返回兜底音色**：查不到就 500，因为一个错的音色不会被任何人察觉。
+- `vcn`：取自平台配置 `character_timbre` 表（IP/角色 → timbreId，管理端 `/analytics/voice-timbres`），按该设备绑定的 IP 查表。**我方不返回兜底音色**：查不到就 500，因为一个错的音色不会被任何人察觉。
 - `vol`：TTS 合成音量倍数，来自全局配置 `TTS_DEFAULT_VOL`（默认 `1.0`，取值范围 0.5–2.0）。当前**不做每设备可调**。与 MQTT 的本地 volume（0–100）互不影响。
 - `spd`：语速倍数。非哄睡会话返回全局 `voice_speed_config.normalSpd`、哄睡会话返回 `sleepSpd`（管理端可改）；DB 无行或越界回落默认 0.7/0.5。
 - `lang`：**我方在公版三字段之外追加的扩展字段**，当前恒为 `zh`。依据是罗浩 2026-11-18「固件对 data 中未知参数是忽略态度」，追加它对现有固件无影响。
@@ -81,9 +81,11 @@
 
 | 配置 | 缺失后果 | 状态 |
 | --- | --- | --- |
-| `CHARACTER_TIMBRE_JSON` | `vcn` 无法解析 → 500 | 取值已定（两个 IP 暂统一用 `1000957`），**部署配置待填**；填好前 getvalue 返回 500，填好后另行通知联调 |
+| `character_timbre`（DB 表） | `vcn` 无法解析 → 500 | migration 已种子 `elly=1000957` / `polly=1001022`；管理端 `/analytics/voice-timbres` 可改，下一轮 getvalue 生效 |
 | `TTS_DEFAULT_VOL` | `vol` 越界 → 500 | 有默认值 `1.0`，无需显式配置 |
 | `voice_speed_config`（DB 表） | 回落默认 0.7/0.5 | migration 已种子；管理端 /analytics/voice-speed 可改 |
+
+> `CHARACTER_TIMBRE_JSON` 自 2026-11-21 起不再被读取（音色映射已迁入 DB），仅保留给旧镜像回滚，不要再作为配置项推进。
 
 ### 2.3 `POST /client/bot/bot/start`
 
@@ -129,4 +131,4 @@ v1.2 固件应发送上述两个必填字段，不再发送单 `authorization`�
 6. 异常路径抽查：错误密码（401）、未上线先 getvalue（401）、未上线先 start（401）、
    getvalue 携带未声明字段（400）、start 缺少 `authorization_Role` 或 `authorization_TTS`（400）、
    stop 未知实例（404）、stop 后再 start 同实例（409）。
-7. 我方在部署配置里填好 `CHARACTER_TIMBRE_JSON` 之前，getvalue 会返回 500——这是预期行为，不是固件问题；取值已定（两个 IP 暂统一用 `1000957`），填入并重启后会另行通知固件侧联调。
+7. 我方确认 `character_timbre` 表已有该设备 `characterKey` 对应行之前，getvalue 会返回 500——这是预期行为，不是固件问题；管理端填入并保存后下一轮即生效，会另行通知固件侧联调。

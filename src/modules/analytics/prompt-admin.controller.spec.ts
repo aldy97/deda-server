@@ -15,6 +15,7 @@ import { ResponseInterceptor } from "@/common/interceptors/response.interceptor"
 import { PROMPT_CONTENT_MAX_CHARS } from "@/modules/prompt-registry/prompt-defaults";
 import { AnalyticsMetaController } from "./analytics-meta.controller";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { PromptAdminController } from "./prompt-admin.controller";
 import {
   DEFAULT_PUBLISH_CONFIRM_CODE,
@@ -25,7 +26,11 @@ import {
 } from "./prompt-admin.service";
 
 /** 与 analytics-jwt 策略挂在 req.user 上的载荷同口径 */
-const ADMIN_USER = { username: "admin", displayName: "管理员" };
+const ADMIN_USER = {
+  username: "admin",
+  displayName: "管理员",
+  role: "superadmin",
+};
 const AUTHOR = { username: "admin", displayName: "管理员" };
 const KEY = "safety_l2_system";
 
@@ -40,6 +45,9 @@ const CATALOG_ITEM: PromptCatalogItem = {
   defaultContent: "code-default-body",
   effectiveContent: "code-default-body",
   source: "default",
+  isDynamic: false,
+  characterKey: null,
+  characterRegistered: null,
   publishedRevision: null,
   draftRevision: null,
   publishedAt: null,
@@ -97,6 +105,14 @@ describe("PromptAdminController", () => {
   // 注意：这里用 null 而不是 undefined 表示「NODE_ENV 没配」。
   // 传 undefined 会触发默认参数值，测不到回落分支。
   async function bootstrap(nodeEnv: string | null = "staging") {
+    const guardStub = {
+      canActivate: (context: ExecutionContext) => {
+        if (!guardAllows) return false;
+        context.switchToHttp().getRequest().user = { ...ADMIN_USER };
+        return true;
+      },
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [PromptAdminController, AnalyticsMetaController],
       providers: [
@@ -110,14 +126,12 @@ describe("PromptAdminController", () => {
         },
       ],
     })
+      // 两个 controller 的闸不同：prompts 走 SuperAdminGuard（继承基础闸），
+      // meta 只走基础闸。两个都要顶掉，否则 HTTP 层测试会被 passport 挡住。
       .overrideGuard(AnalyticsAuthGuard)
-      .useValue({
-        canActivate: (context: ExecutionContext) => {
-          if (!guardAllows) return false;
-          context.switchToHttp().getRequest().user = { ...ADMIN_USER };
-          return true;
-        },
-      })
+      .useValue(guardStub)
+      .overrideGuard(SuperAdminGuard)
+      .useValue(guardStub)
       .compile();
 
     // 与 src/main.ts 保持一致：校验管道 + 统一响应信封 + 统一异常信封
@@ -154,11 +168,16 @@ describe("PromptAdminController", () => {
     app = undefined;
   });
 
-  it("两个 controller 都挂在 AnalyticsAuthGuard 之下", () => {
-    for (const target of [PromptAdminController, AnalyticsMetaController]) {
-      const guards = Reflect.getMetadata("__guards__", target);
-      expect(guards).toContain(AnalyticsAuthGuard);
-    }
+  it("prompts 挂在 SuperAdminGuard 之下，meta 只挂基础闸", () => {
+    expect(Reflect.getMetadata("__guards__", PromptAdminController)).toContain(
+      SuperAdminGuard,
+    );
+    expect(
+      Reflect.getMetadata("__guards__", AnalyticsMetaController),
+    ).toContain(AnalyticsAuthGuard);
+    expect(
+      Reflect.getMetadata("__guards__", AnalyticsMetaController),
+    ).not.toContain(SuperAdminGuard);
   });
 
   describe("鉴权", () => {
@@ -536,6 +555,12 @@ describe("PromptAdminController", () => {
           nodeEnv: "staging",
           promptWriteEnabled: true,
           publishConfirmCode: DEFAULT_PUBLISH_CONFIRM_CODE,
+          // 前端的运维组闸口只信这一份结论，不解析 token
+          admin: {
+            username: "admin",
+            displayName: "管理员",
+            role: "superadmin",
+          },
         },
       });
       expect(service.getWritePolicy).toHaveBeenCalledTimes(1);

@@ -6,6 +6,7 @@
  * （llm-adapter 主链路 / vendor 备选链路）使用，放任一模块内都会造成
  * 反向依赖或复制粘贴。常量文件不注入任何服务，谁都能安全 import。
  */
+import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
 
 /**
  * L0 兜底话术：所有降级手段都用尽时的最后一句话。
@@ -35,6 +36,20 @@ export const ADVENTURE_DEGRADED_REPLIES = {
  * 前端不得内联硬编码（单一真相源在这里）。
  */
 export const ADVENTURE_EXIT_TEXT = "好的，那么我们之后再一起继续冒险吧";
+
+/** 冒险链路安全文本的唯一真相在 safety-profile；这里保留旧 import 路径。 */
+export {
+  ADVENTURE_UNSAFE_LINE,
+  ADVENTURE_SAFETY_CAUTION,
+  ADVENTURE_EMOTIONAL_HARM_GUIDANCE,
+} from "@/modules/safety/safety-profile";
+
+/**
+ * 惰性安全判定：只在真正需要调接话层/二选一判定时才会被调用。
+ * 返回 null 表示分类器异常或未给出结论（fail-open）。
+ */
+export type AdventureSafetyProvider = () =>
+  Promise<SafetyVerdict | null> | SafetyVerdict | null;
 
 /**
  * 明确拒绝/退出的关键词。命中即温柔退出，绝不调模型、绝不追问。

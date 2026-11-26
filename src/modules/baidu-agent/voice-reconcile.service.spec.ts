@@ -6,7 +6,7 @@ import { RedisService } from "@/common/redis/redis.service";
 import {
   VOICE_CATALOG_PORT,
   BAIDU_AGENT_CLIENT_PORT,
-  VOICE_PAYLOAD_KEY,
+  CHARACTER_TIMBRE_PORT,
 } from "./baidu-agent.types";
 import { VoiceReconcileService } from "./voice-reconcile.service";
 import {
@@ -45,9 +45,10 @@ describe("VoiceReconcileService", () => {
   let prisma: {
     device: { findUnique: jest.Mock };
     deviceConfig: { findFirst: jest.Mock };
+    conversationSession: { findUnique: jest.Mock };
     voiceSpeedConfig: { findUnique: jest.Mock };
   };
-  let redis: { getValue: jest.Mock };
+  let redis: { getValue: jest.Mock; setValue: jest.Mock };
   let configValues: Record<string, string | undefined>;
   let mockCatalog: {
     listUsable: jest.Mock;
@@ -60,6 +61,7 @@ describe("VoiceReconcileService", () => {
     switchSceneRole: jest.Mock;
     interrupt: jest.Mock;
   };
+  let characterTimbre: { get: jest.Mock };
 
   const createService = async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -73,6 +75,7 @@ describe("VoiceReconcileService", () => {
         },
         { provide: VOICE_CATALOG_PORT, useValue: mockCatalog },
         { provide: BAIDU_AGENT_CLIENT_PORT, useValue: mockClient },
+        { provide: CHARACTER_TIMBRE_PORT, useValue: characterTimbre },
       ],
     }).compile();
     return module.get(VoiceReconcileService);
@@ -82,9 +85,15 @@ describe("VoiceReconcileService", () => {
     prisma = {
       device: { findUnique: jest.fn().mockResolvedValue(null) },
       deviceConfig: { findFirst: jest.fn().mockResolvedValue(null) },
+      conversationSession: {
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
       voiceSpeedConfig: { findUnique: jest.fn().mockResolvedValue(null) },
     };
-    redis = { getValue: jest.fn().mockResolvedValue(null) };
+    redis = {
+      getValue: jest.fn().mockResolvedValue(null),
+      setValue: jest.fn().mockResolvedValue(undefined),
+    };
     configValues = {};
     mockCatalog = {
       listUsable: jest.fn().mockReturnValue([]),
@@ -97,6 +106,7 @@ describe("VoiceReconcileService", () => {
       switchSceneRole: jest.fn().mockResolvedValue({ ok: true } as const),
       interrupt: jest.fn(),
     };
+    characterTimbre = { get: jest.fn().mockResolvedValue(null) };
 
     jest.clearAllMocks();
     service = await createService();
@@ -155,67 +165,50 @@ describe("VoiceReconcileService", () => {
   });
 
   // ==========================================================================
-  // readDesired
+  // resolveActiveSpd — 哄睡/非哄睡的唯一判定口径
   // ==========================================================================
-  describe("readDesired", () => {
-    it("should return null vcn and speechRate when no active config exists", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+  describe("resolveActiveSpd", () => {
+    const setupSpeeds = () => {
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.7,
+        sleepSpd: 0.5,
+      });
+    };
 
-      const result = await service.readDesired(DEVICE_UUID);
-      expect(result).toEqual({ vcn: null, speechRate: null });
-    });
-
-    it("should return vcn from payload.voice when active config exists", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "normal",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
+    it("uses sleepSpd for an active sleep session", async () => {
+      setupSpeeds();
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        currentMode: "sleep_story",
+        expiresAt: new Date(Date.now() + 60_000),
       });
 
-      const result = await service.readDesired(DEVICE_UUID);
-      expect(result).toEqual({ vcn: "1000063", speechRate: "normal" });
+      await expect(service.resolveActiveSpd(DEVICE_UUID)).resolves.toBe(0.5);
     });
 
-    it("should return null vcn when payload.voice is missing", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "fast",
-        payload: {},
+    it("uses normalSpd when the sleep session is expired", async () => {
+      setupSpeeds();
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        currentMode: "sleep_story",
+        expiresAt: new Date(Date.now() - 1),
       });
 
-      const result = await service.readDesired(DEVICE_UUID);
-      expect(result).toEqual({ vcn: null, speechRate: "fast" });
+      await expect(service.resolveActiveSpd(DEVICE_UUID)).resolves.toBe(0.7);
     });
 
-    it("should return null vcn when payload is null", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "slow",
-        payload: null,
-      });
+    it("uses normalSpd when no session exists", async () => {
+      setupSpeeds();
+      prisma.conversationSession.findUnique.mockResolvedValue(null);
 
-      const result = await service.readDesired(DEVICE_UUID);
-      expect(result).toEqual({ vcn: null, speechRate: "slow" });
+      await expect(service.resolveActiveSpd(DEVICE_UUID)).resolves.toBe(0.7);
     });
 
-    it("should return null speechRate when config has null speechRate", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: null,
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
-      });
+    it("queries the session by internal device id", async () => {
+      setupSpeeds();
+      await service.resolveActiveSpd(DEVICE_UUID);
 
-      const result = await service.readDesired(DEVICE_UUID);
-      expect(result).toEqual({ vcn: "1000063", speechRate: null });
-    });
-
-    it("should query latest active config by createdAt desc", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "normal",
-        payload: null,
-      });
-
-      await service.readDesired(DEVICE_UUID);
-
-      expect(prisma.deviceConfig.findFirst).toHaveBeenCalledWith({
-        where: { deviceId: DEVICE_UUID, isActive: true },
-        orderBy: { createdAt: "desc" },
+      expect(prisma.conversationSession.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: DEVICE_UUID },
+        select: { currentMode: true, expiresAt: true },
       });
     });
   });
@@ -234,7 +227,6 @@ describe("VoiceReconcileService", () => {
       it("should return noop", async () => {
         const result = await service.applyToActiveInstance(MAC, {
           vcn: null,
-          speechRate: null,
         });
         expect(result).toEqual({ applied: "noop" });
         expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
@@ -246,7 +238,6 @@ describe("VoiceReconcileService", () => {
         mockClient.enabled = false;
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({ applied: "deferred", reason: "disabled" });
         expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
@@ -258,7 +249,6 @@ describe("VoiceReconcileService", () => {
         redis.getValue.mockResolvedValue(null);
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -276,7 +266,6 @@ describe("VoiceReconcileService", () => {
           .mockResolvedValueOnce(null); // botInstanceKey
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -293,7 +282,6 @@ describe("VoiceReconcileService", () => {
           .mockResolvedValueOnce("not json");
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -310,7 +298,6 @@ describe("VoiceReconcileService", () => {
           .mockResolvedValueOnce(buildBotInstanceRecord({ status: "ended" }));
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -329,7 +316,6 @@ describe("VoiceReconcileService", () => {
           );
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -345,7 +331,6 @@ describe("VoiceReconcileService", () => {
         mockCatalog.available = false;
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -362,7 +347,6 @@ describe("VoiceReconcileService", () => {
         mockCatalog.find.mockReturnValue(null);
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: null,
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -378,7 +362,6 @@ describe("VoiceReconcileService", () => {
         setupActiveInstance();
         const result = await service.applyToActiveInstance(MAC, {
           vcn: null,
-          speechRate: "normal",
         });
         expect(result).toEqual({ applied: "noop" });
         expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
@@ -407,7 +390,6 @@ describe("VoiceReconcileService", () => {
         });
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: "normal",
         });
         expect(result).toEqual({
           applied: "deferred",
@@ -441,7 +423,6 @@ describe("VoiceReconcileService", () => {
 
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: "normal",
         });
 
         expect(result).toEqual({ applied: "live" });
@@ -485,7 +466,6 @@ describe("VoiceReconcileService", () => {
 
         const result = await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: "normal",
         });
 
         expect(result).toEqual({
@@ -525,7 +505,6 @@ describe("VoiceReconcileService", () => {
 
         await service.applyToActiveInstance(MAC, {
           vcn: "1000063",
-          speechRate: "normal",
         });
 
         const logCalls = (Logger.prototype.log as jest.Mock).mock.calls
@@ -547,27 +526,106 @@ describe("VoiceReconcileService", () => {
   // onInstanceRegistered
   // ==========================================================================
   describe("onInstanceRegistered", () => {
-    const setupDeviceAndConfig = () => {
-      prisma.device.findUnique.mockResolvedValue({ id: DEVICE_UUID });
-      prisma.deviceConfig.findFirst.mockResolvedValue({
-        speechRate: "normal",
-        payload: { [VOICE_PAYLOAD_KEY]: { vcn: "1000063" } },
+    const APPLIED_KEY = `voice:applied:${MAC}`;
+
+    const setupDevice = (characterKey = "elly") => {
+      prisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_UUID,
+        characterKey,
+      });
+      prisma.conversationSession.findUnique.mockResolvedValue(null);
+      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
+        normalSpd: 0.7,
+        sleepSpd: 0.5,
+      });
+      characterTimbre.get.mockResolvedValue("1000957");
+      (buildTtsConfig as jest.Mock).mockImplementation(
+        ({ vcn, spd }: { vcn: string; spd: number }) =>
+          `DEFAULT${JSON.stringify({ vcn, spd })}`,
+      );
+      mockClient.switchSceneRole.mockResolvedValue({ ok: true } as const);
+    };
+
+    const setupRedis = (applied: string | null = null) => {
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === APPLIED_KEY) return applied;
+        if (key === botInstanceKey(MAC, INSTANCE_ID))
+          return buildBotInstanceRecord();
+        return null;
       });
     };
 
-    it("should return noop and touch neither Redis nor the client when nothing is desired", async () => {
-      prisma.device.findUnique.mockResolvedValue({ id: DEVICE_UUID });
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
+    it("applies role-table vcn and normal spd without any DeviceConfig", async () => {
+      setupDevice();
+      setupRedis();
+
+      const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(result).toEqual({ applied: "live" });
+      expect(prisma.deviceConfig.findFirst).not.toHaveBeenCalled();
+      expect(mockClient.switchSceneRole).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceId: INSTANCE_ID,
+          tts: 'DEFAULT{"vcn":"1000957","spd":0.7}',
+        }),
+      );
+      expect(redis.setValue).toHaveBeenCalledWith(
+        APPLIED_KEY,
+        JSON.stringify({ vcn: "1000957", spd: 0.7 }),
+        expect.any(Number),
+      );
+    });
+
+    it("uses sleepSpd when the session is in an active sleep_story", async () => {
+      setupDevice();
+      setupRedis();
+      prisma.conversationSession.findUnique.mockResolvedValue({
+        currentMode: "sleep_story",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(result).toEqual({ applied: "live" });
+      expect(mockClient.switchSceneRole).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tts: 'DEFAULT{"vcn":"1000957","spd":0.5}',
+        }),
+      );
+    });
+
+    it("returns noop when the applied cache already matches", async () => {
+      setupDevice();
+      setupRedis(JSON.stringify({ vcn: "1000957", spd: 0.7 }));
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
 
       expect(result).toEqual({ applied: "noop" });
-      expect(redis.getValue).not.toHaveBeenCalled();
       expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
     });
 
-    it("should return deferred disabled without calling the client", async () => {
-      setupDeviceAndConfig();
+    it("applies again when the cache differs", async () => {
+      setupDevice();
+      setupRedis(JSON.stringify({ vcn: "1000957", spd: 0.5 }));
+
+      const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(result).toEqual({ applied: "live" });
+      expect(mockClient.switchSceneRole).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns noop when the character has no timbre mapping", async () => {
+      setupDevice();
+      characterTimbre.get.mockResolvedValue(null);
+
+      const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(result).toEqual({ applied: "noop" });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("returns deferred disabled without calling the client", async () => {
+      setupDevice();
       mockClient.enabled = false;
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
@@ -576,40 +634,45 @@ describe("VoiceReconcileService", () => {
       expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
     });
 
-    it("should look up device, read desired, and apply", async () => {
-      setupDeviceAndConfig();
-      // onInstanceRegistered 已有 instanceId，只读 botInstanceKey 一次
-      redis.getValue.mockResolvedValueOnce(buildBotInstanceRecord());
-      mockCatalog.available = true;
-      mockCatalog.find.mockReturnValue({
-        timbreId: "1000063",
-        name: "度小熊",
-        status: "TRAINED",
-        language: "chinese",
-      });
-      prisma.voiceSpeedConfig.findUnique.mockResolvedValue({
-        normalSpd: 1,
-        sleepSpd: 0.5,
-      });
-      (buildTtsConfig as jest.Mock).mockReturnValue(
-        'DEFAULT{"vcn":"1000063","spd":1}',
-      );
-      mockClient.switchSceneRole.mockResolvedValue({ ok: true } as const);
+    it("returns deferred no_active_instance when the instance record is missing", async () => {
+      setupDevice();
+      redis.getValue.mockResolvedValue(null);
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
 
-      expect(result).toEqual({ applied: "live" });
-      expect(prisma.device.findUnique).toHaveBeenCalledWith({
-        where: { deviceId: MAC },
+      expect(result).toEqual({
+        applied: "deferred",
+        reason: "no_active_instance",
       });
-      expect(mockClient.switchSceneRole).toHaveBeenCalledTimes(1);
-      expect(redis.getValue).toHaveBeenCalledTimes(1);
-      expect(redis.getValue).toHaveBeenCalledWith(
-        botInstanceKey(MAC, INSTANCE_ID),
-      );
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
     });
 
-    it("should return deferred internal_error when prisma throws", async () => {
+    it("skips the device lookup when the device is provided", async () => {
+      setupDevice();
+      setupRedis();
+
+      const result = await service.onInstanceRegistered(MAC, INSTANCE_ID, {
+        id: DEVICE_UUID,
+        characterKey: "elly",
+      });
+
+      expect(result).toEqual({ applied: "live" });
+      expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("looks up id and characterKey when the device is omitted", async () => {
+      setupDevice();
+      setupRedis();
+
+      await service.onInstanceRegistered(MAC, INSTANCE_ID);
+
+      expect(prisma.device.findUnique).toHaveBeenCalledWith({
+        where: { deviceId: MAC },
+        select: { id: true, characterKey: true },
+      });
+    });
+
+    it("returns deferred internal_error when prisma throws", async () => {
       jest.spyOn(Logger.prototype, "warn").mockImplementation();
       prisma.device.findUnique.mockRejectedValue(new Error("DB down"));
 
@@ -623,7 +686,7 @@ describe("VoiceReconcileService", () => {
       jest.restoreAllMocks();
     });
 
-    it("should return deferred invalid_request when device not found", async () => {
+    it("returns deferred invalid_request when device not found", async () => {
       jest.spyOn(Logger.prototype, "warn").mockImplementation();
       prisma.device.findUnique.mockResolvedValue(null);
 
@@ -637,7 +700,7 @@ describe("VoiceReconcileService", () => {
       jest.restoreAllMocks();
     });
 
-    it("should never throw even on unexpected error", async () => {
+    it("never throws even on unexpected error", async () => {
       prisma.device.findUnique.mockRejectedValue(new Error("unexpected"));
 
       const result = await service.onInstanceRegistered(MAC, INSTANCE_ID);
@@ -646,110 +709,44 @@ describe("VoiceReconcileService", () => {
         applied: "deferred",
         reason: "internal_error",
       });
-      // Should not throw
-    });
-
-    it("should skip the device lookup when deviceInternalId is provided", async () => {
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-
-      const result = await service.onInstanceRegistered(
-        MAC,
-        INSTANCE_ID,
-        DEVICE_UUID,
-      );
-
-      expect(result).toEqual({ applied: "noop" });
-      expect(prisma.device.findUnique).not.toHaveBeenCalled();
-      expect(prisma.deviceConfig.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { deviceId: DEVICE_UUID, isActive: true },
-        }),
-      );
-    });
-
-    it("should fall back to looking up the device when deviceInternalId is omitted", async () => {
-      prisma.device.findUnique.mockResolvedValue({ id: DEVICE_UUID });
-      prisma.deviceConfig.findFirst.mockResolvedValue(null);
-
-      await service.onInstanceRegistered(MAC, INSTANCE_ID);
-
-      expect(prisma.device.findUnique).toHaveBeenCalledWith({
-        where: { deviceId: MAC },
-      });
     });
   });
 
   // ==========================================================================
-  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表
+  // getTimbreForCharacter — IP/角色 → timbreId 权威映射查表（委托缓存端口）
   // ==========================================================================
   describe("getTimbreForCharacter", () => {
-    const rebuild = () => {
-      service = new VoiceReconcileService(
-        prisma as unknown as PrismaService,
-        redis as unknown as RedisService,
-        { get: (key: string) => configValues[key] } as ConfigService,
-        mockCatalog,
-        mockClient,
+    it("should delegate to the character timbre port for a known character", async () => {
+      characterTimbre.get.mockResolvedValue("1000957");
+
+      await expect(service.getTimbreForCharacter("elly")).resolves.toBe(
+        "1000957",
       );
-    };
-
-    it("should return the mapped timbreId for a known character", () => {
-      configValues = {
-        CHARACTER_TIMBRE_JSON: '{"elly":"1000063","polly":"1000064"}',
-      };
-      rebuild();
-
-      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
-      expect(service.getTimbreForCharacter("polly")).toBe("1000064");
+      expect(characterTimbre.get).toHaveBeenCalledWith("elly");
     });
 
-    it("should return null for an unmapped, null or empty character key", () => {
-      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":"1000063"}' };
-      rebuild();
+    it("should short-circuit null and empty keys without touching the port", async () => {
+      await expect(service.getTimbreForCharacter(null)).resolves.toBeNull();
+      await expect(service.getTimbreForCharacter("")).resolves.toBeNull();
+      await expect(service.getTimbreForCharacter("   ")).resolves.toBeNull();
 
-      expect(service.getTimbreForCharacter("polly")).toBeNull();
-      expect(service.getTimbreForCharacter(null)).toBeNull();
-      expect(service.getTimbreForCharacter("")).toBeNull();
+      expect(characterTimbre.get).not.toHaveBeenCalled();
     });
 
-    it("should return null and never throw when unconfigured or malformed", () => {
-      configValues = {};
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
+    it("should return null when the port has no mapping", async () => {
+      characterTimbre.get.mockResolvedValue(null);
 
-      configValues = { CHARACTER_TIMBRE_JSON: "bad json" };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-
-      // 顶层不是对象：数组与标量都视为未配置，不猜
-      configValues = { CHARACTER_TIMBRE_JSON: '["1000063"]' };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-
-      configValues = { CHARACTER_TIMBRE_JSON: '"1000063"' };
-      rebuild();
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
+      await expect(service.getTimbreForCharacter("nemo")).resolves.toBeNull();
     });
 
-    it("should accept a numeric timbreId and normalise it to a string", () => {
-      configValues = { CHARACTER_TIMBRE_JSON: '{"elly":1000063}' };
-      rebuild();
+    it("should never throw when the port fails", async () => {
+      characterTimbre.get.mockRejectedValue(new Error("db down"));
+      const warn = jest.spyOn(service["logger"], "warn");
 
-      expect(service.getTimbreForCharacter("elly")).toBe("1000063");
-    });
-
-    it("should skip empty and non-string entries without failing the map", () => {
-      configValues = {
-        CHARACTER_TIMBRE_JSON:
-          '{"elly":"","polly":null,"other":["x"],"flag":true,"ok":"1000063"}',
-      };
-      rebuild();
-
-      expect(service.getTimbreForCharacter("elly")).toBeNull();
-      expect(service.getTimbreForCharacter("polly")).toBeNull();
-      expect(service.getTimbreForCharacter("other")).toBeNull();
-      expect(service.getTimbreForCharacter("flag")).toBeNull();
-      expect(service.getTimbreForCharacter("ok")).toBe("1000063");
+      await expect(service.getTimbreForCharacter("elly")).resolves.toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("timbre lookup failed"),
+      );
     });
   });
 
@@ -757,10 +754,16 @@ describe("VoiceReconcileService", () => {
   // applySpd（哄睡临时降速：直接给倍数，不校验音色目录、不走语速档位）
   // ==========================================================================
   describe("applySpd", () => {
-    const setupActiveInstance = () => {
-      redis.getValue
-        .mockResolvedValueOnce(INSTANCE_ID) // botCurrentKey
-        .mockResolvedValueOnce(buildBotInstanceRecord()); // botInstanceKey
+    const APPLIED_KEY = `voice:applied:${MAC}`;
+
+    const setupActiveInstance = (applied: string | null = null) => {
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === APPLIED_KEY) return applied;
+        if (key === botCurrentKey(MAC)) return INSTANCE_ID;
+        if (key === botInstanceKey(MAC, INSTANCE_ID))
+          return buildBotInstanceRecord();
+        return null;
+      });
     };
 
     beforeEach(() => {
@@ -777,7 +780,7 @@ describe("VoiceReconcileService", () => {
     });
 
     it("should return no_active_instance deferred when no current instance", async () => {
-      redis.getValue.mockResolvedValueOnce(null);
+      redis.getValue.mockResolvedValue(null);
       const result = await service.applySpd(MAC, "1000957", 0.7);
       expect(result).toEqual({
         applied: "deferred",
@@ -835,6 +838,60 @@ describe("VoiceReconcileService", () => {
       const result = await service.applySpd(MAC, "1000957", 0.7);
 
       expect(result).toEqual({ applied: "deferred", reason: "upstream_error" });
+    });
+
+    it("skips the client when the applied cache already matches", async () => {
+      setupActiveInstance(JSON.stringify({ vcn: "1000957", spd: 0.7 }));
+
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(result).toEqual({ applied: "noop" });
+      expect(mockClient.switchSceneRole).not.toHaveBeenCalled();
+    });
+
+    it("forces a re-apply when force=true even if the cache matches", async () => {
+      setupActiveInstance(JSON.stringify({ vcn: "1000957", spd: 0.7 }));
+
+      const result = await service.applySpd(MAC, "1000957", 0.7, {
+        force: true,
+      });
+
+      expect(result).toEqual({ applied: "live" });
+      expect(mockClient.switchSceneRole).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails open when the applied cache cannot be read", async () => {
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === APPLIED_KEY) throw new Error("redis down");
+        if (key === botCurrentKey(MAC)) return INSTANCE_ID;
+        return buildBotInstanceRecord();
+      });
+
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(result).toEqual({ applied: "live" });
+      expect(mockClient.switchSceneRole).toHaveBeenCalledTimes(1);
+    });
+
+    it("still returns live when the cache write fails", async () => {
+      setupActiveInstance();
+      redis.setValue.mockRejectedValue(new Error("redis down"));
+
+      const result = await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(result).toEqual({ applied: "live" });
+    });
+
+    it("writes the applied cache after a live apply", async () => {
+      setupActiveInstance();
+
+      await service.applySpd(MAC, "1000957", 0.7);
+
+      expect(redis.setValue).toHaveBeenCalledWith(
+        APPLIED_KEY,
+        JSON.stringify({ vcn: "1000957", spd: 0.7 }),
+        expect.any(Number),
+      );
     });
   });
 });

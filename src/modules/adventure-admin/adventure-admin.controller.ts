@@ -48,8 +48,10 @@ import {
   ContentAdminGuard,
   ContentReadOnly,
 } from "./guards/content-admin.guard";
+import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
 import {
   AuditListQueryDto,
+  CharacterTestDevicesQueryDto,
   ChoiceStatsQueryDto,
   CreateEpisodeDto,
   EpisodeIdentityDto,
@@ -129,7 +131,7 @@ function summarizeSweep(report: SweepReport) {
 
 @ApiTags("analytics-adventure-admin")
 @ApiBearerAuth()
-@UseGuards(ContentAdminGuard)
+@UseGuards(SuperAdminGuard, ContentAdminGuard)
 @UseFilters(ContentAdminExceptionFilter)
 @Controller("analytics/adventure-admin")
 export class AdventureAdminController {
@@ -567,6 +569,15 @@ export class AdventureAdminController {
    * 环境的闸 = ADVENTURE_TEST_MODE_ENABLED（服务层 403，prod 永不可用）。
    * 写操作与内容变更同规则：理由必须过 assertReason，动作留审计。
    */
+  @Get("device-test/assignments")
+  @ApiOperation({
+    summary:
+      "测试冒险故事：按 IP 列出所有已下发设备（只读；prod 返回 enabled=false）",
+  })
+  async listDeviceTestAssignments(@Query() dto: CharacterTestDevicesQueryDto) {
+    return this.testAssign.listByCharacter(dto.characterKey);
+  }
+
   @Get("device-test/assignment/:deviceId")
   @ApiOperation({
     summary:

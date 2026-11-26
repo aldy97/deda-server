@@ -79,10 +79,34 @@ model Device {
   habitPlans      HabitPlan[]
   conversationSession ConversationSession?
   sleepConfig     SleepConfig?
+  testWhitelist   DeviceTestWhitelist?
   llmUsageLogs    LlmUsageLog[]
   presenceDaily   DevicePresenceDaily[]
 
   @@map("devices")
+}
+
+/// 测试设备白名单：冒险测试与哄睡测试共用的设备级资格闸。
+/// 只有 active=true 的设备才能被下发测试冒险故事、才能用两个测试语音触发词。
+/// 软删除而不是物理删除：撤销后仍保留操作人、时间与理由；重新放开走原地恢复。
+/// 外键 ON DELETE CASCADE：设备被 wipe 后资格自动失效，重新入库需要重新添加。
+model DeviceTestWhitelist {
+  id           String    @id @default(uuid())
+  deviceId     String    @unique // Device.id（内部 UUID），不是业务 deviceId
+  active       Boolean   @default(true)
+  note         String? // 用途备注，如「3 号样机-熊枫」
+  addedBy      String
+  addedAt      DateTime  @default(now())
+  addedReason  String?
+  revokedBy    String?
+  revokedAt    DateTime?
+  revokeReason String?
+  updatedAt    DateTime  @updatedAt
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([active])
+  @@map("device_test_whitelist")
 }
 
 // 每台设备的当前对话会话；冒险进度仍由 AdventureProgress 单独管理。
@@ -532,6 +556,17 @@ model VoiceSpeedConfig {
   @@map("voice_speed_config")
 }
 
+// IP/角色 → timbreId 权威映射（一个机芯一个 IP，一个 IP 一个专属音色）。
+// 管理端 /analytics/voice-timbres 增删改；getvalue 每轮读缓存，改后下一轮生效。
+// characterKey 归一化为小写（与 Device.characterKey 一致），timbreId 存字符串。
+model CharacterTimbre {
+  characterKey String   @id
+  timbreId     String
+  updatedAt    DateTime @updatedAt
+
+  @@map("character_timbre")
+}
+
 // LLM 调用日志（主模型 + 小模型全量），模型监控页数据源
 model LlmUsageLog {
   id               String   @id @default(uuid())
@@ -717,4 +752,45 @@ model PromptTemplateVersion {
 
   @@unique([templateId, revision])
   @@map("prompt_template_versions")
+}
+
+// 展示型 Elly 素材：运营在 dashboard 上传自有图片，小程序按 key 显示、失败回退包内图。
+// 只有展示需求，没有用户上传/头像/签名 URL；manifest 公开读。
+// 每个 key 最多一条 published，由迁移里的 partial unique index 兜底（Prisma 不支持 partial unique）。
+model AppAsset {
+  id          String    @id @default(uuid())
+  key         String
+  version     Int
+  url         String
+  width       Int
+  height      Int
+  mimeType    String
+  bytes       Int
+  note        String?
+  status      String    @default("draft") // draft / published / archived
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+
+  @@unique([key, version])
+  @@index([key, status])
+  @@map("app_assets")
+}
+
+// 展示型素材的展示位注册表：key = page/suffix，小程序按 key 取 manifest。
+model AppAssetSlot {
+  key       String   @id
+  label     String
+  page      String
+  note      String?
+  enabled   Boolean  @default(true)
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+  @@index([page])
+  @@map("app_asset_slots")
 }

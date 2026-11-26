@@ -8,11 +8,12 @@ import { AppModule } from "./../src/app.module";
 import { PrismaService } from "./../src/common/prisma/prisma.service";
 import { LlmService } from "./../src/modules/llm/llm.service";
 import { ChildMemoriesService } from "./../src/modules/child-memories/child-memories.service";
+import { FILLER_POOLS } from "./../src/modules/llm/filler-bank";
 
 /**
  * 流式全链路 e2e（TDD：模拟机芯厂云，不依赖真实外部服务）
  * 回路：假机芯厂云通过入站 WS 推 ASR 文字（vendor:text:in）
- *   → 我方并行调用小模型（filler 首响）与大模型（answer）
+ *   → 我方用确定性模板池产出 filler，并行调用大模型（answer）
  *   → 我方作为 WS 客户端按 chunk 顺序调用假机芯厂云的上传接口
  *     （vendor:text:chunk × N，最后 vendor:text:out 全量兜底）
  * 断言核心：机芯厂云收到的 chunk 顺序严格对齐（seq 递增、filler 先于 answer）。
@@ -69,13 +70,6 @@ describe("Vendor streaming pipeline (e2e)", () => {
   const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
 
-  // 小模型故意慢于大模型：大模型先完成也只能进缓冲，不得抢跑
-  async function* fillerStream(): AsyncGenerator<string> {
-    await sleep(20);
-    yield "原来";
-    yield "你喜欢上海呀";
-  }
-
   async function* answerStream(): AsyncGenerator<string> {
     yield "I ";
     yield "like ";
@@ -86,10 +80,6 @@ describe("Vendor streaming pipeline (e2e)", () => {
     get smallModelName() {
       return "small-llm";
     },
-    buildFillerPrompt: jest.fn().mockReturnValue([
-      { role: "system", content: "filler prompt" },
-      { role: "user", content: "我喜欢上海的天气" },
-    ]),
     buildEnglishTutorPrompt: jest.fn().mockReturnValue([
       { role: "system", content: "prompt" },
       { role: "user", content: "我喜欢上海的天气" },
@@ -200,10 +190,6 @@ describe("Vendor streaming pipeline (e2e)", () => {
     uploadedEvents.length = 0;
     llmCalls.length = 0;
     mockLlmService.completeStream.mockImplementation((options: any) => {
-      if (options.model === "small-llm") {
-        llmCalls.push({ kind: "filler", model: options.model });
-        return fillerStream();
-      }
       llmCalls.push({ kind: "answer", model: options.model });
       return answerStream();
     });
@@ -242,31 +228,30 @@ describe("Vendor streaming pipeline (e2e)", () => {
       .filter((e) => e.event === "vendor:text:chunk")
       .map((e) => e.data);
 
+    const filler = chunks[0].delta as string;
+
     // 核心断言：机芯厂云收到的 chunk 顺序严格对齐
-    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    // filler（小模型首响）全部先于 answer（大模型正式回答）
+    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    // filler（模板池首响）全部先于 answer（大模型正式回答）
+    expect(FILLER_POOLS.neutral).toContain(filler);
     expect(chunks[0]).toMatchObject({
       deviceId: "e2e-dev-001",
       source: "filler",
-      delta: "原来",
+      delta: filler,
       isFinal: false,
     });
     expect(chunks[1]).toMatchObject({
       source: "filler",
-      delta: "你喜欢上海呀",
-    });
-    expect(chunks[2]).toMatchObject({
-      source: "filler",
       delta: "",
       isFinal: true,
     });
-    expect(chunks[3]).toMatchObject({ source: "answer", delta: "I " });
-    expect(chunks[4]).toMatchObject({ source: "answer", delta: "like " });
-    expect(chunks[5]).toMatchObject({
+    expect(chunks[2]).toMatchObject({ source: "answer", delta: "I " });
+    expect(chunks[3]).toMatchObject({ source: "answer", delta: "like " });
+    expect(chunks[4]).toMatchObject({
       source: "answer",
       delta: "Shanghai.",
     });
-    expect(chunks[6]).toMatchObject({
+    expect(chunks[5]).toMatchObject({
       source: "answer",
       delta: "",
       isFinal: true,
@@ -277,64 +262,54 @@ describe("Vendor streaming pipeline (e2e)", () => {
     // 全量兜底在最后一个 chunk 之后到达机芯厂云；内容为播报全文（filler + answer）
     const lastEvent = uploadedEvents[uploadedEvents.length - 1];
     expect(lastEvent.event).toBe("vendor:text:out");
-    expect(lastEvent.data.responseText).toBe(
-      "原来你喜欢上海呀\nI like Shanghai.",
-    );
+    expect(lastEvent.data.responseText).toBe(`${filler}\nI like Shanghai.`);
 
-    // 双模型异步并发调用：大模型泵先启动（不等待小模型），filler 走小模型
-    expect(mockLlmService.completeStream).toHaveBeenCalledTimes(2);
-    expect(llmCalls.map((c) => c.kind)).toEqual(["answer", "filler"]);
-    expect(mockLlmService.completeStream).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "small-llm" }),
-    );
+    // filler 不再调用小模型：completeStream 只服务 answer
+    expect(mockLlmService.completeStream).toHaveBeenCalledTimes(1);
+    expect(llmCalls.map((c) => c.kind)).toEqual(["answer"]);
 
-    // 落库为用户实际播报全文：小模型 filler + 大模型答案
+    // 落库为用户实际播报全文：模板池 filler + 大模型答案
     const assistantCall = mockPrismaService.message.create.mock.calls.find(
       (call) => call[0].data.role === "assistant",
     );
-    expect(assistantCall[0].data.content).toBe(
-      "原来你喜欢上海呀\nI like Shanghai.",
-    );
+    expect(assistantCall[0].data.content).toBe(`${filler}\nI like Shanghai.`);
     // 边界标注（方案 3）：rawPayload 结构化存 filler/answer
-    expect(assistantCall[0].data.rawPayload).toEqual({
-      filler: "原来你喜欢上海呀",
+    expect(assistantCall[0].data.rawPayload).toMatchObject({
+      filler,
       answer: "I like Shanghai.",
+      fillerSource: "bank",
+      fillerBucket: "neutral",
+      fillerEmotion: "neutral",
     });
 
     // 入站兼容应答为播报全文
-    expect(inboundReply.responseText).toBe(
-      "原来你喜欢上海呀\nI like Shanghai.",
-    );
+    expect(inboundReply.responseText).toBe(`${filler}\nI like Shanghai.`);
   });
 
-  it("should still upload an ordered answer when the small model fails", async () => {
-    mockLlmService.completeStream.mockImplementation((options: any) => {
-      if (options.model === "small-llm") {
-        llmCalls.push({ kind: "filler", model: options.model });
-        return (async function* (): AsyncGenerator<string> {
-          throw new Error("small model unavailable");
-        })();
-      }
-      llmCalls.push({ kind: "answer", model: options.model });
-      return answerStream();
-    });
+  it("should upload only answer when LLM_ADAPTER_FILLER=false", async () => {
+    process.env.LLM_ADAPTER_FILLER = "false";
+    try {
+      asrClient = await connectAsrClient();
+      asrClient.emit("vendor:text:in", {
+        deviceId: "e2e-dev-001",
+        asrText: "hi",
+      });
 
-    asrClient = await connectAsrClient();
-    asrClient.emit("vendor:text:in", {
-      deviceId: "e2e-dev-001",
-      asrText: "hi",
-    });
+      await waitFor(() =>
+        uploadedEvents.some((e) => e.event === "vendor:text:out"),
+      );
 
-    await waitFor(() =>
-      uploadedEvents.some((e) => e.event === "vendor:text:out"),
-    );
-
-    const chunks = uploadedEvents
-      .filter((e) => e.event === "vendor:text:chunk")
-      .map((e) => e.data);
-    // 小模型失败：无 filler，answer 从 seq=0 开始且顺序完整
-    expect(chunks.every((c) => c.source === "answer")).toBe(true);
-    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3]);
-    expect(chunks[3]).toMatchObject({ isFinal: true });
+      const chunks = uploadedEvents
+        .filter((e) => e.event === "vendor:text:chunk")
+        .map((e) => e.data);
+      // 关闭 filler：answer 从 seq=0 开始且顺序完整
+      expect(chunks.every((c) => c.source === "answer")).toBe(true);
+      expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3]);
+      expect(chunks[3]).toMatchObject({ isFinal: true });
+      const lastEvent = uploadedEvents[uploadedEvents.length - 1];
+      expect(lastEvent.data.responseText).toBe("I like Shanghai.");
+    } finally {
+      delete process.env.LLM_ADAPTER_FILLER;
+    }
   });
 });

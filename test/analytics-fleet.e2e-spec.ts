@@ -26,6 +26,7 @@ describe("Analytics fleet (e2e)", () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let adminToken: string;
+  let superAdminToken: string;
 
   const suffix = randomUUID().slice(0, 8);
   const macPrefix = `fe0000000${parseInt(suffix.slice(0, 2), 16) % 10}`;
@@ -64,6 +65,14 @@ describe("Analytics fleet (e2e)", () => {
     adminToken = await new JwtService({
       secret: ANALYTICS_SECRET,
     }).signAsync({ sub: "admin", username: "admin", scope: "analytics" });
+    superAdminToken = await new JwtService({
+      secret: ANALYTICS_SECRET,
+    }).signAsync({
+      sub: "admin",
+      username: "admin",
+      scope: "analytics",
+      role: "superadmin",
+    });
 
     // Create a test user for bindings
     const user = await prisma.user.create({
@@ -137,6 +146,26 @@ describe("Analytics fleet (e2e)", () => {
       ],
     });
 
+    // 测试白名单：d1 在册（有备注），d2 已撤销（不算在册）
+    await prisma.deviceTestWhitelist.createMany({
+      data: [
+        {
+          deviceId: d1Uuid,
+          active: true,
+          note: "3 号样机-e2e",
+          addedBy: "e2e",
+          addedReason: "覆盖 fleet 列表的白名单备注下发",
+        },
+        {
+          deviceId: d2Uuid,
+          active: false,
+          note: "已收回",
+          addedBy: "e2e",
+          addedReason: "覆盖撤销行不生效",
+        },
+      ],
+    });
+
     // Create presence records
     await prisma.devicePresenceDaily.createMany({
       data: [
@@ -166,6 +195,9 @@ describe("Analytics fleet (e2e)", () => {
     await prisma.devicePresenceDaily.deleteMany({
       where: { deviceId: { in: [d1Uuid, d2Uuid] } },
     });
+    await prisma.deviceTestWhitelist.deleteMany({
+      where: { deviceId: { in: [d1Uuid, d2Uuid] } },
+    });
     await prisma.userDeviceBinding.deleteMany({
       where: { deviceId: { in: [d1Uuid, d2Uuid] } },
     });
@@ -182,6 +214,12 @@ describe("Analytics fleet (e2e)", () => {
     return request(app.getHttpServer())
       .get(path)
       .set("Authorization", `Bearer ${adminToken}`);
+  }
+
+  function getAsSuperAdmin(path: string) {
+    return request(app.getHttpServer())
+      .get(path)
+      .set("Authorization", `Bearer ${superAdminToken}`);
   }
 
   // ── 1. Summary ───────────────────────────────────────────────────────
@@ -420,6 +458,39 @@ describe("Analytics fleet (e2e)", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.pageSize).toBe(100);
+    });
+
+    it("普通 admin 拿不到测试白名单备注（恒为 null）", async () => {
+      mockGetStatusBatch.mockResolvedValue(new Map());
+
+      const res = await get(
+        `/analytics/fleet/devices?keyword=${macPrefix}&page=1&pageSize=10`,
+      );
+
+      expect(res.status).toBe(200);
+      for (const item of res.body.data.items) {
+        expect(item.testWhitelist).toBeNull();
+      }
+    });
+
+    it("超管拿到在册备注，已撤销的不算在册", async () => {
+      mockGetStatusBatch.mockResolvedValue(new Map());
+
+      const res = await getAsSuperAdmin(
+        `/analytics/fleet/devices?keyword=${macPrefix}&page=1&pageSize=10`,
+      );
+
+      expect(res.status).toBe(200);
+      const items = res.body.data.items as {
+        deviceId: string;
+        testWhitelist: { note: string | null } | null;
+      }[];
+      expect(
+        items.find((item) => item.deviceId === d1Id)?.testWhitelist,
+      ).toEqual({ note: "3 号样机-e2e" });
+      expect(
+        items.find((item) => item.deviceId === d2Id)?.testWhitelist,
+      ).toBeNull();
     });
 
     it("returns 401 without auth", async () => {

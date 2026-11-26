@@ -56,6 +56,21 @@ describe("SleepVoiceConfigService", () => {
     expect(result.replyText).toContain("儿歌");
   });
 
+  it("forwards turnId to the extraction LLM call", async () => {
+    llm.complete.mockResolvedValue({
+      text: '{"field":"contentType","value":"song"}',
+    });
+
+    await service.handle("device-1", "以后睡前都听儿歌", "turn-sleep");
+
+    expect(llm.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scene: "sleep_config_extract",
+        turnId: "turn-sleep",
+      }),
+    );
+  });
+
   it("applies contentType=story", async () => {
     llm.complete.mockResolvedValue({
       text: '{"field":"contentType","value":"story"}',

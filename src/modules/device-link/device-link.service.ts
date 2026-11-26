@@ -19,6 +19,7 @@ import {
   DeviceQueryData,
   DeviceVolumeData,
   LoginMacPayload,
+  NetworkMode,
   deviceDownTopic,
 } from "./device-link.types";
 
@@ -85,6 +86,8 @@ export class DeviceLinkService implements OnModuleInit {
       volume: null,
       version: null,
       charging: null,
+      networkMode: null,
+      wifiRssi: null,
       lastSeenAt: null,
     };
 
@@ -131,6 +134,8 @@ export class DeviceLinkService implements OnModuleInit {
         volume: null,
         version: null,
         charging: null,
+        networkMode: null,
+        wifiRssi: null,
         lastSeenAt: null,
       };
       const raw = values[i];
@@ -283,6 +288,18 @@ export class DeviceLinkService implements OnModuleInit {
   private async mergeStatus(mac: string, data: DeviceQueryData): Promise<void> {
     const current = await this.getStatus(mac);
 
+    // 网络字段语义（MQTT v1.8 §4.1）：
+    // - 字段缺省 = 老固件，按「无更新」处理，保留上一次已知值；
+    // - 显式 null = 状态明确为「无」，必须覆盖（4G / 切网中 / WiFi 断开）。
+    const networkMode = this.resolveNetworkMode(
+      (data as { networkMode?: unknown }).networkMode,
+    );
+    const wifiRssi = this.resolveWifiRssi(
+      (data as { wifiRssi?: unknown }).wifiRssi,
+      networkMode === undefined ? current.networkMode : networkMode,
+      current.wifiRssi,
+    );
+
     const updated: DeviceLinkStatus = {
       mac,
       battery: this.pickNumber(data.battery, current.battery),
@@ -293,14 +310,81 @@ export class DeviceLinkService implements OnModuleInit {
           : current.version,
       charging:
         typeof data.charging === "boolean" ? data.charging : current.charging,
+      networkMode:
+        networkMode === undefined ? current.networkMode : networkMode,
+      wifiRssi: wifiRssi === undefined ? current.wifiRssi : wifiRssi,
       lastSeenAt: Date.now(),
     };
+
+    if (
+      networkMode !== undefined &&
+      networkMode !== null &&
+      networkMode !== current.networkMode
+    ) {
+      this.persistNetworkType(mac, networkMode);
+    }
 
     await this.redisService.setValue(
       this.statusKey(mac),
       JSON.stringify(updated),
       STATUS_TTL_SECONDS,
     );
+  }
+
+  /** 合法模式才采纳；缺省/非法值返回 undefined 表示「无更新」 */
+  private resolveNetworkMode(raw: unknown): NetworkMode | undefined {
+    if (raw === null) return null;
+    if (raw === "wifi" || raw === "4g") return raw;
+    if (raw !== undefined) {
+      this.logger.warn(`Ignoring invalid networkMode: ${String(raw)}`);
+    }
+    return undefined;
+  }
+
+  /**
+   * 计算本次 RSSI 合并结果。
+   * - undefined = 无更新（老固件缺省，或脏值被丢弃）
+   * - null = 明确无信号（4G / 切网中 / WiFi 断开）
+   */
+  private resolveWifiRssi(
+    raw: unknown,
+    mode: NetworkMode,
+    current: number | null,
+  ): number | null | undefined {
+    if (raw === undefined) return undefined;
+    if (mode === "4g") {
+      // 4G 下 wifiRssi 必为 null；若固件误带数字，以模式为准丢弃
+      if (raw !== null) {
+        this.logger.warn(`Ignoring wifiRssi=${String(raw)} in 4g mode`);
+      }
+      return null;
+    }
+    if (raw === null) return null;
+    if (
+      typeof raw === "number" &&
+      Number.isInteger(raw) &&
+      raw < 0 &&
+      raw >= -120
+    ) {
+      return raw;
+    }
+    this.logger.warn(
+      `Ignoring invalid wifiRssi: ${String(raw)} (keep ${String(current)})`,
+    );
+    return undefined;
+  }
+
+  /** 网络模式变化时低频同步 Device.networkType（about-device 页展示用） */
+  private persistNetworkType(mac: string, mode: "wifi" | "4g"): void {
+    const deviceId = mac.toLowerCase();
+    this.prisma.device
+      .updateMany({
+        where: { OR: [{ deviceId }, { macAddress: deviceId }] },
+        data: { networkType: mode === "wifi" ? "WiFi" : "4G" },
+      })
+      .catch((err: Error) => {
+        this.logger.error(`Failed to update networkType for ${mac}`, err);
+      });
   }
 
   private publishCommand(

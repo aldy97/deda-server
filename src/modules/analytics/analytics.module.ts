@@ -45,17 +45,23 @@ import { PromptAdminController } from "./prompt-admin.controller";
 import { PromptAdminService } from "./prompt-admin.service";
 import { VoiceSpeedAdminController } from "./voice-speed-admin.controller";
 import { VoiceSpeedAdminService } from "./voice-speed-admin.service";
+import { VoiceSpeedBroadcastService } from "./voice-speed-broadcast.service";
+import { VoiceTimbreAdminController } from "./voice-timbre-admin.controller";
+import { VoiceTimbreAdminService } from "./voice-timbre-admin.service";
 import { AnalyticsMetaController } from "./analytics-meta.controller";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
 import { DeviceLinkModule } from "../device-link/device-link.module";
+import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
 
 @Module({
-  imports: [PassportModule, DeviceLinkModule],
+  imports: [PassportModule, DeviceLinkModule, BaiduAgentModule],
   controllers: [
     AnalyticsAuthController,
     AnalyticsMetaController,
     DevicesAdminController,
     PromptAdminController,
     VoiceSpeedAdminController,
+    VoiceTimbreAdminController,
     OverviewController,
     RetentionController,
     EngagementController,
@@ -72,6 +78,7 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
   ],
   providers: [
     FleetService,
+    SuperAdminGuard,
     {
       provide: ANALYTICS_JWT_SERVICE,
       inject: [ConfigService],
@@ -106,6 +113,8 @@ import { DeviceLinkModule } from "../device-link/device-link.module";
     TurnDecisionAnalyticsService,
     PromptAdminService,
     VoiceSpeedAdminService,
+    VoiceSpeedBroadcastService,
+    VoiceTimbreAdminService,
   ],
 })
 export class AnalyticsModule {}

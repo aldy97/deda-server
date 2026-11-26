@@ -35,8 +35,8 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 
 ### 为什么对外只有同步方法
 
-`LlmService` 的三个 prompt builder（`buildFillerPrompt`、
-`buildAdventureInteractionPrompt`、`buildEnglishTutorPrompt`）都是同步的，
+`LlmService` 的 prompt builder（`buildAdventureInteractionPrompt`、
+`buildEnglishTutorPrompt`）都是同步的，
 改成 async 会波及全部调用点与 160+ 既有测试。因此注册表用
 **启动预载（`onModuleInit`）+ 内存缓存 + 后台刷新**换取热路径零 `await`、零 DB 往返：
 
@@ -76,8 +76,6 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 | small_model | `intent_classify_system` | intent_classify | 对话意图分类器 | - |
 | small_model | `memory_extract_system` | memory_extract | 长期记忆提取器 | - |
 | small_model | `sleep_config_extract_system` | sleep_config_extract | 哄睡配置解析器 | - |
-| small_model | `filler_system` | filler | 首响承接层（打哈哈） | `contextSection?`, `bannedSection?` |
-| small_model | `filler_retry_instruction` | filler | filler 头部违规重试指令 | - |
 | small_model | `adventure_interaction_system` | adventure_interaction | 冒险故事接话层 | `characterPersona*`, `segmentText*`, `redirectRule*` |
 | small_model | `adventure_choice_match_system` | adventure_interaction | 冒险二选一 LLM 判定 | `characterPersona*`, `segmentText*`, `choiceA*`, `choiceB*` |
 | main_rules | `main_english_tutor_rules` | chat_main | 英语陪练规则段 | - |
@@ -147,7 +145,8 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 - 运维变更前务必在 test DB 推演至少 5 个边缘输入；
 - 改坏 → `reset-to-default` 是唯一逃生门（纯判定 prompt，回退不会丢任何已发布内容）；
 - 灰度验证通过前，`ADVENTURE_CHOICE_LLM_ENABLED` 环境变量保持 `false`，
-  此开关是唯一能不发版就关闭 LLM 判定链路的手段。
+  此开关是唯一能不发版就关闭 LLM 判定链路的手段；该键已加入 compose app
+  environment 白名单，写在 `env/.env.staging` 才会真正进入容器。
 
 ## 永久硬编码红线（不开放后台编辑）
 
@@ -158,7 +157,7 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 - L1 敏感词表；
 - `CANNED_REPLIES`、`EMOTIONAL_HARM_GUIDANCE`；
 - filler 静态模板池、`UPSTREAM_FALLBACK_TEXTS`、`buildFillerHandoffMessage`；
-- `buildChildProfileSection`、`buildFillerContextSection`（含真实儿童档案拼接逻辑）；
+- `buildChildProfileSection`（含真实儿童档案拼接逻辑）；
 - 冒险链路的本地 `CHARACTER_PERSONAS`（`adventure.service.ts`）。
 
 判据：**这段文本一旦写错会不会直接造成儿童安全风险或身份漂移**。
@@ -211,6 +210,24 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
    `PROMPT_REGISTRY_PROVIDER`；
 5. **重新采集黄金基线**：确认 `prompt-golden.spec.ts` 在改动前后断言不变；
 6. `npx tsc --noEmit && npx eslint "src/**/*.ts" && npx jest`。
+
+## 动态角色人设（2026-11-21 起）
+
+新增 IP/角色时不再需要发版加 `persona_<key>` 常量：
+
+1. 音色管理（`/analytics/voice-timbres`）新增角色 → 写入 `character_timbre`；
+2. Prompt 管理的 catalog 自动多出一行「角色人设：xxx」（由 `character_timbre` 派生，
+   `isDynamic: true`、`defaultContent: null`、`source: "none"`）；
+3. 首次保存草稿时惰性建 `persona_<key>` 行（`category=persona`、`renderSchema=[]`），
+   正文**不允许为空**；发布仍走现有确认码闸口；
+4. 运行时解析顺序：内置角色（elly/polly）→ 代码默认值；其他角色 → 动态 key 的
+   **已发布**内容；都没有 → Elly 默认值。绝不返回空串；
+5. 动态人设没有代码默认值，因此禁用「恢复代码默认值」；回滚历史版本仍可用；
+6. 角色被删除后人设行保留，catalog 标记 `characterRegistered: false`，不提供删除。
+
+`PromptCatalogItem.key` 从 `PromptKey` 放宽为 `string`，新增 `isDynamic` /
+`characterKey` / `characterRegistered` / `defaultContent: string | null`；
+`source` 增加 `"none"`（动态人设未发布）。
 
 ## 数据表
 

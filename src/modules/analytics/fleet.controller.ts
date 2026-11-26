@@ -1,9 +1,11 @@
 import {
   Controller,
+  Delete,
   Get,
   NotFoundException,
   Param,
   Query,
+  Req,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -13,6 +15,8 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import { AnalyticsAuthGuard } from "./guards/analytics-auth.guard";
+import { SuperAdminGuard } from "./guards/super-admin.guard";
+import { isSuperAdmin } from "./admin-role";
 import { FleetService } from "./fleet.service";
 import {
   FleetChurnRiskQueryDto,
@@ -55,8 +59,14 @@ export class FleetController {
 
   @Get("devices")
   @ApiOperation({ summary: "设备列表（分页 + 搜索）" })
-  getDevices(@Query() query: FleetDevicesQueryDto) {
-    return this.fleetService.getDevices(query);
+  getDevices(
+    @Query() query: FleetDevicesQueryDto,
+    @Req() req: { user?: { role?: unknown } },
+  ) {
+    return this.fleetService.getDevices(query, {
+      // 白名单备注只给超管：普通 admin 看得到设备，看不到谁在被测试。
+      includeTestWhitelist: isSuperAdmin(req.user),
+    });
   }
 
   @Get("devices/:deviceId")
@@ -67,6 +77,29 @@ export class FleetController {
     @Query() query: FleetDeviceDetailQueryDto,
   ) {
     const result = await this.fleetService.getDeviceDetail(deviceId, query);
+    if (!result) throw new NotFoundException("Device not found");
+    return result;
+  }
+
+  @Get("devices/:deviceId/child-profile")
+  @ApiOperation({
+    summary: "单台设备的孩子档案（admin 视图；档案未设置时 profile 为 null）",
+  })
+  @ApiParam({ name: "deviceId", description: "设备业务 ID（小写 MAC）" })
+  async getDeviceChildProfile(@Param("deviceId") deviceId: string) {
+    const result = await this.fleetService.getDeviceChildProfile(deviceId);
+    if (!result) throw new NotFoundException("Device not found");
+    return result;
+  }
+
+  @Delete("devices/:deviceId/child-profile")
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({
+    summary: "清空单台设备的孩子档案（仅 superadmin；幂等返回 deleted）",
+  })
+  @ApiParam({ name: "deviceId", description: "设备业务 ID（小写 MAC）" })
+  async deleteDeviceChildProfile(@Param("deviceId") deviceId: string) {
+    const result = await this.fleetService.deleteDeviceChildProfile(deviceId);
     if (!result) throw new NotFoundException("Device not found");
     return result;
   }

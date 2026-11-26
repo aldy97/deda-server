@@ -1,0 +1,67 @@
+import type { Prisma } from "@prisma/client";
+import type { SafetyVerdict } from "@/modules/vendor/child-safety.service";
+
+/**
+ * 本轮实际安全话术处置，不是分类器结论。
+ * - canned_block：任一 layer 明确拦截，代码返回固定话术
+ * - unsafe_line_echo：模型输出中包含固定安全句（含 fail-open 回抄）
+ * - caution_injected：注入了 L2 不可用时的谨慎指令
+ * - none：未触发安全话术
+ */
+export type SafetyReply =
+  "canned_block" | "unsafe_line_echo" | "caution_injected" | "none";
+
+/**
+ * 消息 rawPayload.safety 的持久化形状。
+ * 对外 JSON key 固定为 reply（dashboard 已上线读取该字段）；
+ * 内部调用方传 safetyReply，映射只发生在 buildSafetySnapshot 一处。
+ */
+export type SafetySnapshot = Prisma.InputJsonObject & {
+  layer: string | null;
+  category: string | null;
+  blocked: boolean;
+  source: string;
+  matched: string | null;
+  reply: SafetyReply;
+  inferred: boolean;
+};
+
+/** 安全话术文本与指令按模式分组，但策略本身不依赖任何业务模块。 */
+export type SafetyProfileKey = "default" | "adventure" | "sleep";
+
+/** gate 的一次解释结果；不含 reviewable，留原文始终由 recorder 判定。 */
+export interface SafetyEvaluation {
+  profile: SafetyProfileKey;
+  verdict: SafetyVerdict | null;
+  blocked: boolean;
+  safetyReply: SafetyReply;
+  cannedReply?: string;
+  promptInstruction?: string;
+  snapshot: SafetySnapshot | null;
+}
+
+/** 引擎在产生点给出的回复最小形状；safetyDisposition 是显式处置。 */
+export interface AdventureReplyLike {
+  texts: string[];
+  safetyBlocked?: boolean;
+  safetyDisposition?: SafetyReply;
+}
+
+export interface SafetyHandleEvaluation extends SafetyEvaluation {
+  /** 本轮是否真实请求过 L2 评估（adapter 记 safetySource 用）。 */
+  evaluated: boolean;
+}
+
+/**
+ * 惰性安全句柄：引擎决定「何时评估」，gate 决定「如何解释」。
+ * - evaluateIfNeeded：单飞记忆化，并发多次调用共享同一次 getVerdict；
+ * - promptInstruction：生成前注入；
+ * - finalize：生成后收口，显式 disposition 优先于字符串推断。
+ */
+export interface SafetyHandle {
+  evaluateIfNeeded(): Promise<SafetyVerdict | null>;
+  promptInstruction(
+    verdict: SafetyVerdict | null | undefined,
+  ): string | undefined;
+  finalize(reply: AdventureReplyLike): SafetyHandleEvaluation;
+}

@@ -20,7 +20,7 @@ const ANALYTICS_SECRET =
 /** 无变量的人设 key：跑完整生命周期 */
 const KEY = "persona_polly";
 /** 带可选变量的 key：验证「DB 正文 + 代码变量契约」协同 */
-const VAR_KEY = "filler_system";
+const VAR_KEY = "story_favorite_type_suffix";
 const WRONG_CODE = "DEFINITELY-NOT-THE-CODE";
 
 /**
@@ -37,6 +37,7 @@ describe("Analytics prompts (e2e)", () => {
   let prisma: PrismaService;
   let registry: PromptRegistryService;
   let adminToken: string;
+  let plainAdminToken: string;
   let wechatScopeToken: string;
   let confirmCode: string;
 
@@ -71,6 +72,16 @@ describe("Analytics prompts (e2e)", () => {
       username: "admin",
       displayName: "管理员",
       scope: "analytics",
+      // Prompt 管理已归运维组：只有 superadmin 能进
+      role: "superadmin",
+    });
+    // 普通 admin 的对照 token：验证运维组闸口端到端生效
+    plainAdminToken = await jwt.signAsync({
+      sub: "ops",
+      username: "ops",
+      displayName: "运营",
+      scope: "analytics",
+      role: "admin",
     });
     wechatScopeToken = await jwt.signAsync({
       sub: "user-001",
@@ -126,6 +137,38 @@ describe("Analytics prompts (e2e)", () => {
       ).expect(200);
       expect(detail.body.data.publishedRevision).toBeNull();
     });
+
+    it("普通 admin（role=admin）→ 403，读写都进不来", async () => {
+      const list = await request(app.getHttpServer())
+        .get("/analytics/prompts")
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .expect(403);
+      expect(list.body.message).toContain("超级管理员");
+
+      await request(app.getHttpServer())
+        .post(`/analytics/prompts/${KEY}/publish`)
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .send({ revision: 1, changeNote: "x", confirmCode })
+        .expect(403);
+
+      // 对照：同一份数据 superadmin 读得到，证明 403 来自角色而不是数据问题
+      const owned = await auth(
+        request(app.getHttpServer()).get("/analytics/prompts"),
+      ).expect(200);
+      expect(Array.isArray(owned.body.data)).toBe(true);
+    });
+
+    it("meta 例外：普通 admin 仍能读环境标签与自己的角色", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/analytics/meta")
+        .set("Authorization", `Bearer ${plainAdminToken}`)
+        .expect(200);
+
+      expect(res.body.data.admin).toMatchObject({
+        username: "ops",
+        role: "admin",
+      });
+    });
   });
 
   describe("meta", () => {
@@ -143,22 +186,35 @@ describe("Analytics prompts (e2e)", () => {
   });
 
   describe("读取", () => {
-    it("catalog 恒返回全部 key，未编辑时一律 source=default 且未偏离", async () => {
+    it("catalog 恒返回全部内置 key，动态人设单独标记且未编辑时 source=default/none", async () => {
       const res = await auth(
         request(app.getHttpServer()).get("/analytics/prompts"),
       ).expect(200);
 
-      const items = res.body.data;
-      expect(items).toHaveLength(PROMPT_KEYS.length);
-      expect(items.map((i: { key: string }) => i.key).sort()).toEqual(
+      const items = res.body.data as Array<{
+        key: string;
+        isDynamic: boolean;
+        characterKey: string | null;
+        source: string;
+        deviatesFromDefault: boolean;
+        effectiveContent: string;
+      }>;
+      const builtins = items.filter((item) => !item.isDynamic);
+      expect(builtins.map((i) => i.key).sort()).toEqual(
         [...PROMPT_KEYS].sort(),
       );
-      for (const item of items) {
+      for (const item of builtins) {
         expect(item.source).toBe("default");
         expect(item.deviatesFromDefault).toBe(false);
         expect(item.effectiveContent).toBe(
           PROMPT_DEFAULTS[item.key as keyof typeof PROMPT_DEFAULTS].template,
         );
+      }
+      // character_timbre 里只有内置角色时不应产生动态行；有动态行则必须自洽
+      for (const item of items.filter((entry) => entry.isDynamic)) {
+        expect(item.characterKey).not.toBeNull();
+        expect(item.key).toBe(`persona_${item.characterKey}`);
+        expect(["none", "db"]).toContain(item.source);
       }
     });
 
@@ -346,7 +402,7 @@ describe("Analytics prompts (e2e)", () => {
         ),
       )
         .send({
-          content: "承接段：{{contextSection}}／禁播段：{{bannedSection}}",
+          content: "题材：{{favoriteStoryType}}",
           expectedRevision: 0,
         })
         .expect(200);
@@ -358,15 +414,9 @@ describe("Analytics prompts (e2e)", () => {
         .send({ revision: 1, changeNote: "验证变量渲染", confirmCode })
         .expect(200);
 
-      expect(
-        registry.render(VAR_KEY, {
-          contextSection: "CTX-A",
-          bannedSection: "BAN-B",
-        }),
-      ).toBe("承接段：CTX-A／禁播段：BAN-B");
-
-      // 可选变量缺省 → 渲染为空串，不报错
-      expect(registry.render(VAR_KEY, {})).toBe("承接段：／禁播段：");
+      expect(registry.render(VAR_KEY, { favoriteStoryType: "恐龙" })).toBe(
+        "题材：恐龙",
+      );
     });
 
     it("DB 正文写了未声明的占位符 → 回落代码默认值，绝不把 {{x}} 发给模型", async () => {
@@ -388,17 +438,19 @@ describe("Analytics prompts (e2e)", () => {
         .send({ revision: 2, changeNote: "误写未声明变量", confirmCode })
         .expect(200);
 
-      const rendered = registry.render(VAR_KEY, {});
+      const rendered = registry.render(VAR_KEY, {
+        favoriteStoryType: "恐龙",
+      });
       // 不变量：既不漏 {{x}} 给模型，也不用那份坏掉的 DB 正文
       expect(rendered).not.toContain("{{");
       expect(rendered).not.toContain("notDeclaredVar");
       expect(rendered).not.toContain("危险正文");
-      // 回落结果 = 代码默认模板按可选变量渲染（占位符→空串）
+      // 回落结果 = 代码默认模板按变量契约渲染
       expect(rendered).toBe(
         renderPrompt(
-          PROMPT_DEFAULTS.filler_system.template,
-          {},
-          PROMPT_DEFAULTS.filler_system.variables,
+          PROMPT_DEFAULTS.story_favorite_type_suffix.template,
+          { favoriteStoryType: "恐龙" },
+          PROMPT_DEFAULTS.story_favorite_type_suffix.variables,
         ),
       );
     });

@@ -2,7 +2,7 @@
 
 > 文档版本：1.1.0  
 > 适用范围：微信小程序业务接口  
-> 接口总数：35  
+> 接口总数：37
 > 契约依据：当前后端 Controller、DTO、Service 与统一响应实现
 
 ## 1. 通用约定
@@ -98,6 +98,7 @@ Content-Type: application/json
 | 音乐播放 | 3 | 状态、控制、网易云绑定 |
 | 哄睡配置 | 2 | 查询、部分更新 |
 | 推送订阅 | 1 | 上报订阅消息授权结果 |
+| 展示型素材 | 1 | manifest |
 
 ---
 
@@ -241,6 +242,10 @@ Content-Type: application/json
 | `childProfile` | object \| null | 孩子摘要 |
 | `childProfile.name` | string \| null | 孩子姓名 |
 | `childProfile.englishName` | string \| null | 孩子英文名 |
+| `todayUsage` | object \| null | 今日陪伴摘要；统计失败时为 `null`，旧客户端可忽略。按设备时区（缺失回落 `Asia/Shanghai`）统计自然日 |
+| `todayUsage.date` | string | 设备本地日期 `YYYY-MM-DD` |
+| `todayUsage.durationMinutes` | number | 当日陪伴时长（分钟），与家长报告同一估算口径：`role=user` 消息数 × 0.5 后四舍五入 |
+| `todayUsage.turnCount` | number | 当日孩子发言条数（一条 user 消息 = 一轮） |
 
 ### 3.3 查询设备详情
 
@@ -287,12 +292,14 @@ Content-Type: application/json
 | --- | --- | --- |
 | `deviceId` | string | 设备业务 ID |
 | `status` | string | `online`／`offline`；超过 15 秒未收到设备心跳即判定 `offline` |
-| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。当前固件为占位值，前端可展示但勿据此做业务判断 |
+| `battery` | number \| null | 电量百分比 0–100；设备尚未上报时为 `null`。协议 v1.8 起固件在未取得有效电量时上报 `100`（仅作显示），前端可展示但勿据此做业务判断 |
 | `volume` | number \| null | 音量 0–100；设备尚未上报时为 `null`。音量下发（见 3.6）后回读本字段即可确认设备是否已生效 |
-| `isCharging` | boolean \| null | 是否充电中；对应机芯厂 `query.data.charging`（契约类型 `boolean \| null`），`null` 表示未知。当前固件恒发 `null`，前端按未知处理 |
+| `isCharging` | boolean \| null | 对应机芯厂 `query.data.charging`；协议 v1.8 起固件恒发布尔值（表示 USB 是否接入），老固件未上报时为 `null` |
+| `networkMode` | `"wifi"` \| `"4g"` \| null | 当前已就绪的网络模式；`null` 表示切网中**或**老固件未上报，API 层不区分 |
+| `wifiRssi` | number \| null | WiFi 信号强度 dBm（负整数）；仅 `networkMode="wifi"` 时有意义，4G/未上报为 `null`；离线时保留最后已知值 |
 | `lastActiveAt` | string \| null | 最近活跃时间，ISO 8601；设备从未上报时为 `null` |
 
-设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值。
+设备不存在时返回 404。前端需容错 `offline` 与各字段的 `null` 值；**网络字段必须在 `status === "online"` 时展示**，否则会显示 Redis 中最多 1 小时前的陈旧信号。
 
 ### 3.5 查询设备绑定成员
 
@@ -1076,7 +1083,55 @@ Query：
 
 ---
 
-## 11. 小程序接入注意事项
+## 11. 展示型素材（AppAsset）
+
+运营在 dashboard 上传自有图片，小程序按 key 展示；没有用户上传、头像或签名 URL。
+
+### 11.1 获取素材 manifest
+
+- Method：`GET`
+- Path：`/app-assets/manifest`
+- 鉴权：公开（无 Bearer Token）
+- 缓存：响应头带 `Cache-Control: public, max-age=60, stale-while-revalidate=300` 与 `ETag`
+
+响应数据：
+
+```json
+{
+  "version": "2026-11-25T10:00:00.000Z",
+  "assets": {
+    "diagnostics/remote-probe": {
+      "url": "https://staging.valleyletters.com/app-assets/files/diagnostics/remote-probe/v1-a1b2c3.png",
+      "width": 512,
+      "height": 512,
+      "version": 1,
+      "updatedAt": "2026-11-25T09:59:00.000Z"
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| version | string | manifest 版本（当前最大 updatedAt）；无数据时为空字符串 |
+| assets | object | key → 素材；只包含已发布版本，未配置的 key 不出现 |
+| assets[key].url | string | 图片 HTTPS 地址 |
+| assets[key].width / height | number | 图片尺寸 |
+| assets[key].version | number | 同一 key 下的版本号 |
+| assets[key].updatedAt | string | 该版本更新时间（ISO 8601） |
+
+小程序端要求：
+
+- 拉取失败 / key 缺失 / 图片加载失败时回退包内 fallback，不阻塞页面。
+- 远程图片允许 WebP；包内 fallback 不允许 WebP（iOS 本地 webp 不解码）。
+- 图片域名需加入微信后台的 `downloadFile` 合法域名。
+- 展示位注册表在服务端 DB，但小程序侧的 key 仍是编译期常量：新增展示位必须先在
+  `miniprogram/constants/app-asset-keys.ts` 登记并在页面接入，否则 manifest 即使下发了该 key 也不会被使用。
+- 停用展示位后该 key 会从 manifest 消失（受 manifest 60s 缓存与小程序 5min 缓存影响），此时回退包内 fallback。
+
+---
+
+## 12. 小程序接入注意事项
 
 1. 除明确标为“公开”的接口外，统一携带 Bearer Token；Token 失效后重新走微信登录。
 2. 所有业务写操作均以统一信封中的 `code=0` 和 HTTP 成功状态共同判断，不要只检查 HTTP 200／201。

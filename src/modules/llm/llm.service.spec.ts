@@ -501,17 +501,69 @@ describe("LlmService", () => {
       expect(msg.content).toContain(
         "「原来你喜欢上海的天气呀，快多跟我说说呢……」",
       );
-      expect(msg.content).toContain("直接从实质内容起句");
+      expect(msg.content).toContain("第一句必须是实质内容");
       expect(msg.content).toContain("不要以孩子的名字开头");
       expect(msg.content).toContain("语气词");
-      expect(msg.content).toContain("不要重复或换写承接语已经表达过的意象");
+      expect(msg.content).toContain("不要重复或换写承接语里的词");
+      expect(msg.content).toContain("真棒");
     });
 
-    it("附好/坏起句示范，让禁令可模仿", () => {
-      const msg = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……");
+    it("最近开场进入禁用清单；无历史时不追加", () => {
+      const msg = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……", [
+        "公园里最好玩",
+        "是空气把蓝光",
+      ]);
+      expect(msg.content).toContain("「公园里最好玩」「是空气把蓝光」");
+      expect(msg.content).toContain("不要再用相同开头");
 
-      expect(msg.content).toContain("好例");
-      expect(msg.content).toContain("坏例");
+      const without = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……");
+      expect(without.content).not.toContain("不要再用相同开头");
+    });
+
+    it("stop 承接语只收尾：不提议新内容、不追问", () => {
+      const msg = service.buildFillerHandoffMessage(
+        "好呀，那我们先不听了，我就在这儿陪着你呀……",
+        [],
+        "stop",
+      );
+
+      expect(msg.content).toContain("只做一句温和收尾");
+      expect(msg.content).toContain("不要提议新的故事、儿歌、游戏");
+      expect(msg.content).toContain("不要追问为什么");
+      expect(msg.content).not.toContain("可以最多加一句简单的追问");
+      expect(msg.content).not.toContain("开始故事");
+    });
+
+    it("continue 承接语从断开处继续，不重新开头", () => {
+      const msg = service.buildFillerHandoffMessage(
+        "好，我们接着往下讲呀……",
+        ["公园里最好玩"],
+        "continue",
+      );
+
+      expect(msg.content).toContain("从断开处继续");
+      expect(msg.content).toContain("不要重新开头");
+      expect(msg.content).toContain("「公园里最好玩」");
+      expect(msg.content).not.toContain("可以最多加一句简单的追问");
+    });
+
+    it("extractRecentAnswerOpeners 只取最近 5 条 assistant 开场", () => {
+      const history = [
+        { role: "user" as const, content: "问题不算" },
+        { role: "assistant" as const, content: "第一句回答。" },
+        { role: "assistant" as const, content: "第二句回答。" },
+        { role: "assistant" as const, content: "第三句回答。" },
+        { role: "assistant" as const, content: "第四句回答。" },
+        { role: "assistant" as const, content: "第五句回答。" },
+        { role: "assistant" as const, content: "第六句回答。" },
+      ];
+      expect(LlmService.extractRecentAnswerOpeners(history)).toEqual([
+        "第二句回答",
+        "第三句回答",
+        "第四句回答",
+        "第五句回答",
+        "第六句回答",
+      ]);
     });
 
     it("注入前清洗：换行与多余空白压平、截断 100 字（防小模型产出污染指令位）", () => {
@@ -664,6 +716,27 @@ describe("LlmService", () => {
       );
     });
 
+    it("should disable thinking via enable_thinking for the small model", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: Readable.from([
+          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      } as any);
+
+      await collectStream(
+        service.completeStream({
+          scene: "filler",
+          messages: [{ role: "user", content: "我喜欢上海的天气" }],
+          model: "qwen-flash",
+        }),
+      );
+
+      const body = mockedAxios.post.mock.calls[0][1] as Record<string, unknown>;
+      expect(body.enable_thinking).toBe(false);
+      expect(body).not.toHaveProperty("thinking");
+    });
+
     it("should use small-model credentials for non-streaming adventure bridges", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -710,6 +783,22 @@ describe("LlmService", () => {
           }),
         }),
       );
+    });
+
+    it("should disable thinking via enable_thinking for the small model (non-streaming)", async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { content: "我们继续冒险吧！" } }] },
+      } as any);
+
+      await service.complete({
+        scene: "adventure_interaction",
+        messages: [{ role: "user", content: "我想吃冰淇淋" }],
+        model: "qwen-flash",
+      });
+
+      const body = mockedAxios.post.mock.calls[0][1] as Record<string, unknown>;
+      expect(body.enable_thinking).toBe(false);
+      expect(body).not.toHaveProperty("thinking");
     });
 
     it("should fall back to primary credentials when small-model env is not set", async () => {
@@ -994,168 +1083,6 @@ describe("LlmService", () => {
           }),
         }),
       );
-    });
-  });
-
-  describe("buildFillerPrompt", () => {
-    it("构建中文首响承接 prompt：角色定位、语言跟随、不答实质问题", () => {
-      const messages = service.buildFillerPrompt("我喜欢上海的天气");
-
-      expect(messages).toHaveLength(2);
-      expect(messages[0].role).toBe("system");
-      expect(messages[0].content).toContain("首响承接层");
-      expect(messages[0].content).toContain("用孩子刚说的语言回复");
-      expect(messages[0].content).toContain("绝不回答问题");
-      expect(messages[1]).toEqual({
-        role: "user",
-        content: "我喜欢上海的天气",
-      });
-    });
-
-    it("should not carry textbook context or history into the filler prompt", () => {
-      const messages = service.buildFillerPrompt("Hello");
-
-      expect(messages).toHaveLength(2);
-      expect(messages[0].content).not.toContain("textbook context");
-    });
-
-    it("长度下限抬到中文 15-20 字 / 英文 8-12 词（音频覆盖主模型首包）", () => {
-      const messages = service.buildFillerPrompt("Hello");
-
-      // 防死空气：filler 音频是等待大模型首 chunk 的天然缓冲。
-      // 实测 gap P90=2.36s，10 字 filler（约 1.5s）盖不住，抬到 15-20 字
-      // （约 2.5-3.5s）才能完全覆盖
-      expect(messages[0].content).toContain("15 到 20 个字");
-      expect(messages[0].content).toContain("8 到 12 个词");
-    });
-
-    it("few-shot 中文示例均为 15-20 字且不带名字，英文示例 8-12 词", () => {
-      const messages = service.buildFillerPrompt("我喜欢上海的天气");
-
-      // 模型会模仿示例长度与结构：示例必须自身达标
-      expect(messages[0].content).toContain("示例：");
-      const zhExamples = [
-        "原来你喜欢上海的天气呀，快多跟我说说呢……",
-        "去公园玩啦，听起来就让人觉得好开心呀……",
-      ];
-      for (const example of zhExamples) {
-        expect(messages[0].content).toContain(example);
-        const cjkCount = [...example.replace(/[\s\p{P}\p{S}]/gu, "")].length;
-        expect(cjkCount).toBeGreaterThanOrEqual(15);
-        expect(cjkCount).toBeLessThanOrEqual(20);
-        expect(example).not.toContain("贝果");
-      }
-      expect(messages[0].content).toContain(
-        "Wow, that is such a fun question to think about!",
-      );
-    });
-
-    it("硬禁：不以孩子名字开头、不出现自己名字、不新增意象", () => {
-      const messages = service.buildFillerPrompt("我最喜欢蓝色");
-
-      // 实机事故：每句 filler 都以「贝果，」开头，结构性复读
-      expect(messages[0].content).toContain("不要以孩子的名字开头");
-      // 实机事故：filler 自称「小象 Elly 听到……」，与主回答自我指称撞车
-      expect(messages[0].content).toContain("不要出现你自己的名字");
-      // 实机事故：filler 诗意延展（「像小星星在心里闪闪发亮」），
-      // 主回答跟着复述意象——filler 越抒情，主模型越有东西可复读
-      expect(messages[0].content).toContain(
-        "禁止比喻、诗意延展或添加孩子没说的新意象",
-      );
-    });
-
-    it("保留旧防线：延续语气收尾、不预告实质内容、不确认事实", () => {
-      const messages = service.buildFillerPrompt("继续冒险故事");
-
-      expect(messages[0].content).toContain("延续的语气收尾");
-      expect(messages[0].content).toContain("很久很久以前");
-      expect(messages[0].content).toContain("绝不确认或复述孩子说的事实");
-      // 问 Elly 自己也只承接，不抢答
-      expect(messages[0].content).toContain("包括关于你自己的问题");
-    });
-
-    it("最近用过的 filler 进入中文禁用清单", () => {
-      const messages = service.buildFillerPrompt("我喜欢上海的天气", [
-        "原来你喜欢上海的天气呀，快多跟我说说呢……",
-        "Wow, tell me more about it right now!",
-      ]);
-
-      // 跨轮次多样性：最近用过的 filler 原文进入禁用清单
-      expect(messages[0].content).toContain("不要复用或近似模仿");
-      expect(messages[0].content).toContain(
-        "「原来你喜欢上海的天气呀，快多跟我说说呢……」",
-      );
-      expect(messages[0].content).toContain(
-        "「Wow, tell me more about it right now!」",
-      );
-      // 用户输入仍在 user 消息，不被历史污染
-      expect(messages).toHaveLength(2);
-      expect(messages[1].content).toBe("我喜欢上海的天气");
-    });
-
-    it("无最近 filler 时不加禁用清单段", () => {
-      // 首轮对话 / 旧数据无 filler：prompt 保持原样（向后兼容）
-      for (const recent of [undefined, [] as string[]]) {
-        const messages = service.buildFillerPrompt("Hello", recent);
-        expect(messages[0].content).not.toContain("不要复用或近似模仿");
-      }
-    });
-
-    it("冒险门禁情境：中文中性承接指令，不得预告冒险", () => {
-      const messages = service.buildFillerPrompt("继续冒险故事", [], {
-        intent: "adventure_story",
-        adventureDeclined: true,
-      });
-
-      expect(messages[0].content).toContain("今天的冒险已经结束");
-      expect(messages[0].content).toContain("不要宣告、承诺或预告冒险");
-    });
-
-    it("故事意图情境：引导语示例 ≥15 字，不抢跑故事内容", () => {
-      const messages = service.buildFillerPrompt("讲一个英语故事", [], {
-        intent: "english_story",
-      });
-
-      expect(messages[0].content).toContain("主回答会讲一个故事");
-      expect(messages[0].content).toContain("绝不自己开始或预告故事内容");
-      const leadIn = "好呀，故事时间到啦，把耳朵竖起来咯……";
-      expect(messages[0].content).toContain(leadIn);
-      expect(
-        [...leadIn.replace(/[\s\p{P}\p{S}]/gu, "")].length,
-      ).toBeGreaterThanOrEqual(15);
-    });
-
-    it("纯自由对话不加情境段", () => {
-      const messages = service.buildFillerPrompt("你好", [], {
-        intent: "free_chat",
-      });
-
-      expect(messages[0].content).not.toContain("本轮背景");
-    });
-
-    it("人设护栏：身份声明 + 禁止编造名字", () => {
-      const messages = service.buildFillerPrompt("你叫什么名字", [], {
-        persona: "小象 Elly：听风原野的居民，性格温暖好奇。",
-      });
-
-      // 身份兜底：filler 不得编造名字（防与主回答人设矛盾）
-      expect(messages[0].content).toContain("你的身份");
-      expect(messages[0].content).toContain("小象 Elly");
-      expect(messages[0].content).toContain("绝不给自己编造别的名字");
-    });
-
-    it("孩子档案：知道名字但本句不用名字称呼", () => {
-      const withBrief = service.buildFillerPrompt("你好呀", [], {
-        childBrief: "名叫 Amy，5 岁，女孩",
-      });
-      expect(withBrief[0].content).toContain("你正在和这个孩子说话");
-      expect(withBrief[0].content).toContain("名叫 Amy，5 岁，女孩");
-      // 实机事故：「may address them by name naturally」导致每句都喊名字
-      expect(withBrief[0].content).toContain("不要用名字称呼");
-      expect(withBrief[0].content).toContain("不要编造");
-
-      const without = service.buildFillerPrompt("你好呀", [], {});
-      expect(without[0].content).not.toContain("你正在和这个孩子说话");
     });
   });
 

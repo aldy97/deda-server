@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { load } from "js-yaml";
 
 const DOCKER_DIR = resolve(__dirname, "../../../docker");
@@ -36,6 +36,7 @@ const MUST_FORWARD = [
   "PROMPT_PUBLISH_CONFIRM_CODE",
   "PROMPT_WRITE_ENABLED",
   "PUSH_NOTIFICATIONS_ENABLED",
+  "SAFETY_GATE_ADVENTURE",
   "WECHAT_TMPL_SLEEP_REMINDER",
   "ADVENTURE_BREAKER_THRESHOLD",
   "ADVENTURE_BREAKER_TRIPPED_TTL_SECONDS",
@@ -53,14 +54,35 @@ const MUST_FORWARD = [
   "ADVENTURE_SIM_MAX_AWAIT_POINTS",
   "ADVENTURE_SIM_MAX_SESSION_SECONDS",
   // 百度智能体与设备端 TTS（v1.4 getvalue 的取值来源）。这组键只写在 env 文件里
-  // 不会进容器：CHARACTER_TIMBRE_JSON 缺失时 getvalue 一律 500，设备每轮对话都
-  // 创建失败，而容器侧不会有任何报错——正是「不报错的失效」最需要钉住。
+  // 不会进容器：TTS_DEFAULT_VOL 缺失会让 getvalue 500（vcn 自 2026-11-21 起改读
+  // character_timbre 表，CHARACTER_TIMBRE_JSON 仅为旧镜像回滚保留白名单）。
   "BAIDU_AGENT_ENABLED",
   "BAIDU_AGENT_TIMEOUT_MS",
   "CHARACTER_TIMBRE_JSON",
   "TTS_DEFAULT_VOL",
   "VOICE_CATALOG_JSON",
+  // 展示型 Elly 素材（AppAsset）local 存储与公开访问 URL。compose 白名单里的默认值
+  // 是 staging 口径，prod/staging override 各自覆盖 LOCAL_DIR / PUBLIC_BASE_URL / HOSTS。
+  "APP_ASSET_STORAGE_DRIVER",
+  "APP_ASSET_LOCAL_DIR",
+  "APP_ASSET_PUBLIC_BASE_URL",
+  "APP_ASSET_HOSTS",
+  "APP_ASSET_MAX_BYTES",
+  "APP_ASSET_MAX_DIMENSION",
 ];
+
+/**
+ * 代码读过、但刻意不进 base compose 的键。每一项都必须有理由，
+ * 否则「代码读了但容器里永远 undefined」会再次静默发生。
+ */
+const INTENTIONALLY_NOT_FORWARDED = new Set([
+  // staging 写死 authoring；prod 不设 = 只读（fail-safe），转发会让误配写生产
+  "CONTENT_ADMIN_PROFILE",
+  // 仅 staging 覆盖里显式 true，base/prod 不得出现
+  "ADVENTURE_TEST_MODE_ENABLED",
+]);
+
+const SOURCE_DIR = resolve(__dirname, "../..");
 
 /** 单键替换形式：${KEY} 或 ${KEY:-默认值} */
 const SUBSTITUTION = /^\$\{([A-Z_0-9]+)(?::?-[^}]*)?\}$/;
@@ -68,6 +90,14 @@ const SUBSTITUTION = /^\$\{([A-Z_0-9]+)(?::?-[^}]*)?\}$/;
 describe("compose 环境变量白名单", () => {
   it("代码消费的键必须在 base 白名单里", () => {
     const missing = MUST_FORWARD.filter((key) => !(key in baseEnv));
+    expect(missing).toEqual([]);
+  });
+
+  it("代码实际读取的环境变量也必须可达或显式豁免", () => {
+    const missing = [...collectConfigKeys()]
+      .filter((key) => !(key in baseEnv))
+      .filter((key) => !INTENTIONALLY_NOT_FORWARDED.has(key))
+      .sort();
     expect(missing).toEqual([]);
   });
 
@@ -99,12 +129,6 @@ describe("compose 环境变量白名单", () => {
     expect("ADVENTURE_TEST_MODE_ENABLED" in baseEnv).toBe(false);
     expect("ADVENTURE_TEST_MODE_ENABLED" in prodEnv).toBe(false);
     expect(stagingEnv.ADVENTURE_TEST_MODE_ENABLED).toBe("true");
-  });
-
-  it("SLEEP_TEST_MODE_ENABLED 刻意不进 base/prod：只有 staging 显式开启", () => {
-    expect("SLEEP_TEST_MODE_ENABLED" in baseEnv).toBe(false);
-    expect("SLEEP_TEST_MODE_ENABLED" in prodEnv).toBe(false);
-    expect(stagingEnv.SLEEP_TEST_MODE_ENABLED).toBe("true");
   });
 });
 
@@ -162,6 +186,51 @@ describe("同机双栈的内存护栏", () => {
     expect(total).toBeLessThanOrEqual(BUDGET_MB);
   });
 });
+
+function collectTsFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules") continue;
+      files.push(...collectTsFiles(full));
+    } else if (
+      entry.isFile() &&
+      entry.name.endsWith(".ts") &&
+      !entry.name.endsWith(".spec.ts")
+    ) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+/**
+ * 代码里真正读取的环境变量键：
+ * - `configService.get("KEY")` / `this.config.get("KEY")` / `config.get("KEY")`
+ * - `export const X_ENV = { ... "KEY" ... }` 这类常量映射（如冒险开关）
+ *
+ * 不扫描 process.env：APP_NAME/DATABASE_URL 等由 compose 直接注入或由
+ * 运行时环境提供，不属于本闸口的「代码读了但没转发」口径。
+ */
+function collectConfigKeys(): Set<string> {
+  const keys = new Set<string>();
+  const literalGet =
+    /(?:configService|this\.config|config)\.get(?:<[^>]+>)?\(\s*"([A-Z][A-Z0-9_]*)"/g;
+  const envMap = /export const \w+_ENV = \{([\s\S]*?)\}/g;
+  for (const file of collectTsFiles(SOURCE_DIR)) {
+    const source = readFileSync(file, "utf8");
+    for (const match of source.matchAll(literalGet)) {
+      keys.add(match[1]);
+    }
+    for (const match of source.matchAll(envMap)) {
+      for (const key of match[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)) {
+        keys.add(key[1]);
+      }
+    }
+  }
+  return keys;
+}
 
 function parseMemoryMb(memory?: string): number {
   const match = /^(\d+)([MG])$/.exec(memory ?? "");

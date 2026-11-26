@@ -22,17 +22,20 @@ services:
       # 旧 inode 会让容器内永久看到空目录（2026-11-08 事故）；挂父目录后子目录
       # 删建对容器透明，仅投递窗口期短暂 404。
       - /opt/deda/dashboard:/opt/deda/dashboard:ro
+      # 展示型 Elly 素材（AppAsset）本地文件卷：staging/prod 共用父目录，子目录各自隔离。
+      - /opt/deda/app-assets:/opt/deda/app-assets
     environment:
       DASHBOARD_DIST_PATH: /opt/deda/dashboard/staging
+      # 展示型 Elly 素材
+      APP_ASSET_LOCAL_DIR: /opt/deda/app-assets/staging
+      APP_ASSET_PUBLIC_BASE_URL: https://staging.valleyletters.com/app-assets/files
+      APP_ASSET_HOSTS: staging.valleyletters.com
       # staging 是内容创作环境，放开写。prod 的 compose 不设这个变量 → 只读（fail-safe），
       # 内容必须在 staging 改好、验证过，再用管理台的导入功能搬过去。
       CONTENT_ADMIN_PROFILE: authoring
       # 测试冒险故事下发（仅测试环境）：staging 连接样机的冒险测试播放入口。
       # base/prod 刻意不转发（compose-env-gate.spec.ts 钉死）→ prod 永不可用。
       ADVENTURE_TEST_MODE_ENABLED: 'true'
-      # 测试哄睡模式触发词（仅测试环境）：staging 语音「测试哄睡模式」绕过时段门禁直接进哄睡。
-      # base/prod 刻意不转发（compose-env-gate.spec.ts 钉死）→ prod 永不可用。
-      SLEEP_TEST_MODE_ENABLED: 'true'
       # staging 容器 limit 1G，堆留 768M，其余给 Buffer/代码段/ARMS 探针
       NODE_OPTIONS: --max-old-space-size=768
     deploy:
