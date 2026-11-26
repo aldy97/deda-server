@@ -745,6 +745,7 @@ body { reason }
 
 > 实现：`src/modules/app-assets/`，管理接口前缀 `/analytics/app-assets/*`，全部要求 superadmin。
 > 公开 manifest `GET /app-assets/manifest` 无鉴权，只返回已发布且展示位启用的 key。
+> manifest 响应 `Cache-Control: no-store`：不做 HTTP 缓存，发布后下一次请求即生效；图片文件走 `/app-assets/files/*`，文件名含哈希、长缓存不变。
 > 一个展示位同一时刻最多一条 published；发布时旧 published 自动归档（保留历史，可回滚）。
 
 展示位注册表存 DB（`app_asset_slots`），key = `page/suffix`，page 是短 code 且必须等于 key 第一段。

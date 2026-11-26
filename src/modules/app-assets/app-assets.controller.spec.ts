@@ -21,15 +21,19 @@ describe("AppAssetsController", () => {
     ).toBeUndefined();
   });
 
-  it("manifest 设置 Cache-Control 头", () => {
+  it("manifest 禁止客户端缓存：no-store，且不得出现可复用指令", () => {
     const headers = Reflect.getMetadata(
       "__headers__",
       AppAssetsController.prototype.manifest,
     ) as Array<{ name: string; value: string }>;
-    expect(headers).toContainEqual({
-      name: "Cache-Control",
-      value: "public, max-age=60, stale-while-revalidate=300",
-    });
+    const cacheControl = headers.find(
+      (header) => header.name === "Cache-Control",
+    );
+
+    expect(cacheControl?.value).toBe("no-store");
+    expect(cacheControl?.value).not.toMatch(
+      /max-age|stale-while-revalidate|must-revalidate/,
+    );
   });
 
   it("manifest 委托 service 并设置 ETag", async () => {

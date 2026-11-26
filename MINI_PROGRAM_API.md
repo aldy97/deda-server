@@ -1092,7 +1092,7 @@ Query：
 - Method：`GET`
 - Path：`/app-assets/manifest`
 - 鉴权：公开（无 Bearer Token）
-- 缓存：响应头带 `Cache-Control: public, max-age=60, stale-while-revalidate=300` 与 `ETag`
+- 缓存：响应头 `Cache-Control: no-store`（manifest 是易变快照，客户端不得存副本；旧头的 `max-age` / `stale-while-revalidate` 会让上传后 5–10 分钟仍下发旧 key）。仍带 `ETag` 便于自查
 
 响应数据：
 

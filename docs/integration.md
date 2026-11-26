@@ -319,7 +319,7 @@
 
 ## 展示型素材（AppAsset）
 
-- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布且展示位启用的 key；小程序按 key 渲染，失败回退包内 fallback。
+- 公开 manifest：`GET /app-assets/manifest`，无鉴权，只返回已发布且展示位启用的 key；小程序按 key 渲染，失败回退包内 fallback。响应头为 `Cache-Control: no-store`，发布后下一次请求即生效（小程序侧 5 分钟 TTL 是唯一延迟来源）。
 - 管理接口：`/analytics/app-assets/*`，仅 superadmin（SuperAdminGuard）；dashboard 入口在「运维与配置 → 图片素材」。
 - 存储：本期 local 驱动，文件经 `GET /app-assets/files/*` 输出；env 见 `docs/deployment.md` 第 8 节。
 - 展示位注册表在 DB（`app_asset_slots`）：key = `page/suffix`，page 是短 code 且等于 key 第一段；迁移只 seed `diagnostics/remote-probe`，业务展示位由 dashboard 创建（staging / prod 各自维护，不搬运）。
