@@ -110,6 +110,20 @@ GET /analytics/engagement/mode-usage?startDate=&endDate=
 → { series: [{ date, modes: [{ mode, turns, devices }] }] }
    // 口径与小程序 learning-stats/mode-usage 一致（role=user 按 mode 聚合）
 
+GET /analytics/engagement/network-usage?startDate=&endDate=
+→ { startDate, endDate, totalTurns, knownTurns, unknownTurns, coverage,
+    deviceCount, firstTrackedDate,
+    wifi:  { turns, devices, shareOfKnown, shareOfTotal },
+    fourG: { turns, devices, shareOfKnown, shareOfTotal },
+    unknown: { turns, devices, shareOfTotal },
+    series: [{ date, wifiTurns, fourGTurns, unknownTurns,
+               wifiShareOfKnown, fourGShareOfKnown }] }
+   // 数据源：conversation_network_daily（消息落库时按 date+deviceId 聚合），
+   // 不读 messages；删除 messages / devices 不影响本接口。
+   // 网络取 Device.networkType（设备最近一次上报）；null/非 wifi/4g → unknown。
+   // shareOfKnown 分母 = wifi+4G；unknown 的 shareOfKnown 恒为 null；
+   // 区间边界 Asia/Shanghai；分母 0 → null。
+
 GET /analytics/engagement/feature-adoption?date=
 → { date, features: [
     { key: "sleep_mode",  label: "哄睡",     enabledDevices, penetrationRate },
@@ -131,6 +145,16 @@ GET /analytics/users/demographics
     genderSplit: { male, female, unset },
     characterKeySplit: [{ characterKey, devices }],
     bindingsPerDevice: [{ count: 1|2|"3+", devices }] }
+
+GET /analytics/users/phone-brands
+→ { totalUsers, reportedUsers, unknownUsers, coverage, firstReportedAt,
+    brands: [{ makerKey, makerLabel, users, shareOfReported, shareOfTotal,
+               rawBrands: [{ brand, users }] }] }
+   // 全量注册家长当前快照；数据源 users.phoneBrand（小程序上报），不读 messages。
+   // 厂商级归并：xiaomi 含 Redmi/POCO，oppo 含 OnePlus，vivo 含 iQOO；
+   // realme 单列；未识别品牌归 other；空/devtools 计入 unknownUsers。
+   // shareOfReported 分母 = reportedUsers；shareOfTotal 分母 = totalUsers；
+   // 只出聚合计数，不出 userId / openid / 手机号。
 ```
 
 - PII 红线：只出年龄段与计数，不出姓名、生日、openid。
@@ -462,6 +486,8 @@ GET /analytics/messages/interruption-rate?startDate=&endDate=
 
 GET /analytics/messages/:id
 → 整行全部字段，含 rawPayload 原样 JSON；id 不存在 → 404
+   // 2026-11-27 起新增 networkMode（wifi / 4g / null）：对话发起时的设备网络快照，
+   // 仅审计与逐条核对；比例统计以 conversation_network_daily 为准。
    // 2026-11-23 起，历史回补会在 rawPayload.safety 放入本轮安全判定快照；
    // 形状与 inferred 语义见 docs/message-safety-backfill.md。
    // inferred=true = 没有判定行、由 AI 回复内容推断，前端必须标注「推断回补」。

@@ -4,6 +4,7 @@ import { ChildMemoriesModule } from "@/modules/child-memories/child-memories.mod
 import { SleepConfigsModule } from "@/modules/sleep-configs/sleep-configs.module";
 import { AdventureModule } from "@/modules/adventure/adventure.module";
 import { TurnDecisionModule } from "@/modules/turn-decision/turn-decision.module";
+import { ConversationNetworkModule } from "@/modules/conversation-network/conversation-network.module";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { SafetyGateService } from "@/modules/safety/safety-gate.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
@@ -29,6 +30,7 @@ import { LlmAdapterService } from "./llm-adapter.service";
     SleepConfigsModule,
     AdventureModule,
     TurnDecisionModule,
+    ConversationNetworkModule,
   ],
   controllers: [LlmAdapterController],
   providers: [

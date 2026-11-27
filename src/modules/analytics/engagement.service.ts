@@ -261,6 +261,109 @@ export class EngagementService {
     return { series };
   }
 
+  /**
+   * 对话网络分布：只读 conversation_network_daily，不依赖 messages。
+   * 删除全部 messages 后结果不变；网络口径为消息落库时的设备网络快照。
+   */
+  async getNetworkUsage(query: AnalyticsDateRangeQueryDto) {
+    const { startDate, endDate } = query;
+    this.resolveRange(startDate, endDate);
+
+    const rows = await this.prisma.conversationNetworkDaily.findMany({
+      where: { date: { gte: startDate, lte: endDate } },
+      select: {
+        date: true,
+        deviceId: true,
+        wifiTurns: true,
+        fourGTurns: true,
+        unknownTurns: true,
+      },
+      orderBy: { date: "asc" },
+    });
+
+    const share = (value: number, total: number): number | null =>
+      total > 0 ? Math.round((value / total) * 10000) / 10000 : null;
+
+    let wifiTurns = 0;
+    let fourGTurns = 0;
+    let unknownTurns = 0;
+    const wifiDevices = new Set<string>();
+    const fourGDevices = new Set<string>();
+    const unknownDevices = new Set<string>();
+    const allDevices = new Set<string>();
+    const byDate = new Map<
+      string,
+      { wifi: number; fourG: number; unknown: number }
+    >();
+
+    for (const row of rows) {
+      wifiTurns += row.wifiTurns;
+      fourGTurns += row.fourGTurns;
+      unknownTurns += row.unknownTurns;
+      allDevices.add(row.deviceId);
+      if (row.wifiTurns > 0) wifiDevices.add(row.deviceId);
+      if (row.fourGTurns > 0) fourGDevices.add(row.deviceId);
+      if (row.unknownTurns > 0) unknownDevices.add(row.deviceId);
+
+      const bucket = byDate.get(row.date) ?? {
+        wifi: 0,
+        fourG: 0,
+        unknown: 0,
+      };
+      bucket.wifi += row.wifiTurns;
+      bucket.fourG += row.fourGTurns;
+      bucket.unknown += row.unknownTurns;
+      byDate.set(row.date, bucket);
+    }
+
+    const totalTurns = wifiTurns + fourGTurns + unknownTurns;
+    const knownTurns = wifiTurns + fourGTurns;
+
+    const series = Array.from(byDate.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, bucket]) => {
+        const dayKnown = bucket.wifi + bucket.fourG;
+        return {
+          date,
+          wifiTurns: bucket.wifi,
+          fourGTurns: bucket.fourG,
+          unknownTurns: bucket.unknown,
+          wifiShareOfKnown: share(bucket.wifi, dayKnown),
+          fourGShareOfKnown: share(bucket.fourG, dayKnown),
+        };
+      });
+
+    return {
+      startDate,
+      endDate,
+      totalTurns,
+      knownTurns,
+      unknownTurns,
+      coverage: share(knownTurns, totalTurns),
+      deviceCount: allDevices.size,
+      firstTrackedDate:
+        byDate.size > 0 ? Array.from(byDate.keys()).sort()[0] : null,
+      wifi: {
+        turns: wifiTurns,
+        devices: wifiDevices.size,
+        shareOfKnown: share(wifiTurns, knownTurns),
+        shareOfTotal: share(wifiTurns, totalTurns),
+      },
+      fourG: {
+        turns: fourGTurns,
+        devices: fourGDevices.size,
+        shareOfKnown: share(fourGTurns, knownTurns),
+        shareOfTotal: share(fourGTurns, totalTurns),
+      },
+      unknown: {
+        turns: unknownTurns,
+        devices: unknownDevices.size,
+        shareOfTotal: share(unknownTurns, totalTurns),
+      },
+      series,
+    };
+  }
+
   async getFeatureAdoption(query: AnalyticsDateQueryDto) {
     const date = this.resolveDate(query.date);
     const { end } = reportDayRange(date, DEFAULT_REPORT_TIMEZONE);

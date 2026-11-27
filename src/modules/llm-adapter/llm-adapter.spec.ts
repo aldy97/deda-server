@@ -27,6 +27,7 @@ import type {
 } from "@/modules/safety/safety.types";
 import { OpenAiExceptionFilter } from "./filters/openai-exception.filter";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
+import { ConversationNetworkAggregator } from "@/modules/conversation-network/conversation-network-aggregator.service";
 
 const VALID_TOKEN = "test-adapter-key";
 
@@ -65,6 +66,7 @@ describe("LlmAdapterModule", () => {
   let session: { resolveWithSource: jest.Mock; reset: jest.Mock };
   let turnDecisions: { record: jest.Mock };
   let safetyGate: { interpret: jest.Mock; openLazyHandle: jest.Mock };
+  let conversationNetwork: { recordTurn: jest.Mock };
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
@@ -152,6 +154,9 @@ describe("LlmAdapterModule", () => {
       interpret: jest.fn(),
       openLazyHandle: jest.fn(),
     };
+    conversationNetwork = {
+      recordTurn: jest.fn().mockResolvedValue(undefined),
+    };
     sleepVoice = {
       handle: jest.fn().mockResolvedValue({
         replyText: "好呀，以后哄睡时间就改成 20 分钟啦！",
@@ -191,6 +196,10 @@ describe("LlmAdapterModule", () => {
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
         { provide: SafetyGateService, useValue: safetyGate },
+        {
+          provide: ConversationNetworkAggregator,
+          useValue: conversationNetwork,
+        },
         {
           provide: ConfigService,
           useValue: { get: configGet },
@@ -1605,6 +1614,10 @@ describe("LlmAdapterModule", () => {
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
           { provide: SafetyGateService, useValue: safetyGate },
+          {
+            provide: ConversationNetworkAggregator,
+            useValue: conversationNetwork,
+          },
           { provide: ConfigService, useValue: { get: () => undefined } },
         ],
       }).compile();

@@ -4,6 +4,8 @@ import { randomUUID, timingSafeEqual } from "crypto";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
+import { ConversationNetworkAggregator } from "@/modules/conversation-network/conversation-network-aggregator.service";
+import { normalizeConversationNetworkMode } from "@/modules/conversation-network/network-mode.util";
 import {
   LlmService,
   LlmMessage,
@@ -151,6 +153,7 @@ export class LlmAdapterService {
     private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
     private readonly safetyGate: SafetyGateService,
+    private readonly conversationNetwork: ConversationNetworkAggregator,
   ) {
     this.apiKey = this.configService.get<string>("LLM_ADAPTER_API_KEY");
     if (!this.apiKey) {
@@ -246,7 +249,7 @@ export class LlmAdapterService {
       );
       if (device) {
         await this.persistTurn(
-          device.id,
+          device,
           asrText,
           canned,
           "completed",
@@ -536,7 +539,7 @@ export class LlmAdapterService {
         this.childSafety.cannedReply(l2!.category as BlockedSafetyCategory);
       if (device) {
         await this.persistTurn(
-          device.id,
+          device,
           asrText,
           replyText,
           "completed",
@@ -580,7 +583,7 @@ export class LlmAdapterService {
       );
       const safetySnapshot = buildSafetySnapshot(l2, "none");
       await this.persistTurn(
-        device.id,
+        device,
         asrText,
         result.replyText,
         "completed",
@@ -703,6 +706,7 @@ export class LlmAdapterService {
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）
     const sourceOccurredAt = new Date();
     if (device) {
+      const networkMode = normalizeConversationNetworkMode(device.networkType);
       await this.prisma.message.create({
         data: {
           deviceId: device.id,
@@ -711,12 +715,18 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode,
+          networkMode,
           rawPayload: {
             channel: "baidu-rtc",
             ...(safetySnapshot ? { safety: safetySnapshot } : {}),
           },
           spokeAt: sourceOccurredAt,
         },
+      });
+      await this.conversationNetwork.recordTurn({
+        deviceId: device.deviceId,
+        networkMode,
+        spokeAt: sourceOccurredAt,
       });
 
       // 长期记忆异步提取，不阻塞首音；失败只影响记忆写入
@@ -939,7 +949,7 @@ export class LlmAdapterService {
    * 超时扫描自动跳过这些记录）。
    */
   private async *emitAdventureReply(
-    device: { id: string; deviceId: string },
+    device: { id: string; deviceId: string; networkType?: string | null },
     adventureReply: AdventureReply,
     asrText: string,
     turnId: string,
@@ -952,6 +962,8 @@ export class LlmAdapterService {
     // 所以三次写库全部 best-effort：失败只记日志，内容照常播出。
     let userMessageId: string | undefined;
     try {
+      const spokeAt = new Date();
+      const networkMode = normalizeConversationNetworkMode(device.networkType);
       const msg = await this.prisma.message.create({
         data: {
           deviceId: device.id,
@@ -960,14 +972,20 @@ export class LlmAdapterService {
           content: asrText,
           status: "completed",
           mode: "adventure_story",
+          networkMode,
           rawPayload: {
             channel: "baidu-rtc",
             ...(safety ? { safety } : {}),
           },
-          spokeAt: new Date(),
+          spokeAt,
         },
       });
       userMessageId = msg.id;
+      await this.conversationNetwork.recordTurn({
+        deviceId: device.deviceId,
+        networkMode,
+        spokeAt,
+      });
     } catch (error) {
       this.logger.error(
         `Failed to persist adventure user message for device=${device.deviceId}: ${describeError(error)}`,
@@ -1028,7 +1046,12 @@ export class LlmAdapterService {
   private async resolveDevice(
     req: ChatCompletionRequest,
     deviceHint?: string,
-  ): Promise<{ id: string; deviceId: string; characterKey: string } | null> {
+  ): Promise<{
+    id: string;
+    deviceId: string;
+    characterKey: string;
+    networkType: string | null;
+  } | null> {
     const raw = (deviceHint ?? req.deviceid ?? req.user)?.trim();
     if (!raw) return null;
 
@@ -1046,6 +1069,7 @@ export class LlmAdapterService {
         id: existing.id,
         deviceId: existing.deviceId,
         characterKey: existing.characterKey,
+        networkType: existing.networkType ?? null,
       };
     }
     const isMac = MAC_PATTERN.test(raw);
@@ -1060,6 +1084,7 @@ export class LlmAdapterService {
       id: created.id,
       deviceId: created.deviceId,
       characterKey: created.characterKey,
+      networkType: created.networkType ?? null,
     };
   }
 
@@ -1220,7 +1245,7 @@ export class LlmAdapterService {
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */
   private async persistTurn(
-    deviceInternalId: string,
+    device: { id: string; deviceId: string; networkType?: string | null },
     asrText: string,
     replyText: string,
     status: "completed" | "failed",
@@ -1228,24 +1253,32 @@ export class LlmAdapterService {
     turnId: string = randomUUID(),
   ): Promise<void> {
     const safety = extractSafetyFromPayload(assistantPayload);
+    const spokeAt = new Date();
+    const networkMode = normalizeConversationNetworkMode(device.networkType);
     await this.prisma.message.create({
       data: {
-        deviceId: deviceInternalId,
+        deviceId: device.id,
         turnId,
         role: "user",
         content: asrText,
         status: "completed",
         mode: "free_chat",
+        networkMode,
         rawPayload: {
           channel: "baidu-rtc",
           ...(safety === undefined ? {} : { safety }),
         },
-        spokeAt: new Date(),
+        spokeAt,
       },
+    });
+    await this.conversationNetwork.recordTurn({
+      deviceId: device.deviceId,
+      networkMode,
+      spokeAt,
     });
     await this.prisma.message.create({
       data: {
-        deviceId: deviceInternalId,
+        deviceId: device.id,
         turnId,
         role: "assistant",
         content: replyText,

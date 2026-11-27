@@ -14,6 +14,7 @@ import { SleepVoiceConfigService } from "./../src/modules/sleep-configs/sleep-vo
 import { SleepModeService } from "./../src/modules/sleep-configs/sleep-mode.service";
 import { PROMPT_REGISTRY_PROVIDER } from "./../src/modules/prompt-registry/prompt-registry.testing";
 import { FILLER_POOLS } from "./../src/modules/llm/filler-bank";
+import { ConversationNetworkAggregator } from "./../src/modules/conversation-network/conversation-network-aggregator.service";
 
 const extraction = (value: string, operation = "assert", evidence: string) =>
   JSON.stringify([
@@ -170,6 +171,10 @@ describe("Child memories conversation pipeline (e2e)", () => {
         // 默认返回 undefined 时 fail-open 为 safe，不改变被测链路语义
         ChildSafetyService,
         { provide: PrismaService, useValue: prismaMock },
+        {
+          provide: ConversationNetworkAggregator,
+          useValue: { recordTurn: jest.fn().mockResolvedValue(undefined) },
+        },
         {
           provide: ConfigService,
           useValue: { get: jest.fn().mockReturnValue(undefined) },

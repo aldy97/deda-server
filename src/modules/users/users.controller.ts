@@ -11,6 +11,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { Request } from "express";
 import { UsersService, WechatLoginDto } from "./users.service";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
+import { ReportClientInfoDto } from "./dto/report-client-info.dto";
 
 interface RequestWithUser extends Request {
   user: { userId: string; openid: string };
@@ -24,6 +25,16 @@ export class UsersController {
   @Post("login")
   async wechatLogin(@Body() dto: WechatLoginDto) {
     return this.usersService.wechatLogin(dto);
+  }
+
+  @Post("client-info")
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  async reportClientInfo(
+    @Body() dto: ReportClientInfoDto,
+    @Req() req: RequestWithUser,
+  ) {
+    return this.usersService.reportClientInfo(req.user.userId, dto);
   }
 
   @Post("phone")

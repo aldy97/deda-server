@@ -5,13 +5,23 @@ jest.mock("axios");
 
 describe("UsersService", () => {
   let service: UsersService;
-  let prisma: { user: { upsert: jest.Mock; findUnique: jest.Mock } };
+  let prisma: {
+    user: {
+      upsert: jest.Mock;
+      findUnique: jest.Mock;
+      updateMany: jest.Mock;
+    };
+  };
   let configService: { get: jest.Mock };
   let jwtService: { sign: jest.Mock };
 
   beforeEach(() => {
     prisma = {
-      user: { upsert: jest.fn(), findUnique: jest.fn() },
+      user: {
+        upsert: jest.fn(),
+        findUnique: jest.fn(),
+        updateMany: jest.fn(),
+      },
     };
     configService = { get: jest.fn() };
     jwtService = { sign: jest.fn().mockReturnValue("signed-token") };
@@ -84,6 +94,42 @@ describe("UsersService", () => {
     expect(await service.updateProfile("u1", { name: "x" })).toEqual({
       userId: "u1",
       dto: { name: "x" },
+    });
+  });
+
+  describe("reportClientInfo", () => {
+    it("trim 后更新品牌与上报时间", async () => {
+      prisma.user.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await service.reportClientInfo("u1", {
+        brand: "  Apple  ",
+      });
+
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        data: {
+          phoneBrand: "Apple",
+          phoneBrandReportedAt: expect.any(Date),
+        },
+      });
+      expect(result).toEqual({ success: true, skipped: false });
+    });
+
+    it("空品牌不写库，避免覆盖旧值", async () => {
+      const result = await service.reportClientInfo("u1", { brand: "   " });
+
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true, skipped: true });
+    });
+
+    it("用户不存在时 updateMany 返回 0，按 skipped 处理", async () => {
+      prisma.user.updateMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.reportClientInfo("missing", {
+        brand: "HUAWEI",
+      });
+
+      expect(result).toEqual({ success: true, skipped: true });
     });
   });
 });

@@ -28,6 +28,20 @@
 
 ---
 
+## 1.1 家长手机品牌上报
+
+`POST /users/client-info` · 需 JWT
+
+请求：`{ "brand": "Apple" }`（brand 可选，≤64 字；空串视为未上报）
+
+成功：`{ "code": 0, "data": { "success": true, "skipped": false } }`
+
+- 只更新当前用户的 `phoneBrand` / `phoneBrandReportedAt` 两列；空品牌不写库。
+- 用户不存在时 `skipped=true`，不抛错。
+- 用于 dashboard 用户画像页的厂商分布；不上报型号、系统、IMEI 等额外信息。
+
+---
+
 ## 2. 设备列表 / 绑定 / 解绑
 
 - `GET /devices` → `Device[]`

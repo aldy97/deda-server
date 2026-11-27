@@ -36,4 +36,12 @@ export class UsersAnalyticsController {
   getDemographics() {
     return this.usersService.getDemographics();
   }
+
+  @Get("phone-brands")
+  @ApiOperation({
+    summary: "家长手机厂商分布（全量注册用户当前快照，只出聚合计数）",
+  })
+  getPhoneBrands() {
+    return this.usersService.getPhoneBrands();
+  }
 }

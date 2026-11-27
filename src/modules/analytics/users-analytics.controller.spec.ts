@@ -1,0 +1,15 @@
+import { UsersAnalyticsController } from "./users-analytics.controller";
+import { UsersAnalyticsService } from "./users-analytics.service";
+
+describe("UsersAnalyticsController.getPhoneBrands", () => {
+  it("委托 service 返回厂商分布", async () => {
+    const result = { totalUsers: 1, brands: [] };
+    const service = {
+      getPhoneBrands: jest.fn().mockResolvedValue(result),
+    };
+    const controller = new UsersAnalyticsController(service as never);
+
+    await expect(controller.getPhoneBrands()).resolves.toBe(result);
+    expect(service.getPhoneBrands).toHaveBeenCalledTimes(1);
+  });
+});
