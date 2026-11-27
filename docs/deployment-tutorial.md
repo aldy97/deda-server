@@ -171,7 +171,7 @@ MQTT_STATUS_TOPIC=staging/zhianxin/event/report
 
 # LLM（抄你本地 .env 的值）
 OPENAI_API_KEY=你的DeepSeek-Key
-SMALL_LLM_API_KEY=你的百炼-Key
+OPENAI_API_KEY=你的百炼-Key
 ```
 
 再建 `/opt/deda/env/.env.prod`：**同样的结构**，但注意：

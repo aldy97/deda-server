@@ -156,7 +156,7 @@ DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 - `personaSection` 身份包装文本（防身份漂移 guardrail，性质同 L3）；
 - L1 敏感词表；
 - `CANNED_REPLIES`、`EMOTIONAL_HARM_GUIDANCE`；
-- filler 静态模板池、`UPSTREAM_FALLBACK_TEXTS`、`buildFillerHandoffMessage`；
+- filler 静态模板池（仅 vendor 备选链路）、`UPSTREAM_FALLBACK_TEXTS`；
 - `buildChildProfileSection`（含真实儿童档案拼接逻辑）；
 - 冒险链路的本地 `CHARACTER_PERSONAS`（`adventure.service.ts`）。
 

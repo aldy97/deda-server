@@ -49,13 +49,6 @@ import type {
 } from "@/modules/safety/safety.types";
 import { ChatCompletionRequest } from "./dto/chat-completion.dto";
 import {
-  extractRecentFillers,
-  pickFillerLine,
-  type FillerBucket,
-  type FillerEmotion,
-} from "@/modules/llm/filler-bank";
-import type { FillerAct } from "@/modules/llm/filler-act";
-import {
   describeError,
   extractHistory,
   lastUserMessage,
@@ -128,7 +121,7 @@ type SleepContentDegradation = {
  * → L1 安全闸 → 冒险等待态接管 → L2 分类 + 意图路由并行
  * → sleep_config 确定性短链路 → 冒险每日门禁/开集
  * → mode 决策 → DB 历史 → user 落库 → 异步记忆提取 → 记忆注入
- * → 流式 filler（小模型打哈哈，头部校验后即播）→ 主模型流 → assistant 落库。
+ * → 主模型流（首 chunk 即第一声，无 filler）→ assistant 落库。
  *
  * 与老链路的原理性降级（已确认接受）：
  * - 冒险 10s 沉默超时推送：新链路无服务器推送通道，交互点无限期等孩子
@@ -218,7 +211,7 @@ export class LlmAdapterService {
     const device = await this.resolveDevice(req, deviceHint);
 
     // turnId 在一切 LLM 调用之前生成：safety_l2 / intent_classify /
-    // chat_main / filler / memory_extract 全程贯穿，dashboard 按轮次串联
+    // chat_main / memory_extract 全程贯穿，dashboard 按轮次串联
     // 调用链路（实机事故：turnId 生成过晚且未传入主流，链路只剩 1 条）
     const turnId = randomUUID();
 
@@ -616,8 +609,6 @@ export class LlmAdapterService {
 
     // 冒险每日门禁（对齐老链路）：故事类意图（除哄睡）在今日已完成时记
     // entry_blocked；未完成时 adventure_story/free_story 优先进入冒险。
-    // adventureDeclined 供 filler 情境段使用，避免拖延话术与婉拒播报矛盾。
-    let adventureDeclined = false;
     if (device && intent !== "free_chat" && intent !== "sleep_story") {
       // 整块包住：门禁读失败、开集失败、拦截审计写失败，任何一处抛错都只意味着
       // 「这轮进不了冒险」，绝不能升级为「这轮没有声音」。
@@ -655,7 +646,6 @@ export class LlmAdapterService {
           }
         }
         if (completedToday) {
-          adventureDeclined = true;
           await this.adventure.recordEntryBlocked(
             device.id,
             intent === "adventure_story" ? "free_story" : intent,
@@ -684,7 +674,7 @@ export class LlmAdapterService {
             : "free_chat";
 
     // 故事类回合判定（含被门禁拦截后走自由创作的 adventure/free_story）：
-    // 主模型 maxTokens 分档与 filler 情境共用
+    // 主模型 maxTokens 分档
     const isStoryTurn =
       STORY_INTENTS.includes(intent) ||
       intent === "adventure_story" ||
@@ -703,11 +693,9 @@ export class LlmAdapterService {
 
     // 有设备时历史以 DB 为准（防客户端伪造上下文）；匿名保持客户端历史。
     // 必须在写入本轮 user 消息之前取，避免把当前话术重复拼进 prompt。
-    // recentFillers 为最近 5 轮 filler 原文，供小模型禁用清单（防复读）。
     let history: Array<{ role: "user" | "assistant"; content: string }>;
-    let recentFillers: string[] = [];
     if (device) {
-      ({ history, recentFillers } = await this.getDbHistory(device.id, mode));
+      ({ history } = await this.getDbHistory(device.id, mode));
     } else {
       history = extractHistory(req);
     }
@@ -788,33 +776,8 @@ export class LlmAdapterService {
       }
     }
 
-    // 孩子档案：主模型 prompt 与 filler 情境共用，提前于串行 filler 取
+    // 孩子档案：注入主模型 prompt（称呼/年龄上下文）
     const childProfile = device ? await this.getChildProfile(device.id) : null;
-
-    // 确定性 filler：复用已算好的 intent 选桶，桶内按最近 10 轮 + turnId
-    // 轮转，全程不调 LLM。原文注入主模型 handoff，避免主回答重复承接语。
-    const fillerEnabled =
-      this.configService.get<string>("LLM_ADAPTER_FILLER") !== "false";
-    let fillerText = "";
-    let fillerBucket: FillerBucket | undefined;
-    let fillerEmotion: FillerEmotion | undefined;
-    let fillerAct: FillerAct | undefined;
-    if (fillerEnabled) {
-      const picked = pickFillerLine({
-        asrText,
-        recentFillers,
-        intent,
-        intentSource: intentDecision.source,
-        adventureDeclined,
-        turnId,
-        emotion: intentDecision.emotion,
-      });
-      fillerText = picked.text;
-      fillerBucket = picked.bucket;
-      fillerEmotion = picked.emotion;
-      fillerAct = picked.act;
-      yield fillerText;
-    }
 
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
     // 孩子档案注入称呼/年龄上下文（均对齐老链路）
@@ -849,24 +812,8 @@ export class LlmAdapterService {
         content: memoryPrompt.text,
       });
     }
-    if (fillerText) {
-      // handoff（方案 B）：filler 原文作为独立 system 消息贴在记忆块之后、
-      // 本轮 user 之前——离生成点最近，recency 最强；且移出头部后主 prompt
-      // 跨轮稳定，DeepSeek 前缀缓存命中率反而提升
-      messages.splice(
-        messages.length - 1,
-        0,
-        this.llmService.buildFillerHandoffMessage(
-          fillerText,
-          LlmService.extractRecentAnswerOpeners(history),
-          fillerAct,
-        ),
-      );
-    }
-
-    // 主模型流式：filler（如有）已在上游逐 chunk 外发，主模型随后按流
-    // 直出。大模型失败时：零输出且错误可重试 → 重试一次（filler 播报
-    // 时长天然掩盖重试延迟）；answer 最终为空 → 无论 filler 是否已播都
+    // 主模型流式：首 chunk 即第一声（无 filler 缓冲）。大模型失败时：
+    // 零输出且错误可重试 → 重试一次；重试期间是纯静音。answer 最终为空 →
     // 播兜底话术，不让孩子面对沉默。
     let answerText = "";
     let llmFailed = false;
@@ -909,17 +856,15 @@ export class LlmAdapterService {
         this.logger.warn("LLM chat_main retrying once after retriable failure");
       }
     }
-    // answer 为空即兜底（断流失败 / empty_response 都算），无论 filler 是否已播
+    // answer 为空即兜底（断流失败 / empty_response 都算）
     if (!answerText) {
       llmFailed = true;
       answerText = resolveUpstreamFallbackText(device?.characterKey);
       yield answerText;
     }
 
-    // 用户实际播报全文：filler（如有）+ 大模型答案，作为最终回答落库
-    const responseText = fillerText
-      ? `${fillerText}\n${answerText}`
-      : answerText;
+    // 用户实际播报全文：只有大模型答案，作为最终回答落库
+    const responseText = answerText;
 
     // 补写 assistant 消息；LLM 失败时标 failed，与真实回答可区分
     if (device) {
@@ -931,18 +876,11 @@ export class LlmAdapterService {
           content: responseText,
           status: llmFailed ? "failed" : "completed",
           mode,
-          // 边界标注同老链路：content 保持播报全文纯净，
-          // filler/answer 边界结构化存 rawPayload；哄睡内容降级证据同处留痕
+          // 保留 filler:null 键：dashboard 消息详情按该键区分「承接语/主回答」，
+          // 无 filler 后只渲染主回答，兼容旧行。哄睡降级证据同处留痕。
           rawPayload: {
-            filler: fillerText || null,
+            filler: null,
             answer: answerText,
-            ...(fillerText
-              ? {
-                  fillerSource: "bank",
-                  fillerBucket,
-                  fillerEmotion,
-                }
-              : {}),
             ...(safetySnapshot ? { safety: safetySnapshot } : {}),
             ...(sleepContentDegraded ? { sleepContentDegraded } : {}),
           },
@@ -1261,15 +1199,13 @@ export class LlmAdapterService {
   }
 
   /**
-   * 取设备最近消息历史（时间正序，按模式过滤），剥离 filler 只留 answer。
-   * recentFillers 跨 mode 取最近 10 条：模式切换后也不重复上一轮 filler。
+   * 取设备最近消息历史（时间正序，按模式过滤），剥离历史 filler 只留 answer。
    */
   private async getDbHistory(
     deviceInternalId: string,
     mode: string,
   ): Promise<{
     history: Array<{ role: "user" | "assistant"; content: string }>;
-    recentFillers: string[];
   }> {
     const rows = await this.prisma.message.findMany({
       where: { deviceId: deviceInternalId, mode },
@@ -1279,16 +1215,7 @@ export class LlmAdapterService {
     });
     const { history } = buildHistoryFromRows(rows);
 
-    // 20 条 assistant 行里通常能取到 10 轮 filler；旧行没有 rawPayload.filler
-    // 时 extractRecentFillers 会自动跳过。
-    const fillerRows = await this.prisma.message.findMany({
-      where: { deviceId: deviceInternalId, role: "assistant" },
-      orderBy: { spokeAt: "desc" },
-      take: 20,
-      select: { rawPayload: true },
-    });
-
-    return { history, recentFillers: extractRecentFillers(fillerRows, 10) };
+    return { history };
   }
 
   /** 安全/短链路回复的成对落库（user 原文 + assistant 兜底话术） */

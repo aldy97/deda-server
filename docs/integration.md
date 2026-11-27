@@ -185,7 +185,7 @@
 
 - 百度侧配置（控制台或建实例时 config）：`llm=OPENAI`、`llm_url=<我方 HTTPS 地址>/v1/chat/completions`、`llm_cfg=deda-english-tutor`（模型别名）、`llm_token=<本服务签发的 Bearer key，env LLM_ADAPTER_API_KEY>`、`llm_sys=兜底人设`、`llm_eb={"stream":true,"deviceid":"<设备唯一标识>","thinking":{"type":"disabled"}}`。
 - 适配层约定：容忍 `llm_eb` 注入的未知 body 字段；`llm_sys` 注入的 system 消息保留在最前，动态 prompt 追加其后；`model` 不校验、原样回显；SSE 帧为 role 帧 → content 增量帧 → `finish_reason:"stop"` → `data: [DONE]`。
-- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机、filler 首响已全部对齐老链路。设备身份三级识别链：显式 header `X-Deda-Device-Id`（最高优先）→ 请求体 `deviceid`（机芯厂正式约定，与小程序家长绑定编号一致，重启/烧录/OTA 不变）→ 请求体 `user` 字段（旧约定兼容 fallback）；三者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
+- 当前为 **二期（2A/2B/2C 已完成）**：设备识别、对话落库、长期记忆、意图路由、模式切换、哄睡语音配置、冒险状态机已对齐老链路；filler 首响曾对齐，2026-11 起新链路已完全移除 filler。设备身份三级识别链：显式 header `X-Deda-Device-Id`（最高优先）→ 请求体 `deviceid`（机芯厂正式约定，与小程序家长绑定编号一致，重启/烧录/OTA 不变）→ 请求体 `user` 字段（旧约定兼容 fallback）；三者皆无走匿名链路（不落库/无记忆/固定 free_chat）。剩余项：教材 RAG（待内容侧就绪）。
 - **能力对齐矩阵**（老链路 vendor WS → 新链路 llm-adapter）：
 
 | 能力 | 老链路 | 新链路 | 说明 |
@@ -194,12 +194,12 @@
 | L2 语义安全分类 | ✅ | ✅ | emotional_harm 注入共情引导；异常 fail-open |
 | L3 主模型安全系统提示 | ✅ | ✅ | 经 buildEnglishTutorPrompt |
 | 设备识别/建档 | ✅ | ✅ | MAC 归一化，deviceId/macAddress 双列匹配 |
-| 对话落库（filler/answer 边界） | ✅ | ✅ | rawPayload 同构 |
+| 对话落库（answer 边界） | ✅ | ✅ | live `rawPayload.filler` 恒 null；备选链路仍写 filler |
 | 长期记忆（提取/注入/markInjected） | ✅ | ✅ | 仅 free_chat 注入，同老链路口径 |
 | 意图路由/模式切换/会话 TTL | ✅ | ✅ | 共享 ConversationSessionService |
 | 哄睡语音配置 | ✅ | ✅ | 共享 SleepVoiceConfigService 确定性短链路 |
 | 冒险状态机/每日门禁/审计事件 | ✅ | ✅ | 共享 AdventureService 单例 |
-| filler 打哈哈首响 | ✅ | ✅ | 确定性模板池（复用 intent 选桶 + 10 轮轮转），LLM_ADAPTER_FILLER=false 可关 |
+| filler 打哈哈首响 | ✅ 保留 | ❌ 已移除（2026-11） | live 链路首声=主模型首 chunk；vendor 备选链路仍保留确定性模板池，`LLM_ADAPTER_FILLER=false` 只影响备选链路 |
 | 冒险 10s 沉默超时推送 | ✅ | ❌ 原理性降级 | 新链路无服务器推送通道；交互点无限期等下一句话 |
 | 21:30 定时哄睡进入 | ✅ | ❌ 原理性降级 | 同上；定时推进依赖推送通道 |
 | 哄睡定时家长服务通知 | ❌ | ✅ | 一次性订阅消息额度池，到点全推绑定家长，见「哄睡服务通知推送」节 |
@@ -212,10 +212,12 @@
 ## 机芯厂 WS 流式协议（vendor namespace）【备选链路 / backup】
 
 > **状态**：2026-11 起降级为备选链路。仅当百度 RTC 直连不可用时启用；不再新增功能。以下内容为老链路契约，原样保留。
+>
+> **与 live 链路的唯一行为差异**：live `llm-adapter` 已完全移除 filler（首声=主模型首 chunk、`rawPayload.filler` 恒 null）；本备选链路仍保留确定性模板池 filler，仅作备份，待本链路退役时一并删除。
 
-语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端双模型流式生成 → **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
+语音对话链路：`vendor:text:in`（机芯厂 → 后端入站 WS，ASR 文字）→ 后端流式生成（备选链路含模板池 filler）→ **后端作为 WS 客户端按 chunk 流式调用机芯厂上传接口**（`vendor:text:chunk` 增量文字 + `vendor:text:out` 全量兜底）→ 机芯厂做 TTS 后下发设备。入站 `vendor:text:in` 仍以 `vendor:text:out` 作为兼容应答。
 
-**首响加速**：filler 由后端确定性模板池即时产出（复用 intent 选桶 + 最近 10 轮轮转，不调小模型）；主模型（answer）并行生成。filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
+**首响加速（仅本备选链路）**：filler 由后端确定性模板池即时产出（复用 intent 选桶 + 最近 10 轮轮转，不调小模型）；主模型（answer）并行生成。filler chunk 全部发完后才发 answer chunk，机芯厂按 `seq` 顺序喂 TTS 即保证顺序对齐。
 
 **上传保序**：后端对每个 chunk 的发送等待机芯厂 WS ack 后再发下一个（`src/modules/vendor/vendor-reply.uploader.ts`），因此 WS 接口调用顺序与 `seq` 严格一致；单个 chunk 上传失败只记日志、不阻断本轮剩余回复。上传地址走 `VENDOR_WS_UPLOAD_URL`，未配置时不连真实云服务（内部编排照常运行，发送仅记 debug 日志）；鉴权接入时在 uploader 内补充。
 
@@ -226,7 +228,7 @@
 | deviceId   | string                | 设备唯一标识                                  |
 | turnId     | string                | 本轮对话 ID，与同轮 `vendor:text:out` 一致     |
 | seq        | number                | 轮内全局递增序号，从 0 开始，filler/answer 共用 |
-| source     | "filler" \| "answer"  | filler=小模型首响；answer=大模型正式回答       |
+| source     | "filler" \| "answer"  | filler=备选链路首响；answer=大模型正式回答     |
 | delta      | string                | 增量文字；`isFinal=true` 时为空串             |
 | isFinal    | boolean               | 该来源是否结束；filler 结束后才开始发 answer  |
 
@@ -234,10 +236,10 @@
 
 - 顺序保证：一轮内 `seq` 严格递增；所有 `source=filler` 的 chunk 先于所有 `source=answer` 的 chunk；filler 与 answer 各以一个 `isFinal=true` 的空 delta chunk 收尾；最后上传一次 `vendor:text:out` 全量兜底。
 - 小模型失败：跳过 filler 阶段，answer 从 `seq=0` 开始；大模型失败：answer 阶段发单条兜底文案 chunk。
-- 落库口径：对话记录只保存大模型 answer 全文，filler 话术不入库、不进多轮上下文。
+- 落库口径：对话记录只保存大模型 answer 全文，filler 话术不进多轮上下文；live 链路 `rawPayload.filler` 恒为 null。
 - 兼容：`LLM_STREAM_ENABLED=false` 时后端整体回落到非流式单模型路径，只经入站连接回 `vendor:text:out`。
-- 相关 env：`SMALL_LLM_MODEL`（小模型，默认回落 `OPENAI_MODEL`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
-- 后端实现：`src/modules/vendor/vendor.service.ts`（双模型编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
+- 相关 env：`OPENAI_MODEL`（统一 qwen-flash；已删除 `SMALL_LLM_*`）、`LLM_STREAM_ENABLED`（默认 true）、`VENDOR_WS_UPLOAD_URL`、`VENDOR_UPLOAD_ACK_TIMEOUT_MS`（默认 5000）。
+- 后端实现：`src/modules/vendor/vendor.service.ts`（流式编排与排序）、`src/modules/vendor/vendor-reply.uploader.ts`（出站 WS 上传与 ack 保序）、`src/modules/llm/llm.service.ts`（流式 LLM 调用）、`src/modules/vendor/vendor.gateway.ts`（入站 ASR 入口）。
 
 ## 儿童安全三层防护
 

@@ -168,18 +168,14 @@ describe("ConversationSessionService", () => {
     expect(prisma.conversationSession.upsert).not.toHaveBeenCalled();
   });
 
-  it("parses intent and emotion from the same classifier call", async () => {
+  it("parses the intent label and tolerates trailing emotion from old prompts", async () => {
     llmService.complete.mockResolvedValue({
       text: "free_chat|sad",
     } as Awaited<ReturnType<LlmService["complete"]>>);
 
     await expect(
       service.resolveWithSource("device-1", "我没事"),
-    ).resolves.toEqual({
-      intent: "free_chat",
-      source: "model",
-      emotion: "sad",
-    });
+    ).resolves.toEqual({ intent: "free_chat", source: "model" });
   });
 
   it("keeps single-label compatibility and drops invalid emotion", async () => {
@@ -537,7 +533,6 @@ describe("ConversationSessionService", () => {
       expect(decision).toEqual({
         intent: "sleep_story",
         source: "session_sticky",
-        emotion: "sad",
       });
     });
 
@@ -566,11 +561,7 @@ describe("ConversationSessionService", () => {
         "我不想听了，换一个",
       );
 
-      expect(decision).toEqual({
-        intent: "free_story",
-        source: "model",
-        emotion: "neutral",
-      });
+      expect(decision).toEqual({ intent: "free_story", source: "model" });
       expect(llmService.complete).toHaveBeenCalledTimes(1);
     });
 
@@ -829,7 +820,7 @@ describe("ConversationSessionService", () => {
       });
     });
 
-    it("时段门禁降级时保留情绪标签", async () => {
+    it("时段门禁降级时不再产出情绪标签", async () => {
       sleepConfigs.getByDeviceId.mockResolvedValue(
         sleepConfig({ sleepTime: "21:30" }),
       );
@@ -840,7 +831,6 @@ describe("ConversationSessionService", () => {
       ).resolves.toEqual({
         intent: "free_chat",
         source: "sleep_window_closed",
-        emotion: "sad",
       });
     });
 

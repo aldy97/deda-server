@@ -34,7 +34,6 @@ describe("LlmService", () => {
                 OPENAI_BASE_URL: "https://api.deepseek.com/v1",
                 OPENAI_API_KEY: "sk-test",
                 OPENAI_MODEL: "deepseek-flash",
-                SMALL_LLM_MODEL: "qwen-flash",
                 LLM_TIMEOUT_MS: "30000",
               };
               return map[key];
@@ -304,15 +303,14 @@ describe("LlmService", () => {
       expect(without[0].content).toContain("小象 Elly");
     });
 
-    it("handoff 不再内嵌 system prompt：buildEnglishTutorPrompt 无 fillerHeard 参数", () => {
+    it("filler/handoff 下线后 buildEnglishTutorPrompt 不含承接语内容", () => {
       for (const mode of ["free_chat", "idiom_story", "english_chat"]) {
         const messages = service.buildEnglishTutorPrompt(
           "球不见了",
           undefined,
           { mode },
         );
-        // 方案 B：handoff 改由 buildFillerHandoffMessage 产出独立 system
-        // 消息贴 user 消息前注入，主 prompt 不再携带任何承接相关内容
+        // 2026-11 filler/handoff 完全下线：主 prompt 不再携带任何承接相关内容
         expect(messages[0].content).not.toContain("承接语");
         expect(messages[0].content).not.toContain("already finished playing");
         expect(messages[0].content).not.toContain("never repeat or paraphrase");
@@ -489,94 +487,6 @@ describe("LlmService", () => {
     });
   });
 
-  describe("buildFillerHandoffMessage", () => {
-    it("产出贴 user 消息前的独立 system 消息：filler 原文 + 三条衔接禁令", () => {
-      const msg = service.buildFillerHandoffMessage(
-        "原来你喜欢上海的天气呀，快多跟我说说呢……",
-      );
-
-      // 方案 B：handoff 是独立 system 消息（非内嵌主 prompt），
-      // 由调用方 splice 到本轮 user 消息前，离生成点最近
-      expect(msg.role).toBe("system");
-      expect(msg.content).toContain(
-        "「原来你喜欢上海的天气呀，快多跟我说说呢……」",
-      );
-      expect(msg.content).toContain("第一句必须是实质内容");
-      expect(msg.content).toContain("不要以孩子的名字开头");
-      expect(msg.content).toContain("语气词");
-      expect(msg.content).toContain("不要重复或换写承接语里的词");
-      expect(msg.content).toContain("真棒");
-    });
-
-    it("最近开场进入禁用清单；无历史时不追加", () => {
-      const msg = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……", [
-        "公园里最好玩",
-        "是空气把蓝光",
-      ]);
-      expect(msg.content).toContain("「公园里最好玩」「是空气把蓝光」");
-      expect(msg.content).toContain("不要再用相同开头");
-
-      const without = service.buildFillerHandoffMessage("嗯嗯，我在认真听呢……");
-      expect(without.content).not.toContain("不要再用相同开头");
-    });
-
-    it("stop 承接语只收尾：不提议新内容、不追问", () => {
-      const msg = service.buildFillerHandoffMessage(
-        "好呀，那我们先不听了，我就在这儿陪着你呀……",
-        [],
-        "stop",
-      );
-
-      expect(msg.content).toContain("只做一句温和收尾");
-      expect(msg.content).toContain("不要提议新的故事、儿歌、游戏");
-      expect(msg.content).toContain("不要追问为什么");
-      expect(msg.content).not.toContain("可以最多加一句简单的追问");
-      expect(msg.content).not.toContain("开始故事");
-    });
-
-    it("continue 承接语从断开处继续，不重新开头", () => {
-      const msg = service.buildFillerHandoffMessage(
-        "好，我们接着往下讲呀……",
-        ["公园里最好玩"],
-        "continue",
-      );
-
-      expect(msg.content).toContain("从断开处继续");
-      expect(msg.content).toContain("不要重新开头");
-      expect(msg.content).toContain("「公园里最好玩」");
-      expect(msg.content).not.toContain("可以最多加一句简单的追问");
-    });
-
-    it("extractRecentAnswerOpeners 只取最近 5 条 assistant 开场", () => {
-      const history = [
-        { role: "user" as const, content: "问题不算" },
-        { role: "assistant" as const, content: "第一句回答。" },
-        { role: "assistant" as const, content: "第二句回答。" },
-        { role: "assistant" as const, content: "第三句回答。" },
-        { role: "assistant" as const, content: "第四句回答。" },
-        { role: "assistant" as const, content: "第五句回答。" },
-        { role: "assistant" as const, content: "第六句回答。" },
-      ];
-      expect(LlmService.extractRecentAnswerOpeners(history)).toEqual([
-        "第二句回答",
-        "第三句回答",
-        "第四句回答",
-        "第五句回答",
-        "第六句回答",
-      ]);
-    });
-
-    it("注入前清洗：换行与多余空白压平、截断 100 字（防小模型产出污染指令位）", () => {
-      const messy =
-        service.buildFillerHandoffMessage("第一行\n第二行   多空格");
-      expect(messy.content).toContain("「第一行 第二行 多空格」");
-
-      const long = service.buildFillerHandoffMessage("字".repeat(150));
-      expect(long.content).toContain(`「${"字".repeat(100)}」`);
-      expect(long.content).not.toContain("字".repeat(101));
-    });
-  });
-
   describe("completeStream", () => {
     const collectStream = async (
       gen: AsyncGenerator<string>,
@@ -661,131 +571,7 @@ describe("LlmService", () => {
       );
     });
 
-    it("should call the small-model base URL with its own API key when configured", async () => {
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          PROMPT_REGISTRY_PROVIDER,
-          LlmService,
-          PROMPT_REGISTRY_PROVIDER,
-          PRISMA_MOCK,
-          {
-            provide: ConfigService,
-            useValue: {
-              get: jest.fn((key: string) => {
-                const map: Record<string, string> = {
-                  OPENAI_BASE_URL: "https://api.deepseek.com/v1",
-                  OPENAI_API_KEY: "sk-primary",
-                  OPENAI_MODEL: "deepseek-flash",
-                  SMALL_LLM_BASE_URL:
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                  SMALL_LLM_API_KEY: "sk-qwen",
-                  SMALL_LLM_MODEL: "qwen-flash",
-                };
-                return map[key];
-              }),
-            },
-          },
-        ],
-      }).compile();
-      const dualModelService = module.get<LlmService>(LlmService);
-
-      mockedAxios.post.mockResolvedValueOnce({
-        data: Readable.from([
-          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
-          "data: [DONE]\n\n",
-        ]),
-      } as any);
-
-      await collectStream(
-        dualModelService.completeStream({
-          scene: "chat_main",
-          messages: [{ role: "user", content: "我喜欢上海的天气" }],
-          model: "qwen-flash",
-        }),
-      );
-
-      // 小模型请求路由到百炼端点并使用独立 key
-      expect(mockedAxios.post).toHaveBeenCalledWith(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        expect.objectContaining({ model: "qwen-flash", stream: true }),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: "Bearer sk-qwen",
-          }),
-        }),
-      );
-    });
-
-    it("should disable thinking via enable_thinking for the small model", async () => {
-      mockedAxios.post.mockResolvedValueOnce({
-        data: Readable.from([
-          'data: {"choices":[{"delta":{"content":"原来"}}]}\n\n',
-          "data: [DONE]\n\n",
-        ]),
-      } as any);
-
-      await collectStream(
-        service.completeStream({
-          scene: "filler",
-          messages: [{ role: "user", content: "我喜欢上海的天气" }],
-          model: "qwen-flash",
-        }),
-      );
-
-      const body = mockedAxios.post.mock.calls[0][1] as Record<string, unknown>;
-      expect(body.enable_thinking).toBe(false);
-      expect(body).not.toHaveProperty("thinking");
-    });
-
-    it("should use small-model credentials for non-streaming adventure bridges", async () => {
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          PROMPT_REGISTRY_PROVIDER,
-          LlmService,
-          PROMPT_REGISTRY_PROVIDER,
-          PRISMA_MOCK,
-          {
-            provide: ConfigService,
-            useValue: {
-              get: jest.fn((key: string) => {
-                const map: Record<string, string> = {
-                  OPENAI_BASE_URL: "https://api.deepseek.com/v1",
-                  OPENAI_API_KEY: "sk-primary",
-                  OPENAI_MODEL: "deepseek-flash",
-                  SMALL_LLM_BASE_URL:
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                  SMALL_LLM_API_KEY: "sk-qwen",
-                  SMALL_LLM_MODEL: "qwen-flash",
-                };
-                return map[key];
-              }),
-            },
-          },
-        ],
-      }).compile();
-      const dualModelService = module.get<LlmService>(LlmService);
-      mockedAxios.post.mockResolvedValueOnce({
-        data: { choices: [{ message: { content: "我们继续冒险吧！" } }] },
-      } as any);
-
-      await dualModelService.complete({
-        scene: "chat_main",
-        messages: [{ role: "user", content: "我想吃冰淇淋" }],
-        model: "qwen-flash",
-      });
-
-      expect(mockedAxios.post).toHaveBeenCalledWith(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        expect.objectContaining({ model: "qwen-flash" }),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: "Bearer sk-qwen",
-          }),
-        }),
-      );
-    });
-
-    it("should disable thinking via enable_thinking for the small model (non-streaming)", async () => {
+    it("should disable thinking via enable_thinking for qwen models (non-streaming)", async () => {
       mockedAxios.post.mockResolvedValueOnce({
         data: { choices: [{ message: { content: "我们继续冒险吧！" } }] },
       } as any);
@@ -801,7 +587,7 @@ describe("LlmService", () => {
       expect(body).not.toHaveProperty("thinking");
     });
 
-    it("should fall back to primary credentials when small-model env is not set", async () => {
+    it("uses the primary endpoint and key for every model override", async () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           PROMPT_REGISTRY_PROVIDER,
@@ -816,7 +602,6 @@ describe("LlmService", () => {
                   OPENAI_BASE_URL: "https://api.deepseek.com/v1",
                   OPENAI_API_KEY: "sk-test",
                   OPENAI_MODEL: "deepseek-flash",
-                  SMALL_LLM_MODEL: "qwen-flash",
                 };
                 return map[key];
               }),
@@ -841,7 +626,7 @@ describe("LlmService", () => {
         }),
       );
 
-      // 未配置 SMALL_LLM_BASE_URL/API_KEY 时回落主端点与主 key
+      // 统一模型后不再有独立小模型端点/key，任何 model 覆盖都走主凭证
       expect(mockedAxios.post).toHaveBeenCalledWith(
         "https://api.deepseek.com/v1/chat/completions",
         expect.objectContaining({ model: "qwen-flash" }),
@@ -1178,7 +963,7 @@ describe("LlmService", () => {
         data: expect.objectContaining({
           scene: "intent_classify",
           model: "deepseek-flash",
-          tier: "main",
+          tier: "small",
           success: true,
           failureReason: null,
           firstTokenMs: null,
@@ -1369,7 +1154,7 @@ describe("LlmService", () => {
       });
     });
 
-    it("小模型流式带 stream_options.include_usage，末 chunk usage 落库", async () => {
+    it("qwen 流式带 stream_options.include_usage，末 chunk usage 落库", async () => {
       mockedAxios.post.mockResolvedValueOnce({
         data: Readable.from([
           'data: {"choices":[{"delta":{"content":"好呀"}}]}\n\n',

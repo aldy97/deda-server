@@ -27,7 +27,7 @@ deda-dashboard `/llm` 页（`src/pages/Llm/`）与 `src/api/analytics.ts` 引用
 | ----------------------- | ----- | ---------------------------- |
 | `safety_l2`             | small | L2 语义安全分类              |
 | `intent_classify`       | small | 七标签意图路由               |
-| `filler`                | small | 首音前的拖延话术（防死空气） |
+| `filler`                | small | **历史值（2026-11 下线）**：live 链路不再写入，仅历史行可查到 |
 | `adventure_interaction` | small | 冒险互动作答                 |
 | `memory_extract`        | small | 长期记忆抽取                 |
 | `sleep_config_extract`  | small | 哄睡设置的语音改配置抽取     |
@@ -60,8 +60,8 @@ dashboard 侧的中文名与着色在 `src/pages/Llm/scenes.ts`，新增 scene �
 
 ## 轮次串联
 
-`turnId` 贯穿一轮问答的全部调用：`safety_l2` / `intent_classify` / `filler` / `chat_main` /
-`memory_extract` / `adventure_interaction` / `sleep_config_extract` 共用同一个 ID，
+`turnId` 贯穿一轮问答的全部调用：`safety_l2` / `intent_classify` / `chat_main` /
+`memory_extract` / `adventure_interaction` / `sleep_config_extract` 共用同一个 ID（`filler` 为历史值），
 `turn_decision_logs` 也以它为幂等键。冒险接管与 sleep_config 短链路的消息落库
 同样复用该 ID，消息明细里能查到完整链路。
 排查单轮问题时用 `/analytics/llm/by-turn?turnId=` 看调用链路，
