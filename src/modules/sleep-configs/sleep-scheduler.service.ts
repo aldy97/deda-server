@@ -11,6 +11,8 @@ import { VendorGateway } from "@/modules/vendor/vendor.gateway";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { PushSenderService } from "@/modules/push-notifications/push-sender.service";
 import { SleepModeService } from "./sleep-mode.service";
+import { SleepStoryContextService } from "./sleep-story-context.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import { SleepConfig } from "@prisma/client";
 
 const SCAN_INTERVAL_MS = 60 * 1000;
@@ -60,6 +62,8 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly conversationSessionService: ConversationSessionService,
     private readonly pushSender: PushSenderService,
     private readonly sleepMode: SleepModeService,
+    private readonly sleepStoryContext: SleepStoryContextService,
+    private readonly promptRegistry: PromptRegistryService,
   ) {}
 
   onModuleInit() {
@@ -162,6 +166,7 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
   /**
    * 生成哄睡内容。song/mixed 在儿歌内容源上线前降级为哄睡故事；
    * durationMinutes 暂不控制播放时长（LLM 故事长度不可精确控时）。
+   * 系统提示与语音触发链路共用 prompt 注册表，避免两套话术。
    */
   private async generateSleepContent(
     config: SleepConfigWithDevice,
@@ -173,18 +178,19 @@ export class SleepSchedulerService implements OnModuleInit, OnModuleDestroy {
       );
     }
     const nameHint = childName !== "宝贝" ? `孩子叫${childName}。` : "";
+    const { todayAdventureSummary } = await this.sleepStoryContext.buildVars(
+      config.device.id,
+    );
+    const systemPrompt = this.promptRegistry.render("story_prompt_sleep", {
+      todayAdventureSummary,
+    });
     const result = await this.llmService.complete({
       scene: "sleep_story_generate",
       deviceId: config.device.id,
       temperature: 0.8,
       maxTokens: 600,
       messages: [
-        {
-          role: "system",
-          content:
-            "你是儿童陪伴设备的哄睡故事讲述者。讲一个温柔、安静、适合入睡的短故事，" +
-            "100-200 字，不提问、不互动、不制造兴奋点，结尾自然落到睡觉。",
-        },
+        { role: "system", content: systemPrompt },
         { role: "user", content: `${nameHint}请讲今晚的哄睡故事。` },
       ],
     });

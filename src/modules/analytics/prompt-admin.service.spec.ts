@@ -501,6 +501,44 @@ describe("PromptAdminService", () => {
       expect(prisma.versions[0].publishedAt).toBeNull();
     });
 
+    it("拒绝未声明占位符，且不写库", async () => {
+      const { service, prisma } = makeService();
+      await expect(
+        service.saveDraft(
+          "story_prompt_sleep",
+          { content: "今天：{{unknownVar}}", expectedRevision: 0 },
+          AUTHOR,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.templates).toHaveLength(0);
+      expect(prisma.versions).toHaveLength(0);
+    });
+
+    it("允许变量契约里已声明的占位符", async () => {
+      const { service, prisma } = makeService();
+      await service.saveDraft(
+        "story_prompt_sleep",
+        { content: "今天：{{todayAdventureSummary}}", expectedRevision: 0 },
+        AUTHOR,
+      );
+      expect(prisma.versions[0].content).toBe(
+        "今天：{{todayAdventureSummary}}",
+      );
+    });
+
+    it("动态人设没有变量契约，任何占位符都拒绝", async () => {
+      const { service, prisma } = makeService();
+      prisma.addCharacter("nemo");
+      await expect(
+        service.saveDraft(
+          "persona_nemo",
+          { content: "{{childName}}", expectedRevision: 0 },
+          AUTHOR,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.versions).toHaveLength(0);
+    });
+
     it("expectedRevision 不匹配 → 409，且不写库", async () => {
       const { service, prisma } = makeService();
       await service.saveDraft(

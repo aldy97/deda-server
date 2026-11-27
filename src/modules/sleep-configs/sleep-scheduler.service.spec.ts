@@ -7,6 +7,8 @@ import { ConfigService } from "@nestjs/config";
 import { VendorGateway } from "@/modules/vendor/vendor.gateway";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
 import { PushSenderService } from "@/modules/push-notifications/push-sender.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
+import { SleepStoryContextService } from "./sleep-story-context.service";
 
 describe("SleepSchedulerService", () => {
   let service: SleepSchedulerService;
@@ -17,6 +19,8 @@ describe("SleepSchedulerService", () => {
   let pushSender: { sendSleepReminder: jest.Mock };
   let configGet: jest.Mock;
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
+  let registry: { render: jest.Mock };
+  let sleepStoryContext: { buildVars: jest.Mock };
 
   // 2026-11-03T12:30:00Z = 北京时间 2026-11-03 20:30
   const NOW = new Date("2026-11-03T12:30:00.000Z");
@@ -42,6 +46,10 @@ describe("SleepSchedulerService", () => {
       sendSleepReminder: jest.fn().mockResolvedValue({ sent: 1, skipped: 0 }),
     };
     sleepMode = { enter: jest.fn(), exit: jest.fn() };
+    registry = { render: jest.fn().mockReturnValue("注册表哄睡话术") };
+    sleepStoryContext = {
+      buildVars: jest.fn().mockResolvedValue({ todayAdventureSummary: "" }),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SleepSchedulerService,
@@ -69,6 +77,8 @@ describe("SleepSchedulerService", () => {
         },
         { provide: PushSenderService, useValue: pushSender },
         { provide: SleepModeService, useValue: sleepMode },
+        { provide: PromptRegistryService, useValue: registry },
+        { provide: SleepStoryContextService, useValue: sleepStoryContext },
       ],
     }).compile();
 
@@ -234,6 +244,32 @@ describe("SleepSchedulerService", () => {
       expect(prisma.sleepConfig.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: { lastTriggeredDate: BEIJING_DATE_KEY },
+        }),
+      );
+    });
+
+    it("should build the system prompt from the registry with today's adventure summary", async () => {
+      prisma.sleepConfig.findMany.mockResolvedValue([makeConfig()]);
+      prisma.sleepConfig.updateMany.mockResolvedValue({ count: 1 });
+      sleepStoryContext.buildVars.mockResolvedValue({
+        todayAdventureSummary: "今天你陪我过了小河。",
+      });
+      llm.complete.mockResolvedValue({ text: "故事。" });
+      gateway.pushSleepEntry.mockReturnValue(true);
+
+      await service.triggerDueSleepEntries(NOW);
+
+      expect(sleepStoryContext.buildVars).toHaveBeenCalledWith(
+        "device-uuid-001",
+      );
+      expect(registry.render).toHaveBeenCalledWith("story_prompt_sleep", {
+        todayAdventureSummary: "今天你陪我过了小河。",
+      });
+      expect(llm.complete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            { role: "system", content: "注册表哄睡话术" },
+          ]),
         }),
       );
     });

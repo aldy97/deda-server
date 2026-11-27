@@ -28,6 +28,7 @@ import {
   PromptRegistryService,
   type PromptSource,
 } from "@/modules/prompt-registry/prompt-registry.service";
+import { findPlaceholders } from "@/modules/prompt-registry/prompt-render.util";
 import type { LlmScene } from "@/modules/llm/llm.service";
 import type {
   PublishPromptDto,
@@ -251,6 +252,7 @@ export class PromptAdminService {
     this.assertWritable();
     const resolved = await this.resolveKey(key);
     const promptKey = resolved.key;
+    this.assertPlaceholderContract(promptKey, dto.content);
 
     await this.prisma.$transaction(async (tx) => {
       const row = await this.ensureRow(tx, resolved);
@@ -528,6 +530,27 @@ export class PromptAdminService {
     }
 
     throw new NotFoundException(`未知的 prompt key：${key}`);
+  }
+
+  /**
+   * 草稿正文的占位符必须落在代码变量契约内。
+   *
+   * 运行时渲染遇到未声明占位符会整体回落默认话术，等于 admin 的改动静默失效；
+   * 这里在保存草稿时提前拒绝，把「发布了但没生效」挡在源头。
+   * 动态人设没有变量契约，任何占位符都不接受。
+   */
+  private assertPlaceholderContract(key: string, content: string): void {
+    const spec = isBuiltinPromptKey(key) ? PROMPT_DEFAULTS[key].variables : [];
+    const declared = new Set(spec.map((entry) => entry.name));
+    const unknown = findPlaceholders(content).filter(
+      (name) => !declared.has(name),
+    );
+    if (unknown.length > 0) {
+      const labels = unknown.map((name) => `{{${name}}}`).join("、");
+      throw new BadRequestException(
+        `模板含未声明占位符：${labels}；变量契约由服务端代码定义，请改用已声明的变量或删除占位符`,
+      );
+    }
   }
 
   /** 惰性建行；两个 admin 同时首次编辑时靠 P2002 重试收敛到同一行 */
