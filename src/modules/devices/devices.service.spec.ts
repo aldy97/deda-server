@@ -387,7 +387,11 @@ describe("DevicesService", () => {
           device: {
             id: "device-uuid-001",
             deviceId: "dev-001",
-            childProfile: { name: "二狗", englishName: "Lebron" },
+            childProfile: {
+              name: "二狗",
+              englishName: "Lebron",
+              gender: "female",
+            },
           },
         },
         {
@@ -430,7 +434,11 @@ describe("DevicesService", () => {
           deviceCode: undefined,
           networkType: undefined,
           firmwareVersion: undefined,
-          childProfile: { name: "二狗", englishName: "Lebron" },
+          childProfile: {
+            name: "二狗",
+            englishName: "Lebron",
+            gender: "female",
+          },
           todayUsage: {
             date: "2026-11-25",
             durationMinutes: 0,
