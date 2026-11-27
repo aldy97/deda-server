@@ -646,6 +646,9 @@ body { content, expectedRevision, changeNote? }
 - 草稿**不影响线上生效内容**。
 - `expectedRevision` 是乐观锁：无草稿时传 0；与服务端当前 `draftRevision` 不一致 → 409。
 - `content` 上限 20000 字符；`changeNote` 上限 500，可省略。
+- 正文里的 `{{变量}}` 必须落在代码变量契约内（变量清单见 `GET` 的 `variables`）；
+  出现未声明占位符 → **400**，不落库。运行时渲染失败会整体回落默认话术，
+  若不在这里拦截，「发布了但没生效」将没有任何显式信号。
 
 ```
 POST /analytics/prompts/:key/publish           → 200，body { revision, changeNote, confirmCode }
@@ -665,7 +668,7 @@ POST /analytics/prompts/:key/reset-to-default  → 200，body { changeNote, conf
 
 错误码：
 
-- 400 参数校验失败（正文为空/超长、缺 `expectedRevision`、缺 `changeNote` 或 `confirmCode`、白名单外字段）
+- 400 参数校验失败（正文为空/超长、缺 `expectedRevision`、缺 `changeNote` 或 `confirmCode`、白名单外字段、正文含未声明占位符）
   / **确认码不正确**。确认码刻意用 400 而不是 403：dashboard 的 axios 响应拦截器把
   401/403 一律当「凭据失效」处理（清 token 跳登录页），打错一个字母就把管理员踢下线、
   连带丢掉编辑器里的草稿与 diff。403 只留给下面那种环境级策略拒绝。

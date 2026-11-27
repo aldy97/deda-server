@@ -17,6 +17,7 @@ import { ConversationSessionService } from "@/modules/vendor/conversation-sessio
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
+import { SleepStoryContextService } from "@/modules/sleep-configs/sleep-story-context.service";
 import { AdventureService } from "@/modules/adventure/adventure.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { TurnDecisionRecorder } from "@/modules/turn-decision/turn-decision-recorder.service";
@@ -70,6 +71,7 @@ describe("LlmAdapterModule", () => {
   let sleepVoice: { handle: jest.Mock };
   let sleepConfigs: { applyVoiceUpdate: jest.Mock; getByDeviceId: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
+  let sleepStoryContext: { buildVars: jest.Mock };
   let adventure: {
     handleChildReply: jest.Mock;
     tryTestStoryTrigger: jest.Mock;
@@ -169,6 +171,9 @@ describe("LlmAdapterModule", () => {
       getByDeviceId: jest.fn().mockResolvedValue({ contentType: "story" }),
     };
     sleepMode = { enter: jest.fn(), exit: jest.fn() };
+    sleepStoryContext = {
+      buildVars: jest.fn().mockResolvedValue({ todayAdventureSummary: "" }),
+    };
     adventure = {
       handleChildReply: jest.fn().mockResolvedValue(null),
       tryTestStoryTrigger: jest.fn().mockResolvedValue(null),
@@ -192,6 +197,7 @@ describe("LlmAdapterModule", () => {
         { provide: SleepVoiceConfigService, useValue: sleepVoice },
         { provide: SleepConfigsService, useValue: sleepConfigs },
         { provide: SleepModeService, useValue: sleepMode },
+        { provide: SleepStoryContextService, useValue: sleepStoryContext },
         { provide: AdventureService, useValue: adventure },
         { provide: PrismaService, useValue: prisma },
         { provide: TurnDecisionRecorder, useValue: turnDecisions },
@@ -342,7 +348,7 @@ describe("LlmAdapterModule", () => {
         expect.any(Array),
         expect.objectContaining({
           mode: "sleep_story",
-          promptTemplate: expect.stringContaining("哄睡"),
+          promptTemplate: expect.stringContaining("听风原野"),
         }),
       );
       expect(sleepMode.enter).toHaveBeenCalledWith("dev-internal-1");
@@ -393,7 +399,7 @@ describe("LlmAdapterModule", () => {
           "我要听睡前儿歌",
           expect.any(Array),
           expect.objectContaining({
-            promptTemplate: expect.stringContaining("哄睡"),
+            promptTemplate: expect.stringContaining("听风原野"),
           }),
         );
         warnSpy.mockRestore();
@@ -1610,6 +1616,7 @@ describe("LlmAdapterModule", () => {
           { provide: SleepVoiceConfigService, useValue: sleepVoice },
           { provide: SleepConfigsService, useValue: sleepConfigs },
           { provide: SleepModeService, useValue: sleepMode },
+          { provide: SleepStoryContextService, useValue: sleepStoryContext },
           { provide: AdventureService, useValue: adventure },
           { provide: PrismaService, useValue: prisma },
           { provide: TurnDecisionRecorder, useValue: turnDecisions },
@@ -2148,6 +2155,59 @@ describe("LlmAdapterModule", () => {
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.content).toBe("gate blocked");
       expect(assistantCall.data.rawPayload.safety.reply).toBe("canned_block");
+    });
+
+    it("sleep_story：今日冒险摘要注入故事话术，不留占位符", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      sleepStoryContext.buildVars.mockResolvedValue({
+        todayAdventureSummary: "今天你陪我过了小河。",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      await collect(service.streamReply(boundReq("我要听睡前故事")));
+
+      expect(sleepStoryContext.buildVars).toHaveBeenCalledWith(
+        "dev-internal-1",
+      );
+      const options = llm.buildEnglishTutorPrompt.mock.calls[0][2];
+      expect(options.promptTemplate).toContain("今天你陪我过了小河。");
+      expect(options.promptTemplate).not.toContain("{{todayAdventureSummary}}");
+      expect(options.promptTemplate).toContain(
+        "我们今天找到的星星，正在天上睡觉呢！晚安",
+      );
+    });
+
+    it("sleep_story：摘要取数失败不阻塞哄睡，按空摘要讲原野的夜晚", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "sleep_story",
+        source: "model",
+      });
+      sleepStoryContext.buildVars.mockRejectedValue(new Error("db down"));
+      llm.completeStream.mockReturnValue(makeStream(["晚安故事来了"])());
+
+      const chunks = await collect(service.streamReply(boundReq("晚安")));
+
+      expect(chunks).toEqual(["晚安故事来了"]);
+      const options = llm.buildEnglishTutorPrompt.mock.calls[0][2];
+      expect(options.promptTemplate).toContain("如果上面没有内容");
+    });
+
+    it("非哄睡故事不查今日冒险摘要", async () => {
+      prisma.device.findFirst.mockResolvedValue(deviceRow);
+      session.resolveWithSource.mockResolvedValue({
+        intent: "free_story",
+        source: "model",
+      });
+      llm.completeStream.mockReturnValue(makeStream(["从前有座山"])());
+
+      await collect(service.streamReply(boundReq("讲个故事")));
+
+      expect(sleepStoryContext.buildVars).not.toHaveBeenCalled();
     });
 
     it("SAFETY_GATE_SLEEP=off：哄睡不调用 gate", async () => {

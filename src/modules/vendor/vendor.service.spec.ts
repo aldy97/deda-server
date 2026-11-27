@@ -990,12 +990,15 @@ describe("VendorService", () => {
         expect.any(Array),
         expect.objectContaining({
           mode: "sleep_story",
-          promptTemplate: expect.stringMatching(/平静|缓慢/),
+          promptTemplate: expect.stringMatching(/听风原野/),
         }),
       );
       const promptOptions = llmService.buildEnglishTutorPrompt.mock.calls[0][2];
-      expect(promptOptions?.promptTemplate).toContain("不要提问");
-      expect(promptOptions?.promptTemplate).toContain("不要邀请互动");
+      expect(promptOptions?.promptTemplate).toContain("不提问");
+      expect(promptOptions?.promptTemplate).toContain("不邀请回应");
+      expect(promptOptions?.promptTemplate).toContain(
+        "我们今天找到的星星，正在天上睡觉呢！晚安",
+      );
       expect(sleepMode.enter).toHaveBeenCalledWith("uuid-s1");
     });
 

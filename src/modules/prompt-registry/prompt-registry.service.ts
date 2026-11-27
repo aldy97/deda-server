@@ -175,16 +175,20 @@ export class PromptRegistryService implements OnModuleInit {
    * 私有 storyPrompt（此前靠注释「两处需同步修改」维系一致）。
    * 非故事意图返回 undefined，与既有 default 分支语义一致。
    *
+   * 正文一律走 render：故事话术已进入「可带变量」阶段（哄睡要注入今日冒险），
+   * 若仍取原始模板，DB 里的 `{{...}}` 会原样进模型。变量契约缺省时渲染等价于原文。
+   *
    * favoriteStoryType 为孩子长期记忆里的最爱故事类型：只在传入时追加一段
    * 「优先讲这个类型」的软提示；vendor 链路不传，故无追加段。
    */
   getStoryPrompt(
     intent: string,
     favoriteStoryType?: string | null,
+    vars?: Record<string, unknown>,
   ): string | undefined {
     const key = STORY_PROMPT_KEY_BY_INTENT[intent];
     if (!key) return undefined;
-    const base = this.getTemplate(key);
+    const base = this.render(key, vars);
     if (!favoriteStoryType) return base;
     return (
       base + this.render("story_favorite_type_suffix", { favoriteStoryType })

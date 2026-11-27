@@ -83,7 +83,7 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 | main_rules | `main_story_mode_rules` | chat_main | 故事模式规则段 | - |
 | story | `story_prompt_english` | chat_main | 英语故事话术 | - |
 | story | `story_prompt_idiom` | chat_main | 成语故事话术 | - |
-| story | `story_prompt_sleep` | chat_main | 哄睡故事话术 | - |
+| story | `story_prompt_sleep` | chat_main | 哄睡故事话术 | `todayAdventureSummary` |
 | story | `story_prompt_free` | chat_main | 自由创作故事话术 | - |
 | story | `story_favorite_type_suffix` | chat_main | 偏好题材追加段 | `favoriteStoryType*` |
 | persona | `persona_elly` | - | 角色人设：小象 Elly | - |
@@ -104,6 +104,13 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 - 变量值不是字符串（且非 `null`/`undefined`）→ 抛错，不静默 `String()` 转换；
 - DB 内容渲染失败 → 记 warn 并**回落代码默认模板重渲染**；
   默认模板本身渲染失败 → 抛 `PromptRenderError`（属代码 bug）。
+- 管理端保存草稿时按同一契约校验：出现未声明占位符直接 400，避免
+  「发布了但运行时回落默认」的静默失效。
+
+`todayAdventureSummary` 由 `SleepStoryContextService` 取当天
+`mode=adventure_story` 的 assistant 播报文本，压到 600 字以内（过滤问句、
+句末截断）；没有冒险或取数失败时为空串，话术走「原野的夜晚」兜底。
+语音触发（`llm-adapter`）与定时进入（`sleep-scheduler`）共用同一份话术与取数。
 
 DB 的 `renderSchema` 列**只供 dashboard 展示**，渲染时一律以
 `PROMPT_DEFAULTS[key].variables` 为准。改契约 = 改代码 + 补测试，不能在后台改。

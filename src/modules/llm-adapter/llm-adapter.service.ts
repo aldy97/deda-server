@@ -20,6 +20,7 @@ import {
 import { SleepConfigsService } from "@/modules/sleep-configs/sleep-configs.service";
 import { SleepVoiceConfigService } from "@/modules/sleep-configs/sleep-voice-config.service";
 import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
+import { SleepStoryContextService } from "@/modules/sleep-configs/sleep-story-context.service";
 import {
   AdventureReply,
   AdventureService,
@@ -151,6 +152,7 @@ export class LlmAdapterService {
     private readonly prisma: PrismaService,
     private readonly turnDecisions: TurnDecisionRecorder,
     private readonly sleepMode: SleepModeService,
+    private readonly sleepStoryContext: SleepStoryContextService,
     private readonly promptRegistry: PromptRegistryService,
     private readonly safetyGate: SafetyGateService,
     private readonly conversationNetwork: ConversationNetworkAggregator,
@@ -789,12 +791,25 @@ export class LlmAdapterService {
     // 孩子档案：注入主模型 prompt（称呼/年龄上下文）
     const childProfile = device ? await this.getChildProfile(device.id) : null;
 
+    // 哄睡故事注入今日冒险摘要；取数失败降级为空摘要，绝不阻塞本轮回复
+    const storyVars =
+      device && intent === "sleep_story"
+        ? await this.sleepStoryContext.buildVars(device.id).catch((error) => {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            this.logger.warn(
+              `Sleep story context failed for device=${device.deviceId}: ${message}`,
+            );
+            return { todayAdventureSummary: "" };
+          })
+        : undefined;
+
     // prompt 组装：故事意图用故事话术，自由对话按子模式模板，
     // 孩子档案注入称呼/年龄上下文（均对齐老链路）
     const promptTemplate = STORY_INTENTS.includes(intent)
-      ? this.storyPrompt(intent, favoriteStoryType)
+      ? this.storyPrompt(intent, favoriteStoryType, storyVars)
       : intent === "adventure_story" || intent === "free_story"
-        ? this.storyPrompt(intent, favoriteStoryType)
+        ? this.storyPrompt(intent, favoriteStoryType, storyVars)
         : undefined;
 
     const built = this.llmService.buildEnglishTutorPrompt(asrText, history, {
@@ -1157,8 +1172,9 @@ export class LlmAdapterService {
   private storyPrompt(
     intent: ConversationIntent,
     favoriteStoryType?: string | null,
+    vars?: Record<string, unknown>,
   ): string | undefined {
-    return this.promptRegistry.getStoryPrompt(intent, favoriteStoryType);
+    return this.promptRegistry.getStoryPrompt(intent, favoriteStoryType, vars);
   }
 
   /**

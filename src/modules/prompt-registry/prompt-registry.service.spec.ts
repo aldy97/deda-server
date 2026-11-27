@@ -325,8 +325,13 @@ describe("PromptRegistryService", () => {
       expect(service.getStoryPrompt("idiom_story")).toBe(
         PROMPT_DEFAULTS.story_prompt_idiom.template,
       );
+      // 哄睡话术含可选变量，未传摘要时占位符渲染为空串
       expect(service.getStoryPrompt("sleep_story")).toBe(
-        PROMPT_DEFAULTS.story_prompt_sleep.template,
+        renderPrompt(
+          PROMPT_DEFAULTS.story_prompt_sleep.template,
+          {},
+          PROMPT_DEFAULTS.story_prompt_sleep.variables,
+        ),
       );
       // 冒险未真正开始时降级为自由创作话术，与 free_story 同一条
       expect(service.getStoryPrompt("adventure_story")).toBe(
@@ -362,6 +367,31 @@ describe("PromptRegistryService", () => {
       expect(service.getStoryPrompt("idiom_story", null)).toBe(base);
       expect(service.getStoryPrompt("idiom_story", "")).toBe(base);
       expect(service.getStoryPrompt("idiom_story", undefined)).toBe(base);
+    });
+
+    it("sleep_story 渲染今日冒险摘要，缺失时不抛错也不残留占位符", () => {
+      const withSummary = service.getStoryPrompt("sleep_story", null, {
+        todayAdventureSummary: "今天你陪我过了小河，你很勇敢。",
+      });
+      expect(withSummary).toContain("今天你陪我过了小河，你很勇敢。");
+      expect(withSummary).not.toContain("{{todayAdventureSummary}}");
+
+      const empty = service.getStoryPrompt("sleep_story");
+      expect(empty).not.toContain("{{");
+      expect(empty).toContain("如果上面没有内容");
+    });
+
+    it("已发布正文含未声明占位符时回落默认话术，不把花括号发给模型", async () => {
+      prisma.setPublished(
+        "story_prompt_sleep",
+        1,
+        "坏模板 {{unknownSleepVar}}",
+      );
+      await service.reload();
+
+      const prompt = service.getStoryPrompt("sleep_story");
+      expect(prompt).not.toContain("unknownSleepVar");
+      expect(prompt).toContain("听风原野");
     });
 
     it("话术被发布后读到新值，追加段仍按默认渲染", async () => {
