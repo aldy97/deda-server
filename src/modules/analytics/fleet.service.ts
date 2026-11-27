@@ -17,6 +17,7 @@ import {
   FleetPresenceTrendQueryDto,
   FleetSummaryQueryDto,
 } from "./dto/fleet-query.dto";
+import { resolvePhoneMaker } from "./phone-brand.util";
 
 const LOW_BATTERY_THRESHOLD = 20;
 const MAX_PRESENCE_TREND_DAYS = 62;
@@ -634,10 +635,15 @@ export class FleetService {
       );
     }
 
-    // 绑定用户（仅 userId + isOwner + boundAt，无 PII）
+    // 绑定用户（userId + isOwner + boundAt + 手机厂商，无 PII）
     const bindings = await this.prisma.userDeviceBinding.findMany({
       where: { deviceId: device.id },
-      select: { userId: true, isOwner: true, createdAt: true },
+      select: {
+        userId: true,
+        isOwner: true,
+        createdAt: true,
+        user: { select: { phoneBrand: true } },
+      },
       orderBy: { createdAt: "asc" },
     });
 
@@ -645,6 +651,9 @@ export class FleetService {
       userId: b.userId,
       isOwner: b.isOwner,
       boundAt: b.createdAt.toISOString(),
+      // 与用户画像「手机厂商」同一套归一化：只下发展示名，不把原始品牌串透给前端。
+      // 未上报 / 无法识别 → null，由前端决定展示「—」。
+      phoneMaker: resolvePhoneMaker(b.user.phoneBrand)?.makerLabel ?? null,
     }));
 
     // Presence 近 days 天
