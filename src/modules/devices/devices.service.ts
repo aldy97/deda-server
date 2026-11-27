@@ -199,6 +199,7 @@ export class DevicesService {
         ? {
             name: b.device.childProfile.name,
             englishName: b.device.childProfile.englishName,
+            gender: b.device.childProfile.gender,
           }
         : null,
       todayUsage: usageByDevice.get(b.device.id) ?? null,
