@@ -419,8 +419,8 @@ describe("Analytics prompts (e2e)", () => {
       );
     });
 
-    it("DB 正文写了未声明的占位符 → 回落代码默认值，绝不把 {{x}} 发给模型", async () => {
-      await auth(
+    it("管理端写入未声明的占位符 → 400，且不产生草稿", async () => {
+      const res = await auth(
         request(app.getHttpServer()).patch(
           `/analytics/prompts/${VAR_KEY}/draft`,
         ),
@@ -429,7 +429,33 @@ describe("Analytics prompts (e2e)", () => {
           content: "危险正文 {{notDeclaredVar}}",
           expectedRevision: 0,
         })
-        .expect(200);
+        .expect(400);
+      expect(res.body.message).toContain("未声明占位符");
+
+      const detail = await auth(
+        request(app.getHttpServer()).get(`/analytics/prompts/${VAR_KEY}`),
+      ).expect(200);
+      expect(detail.body.data.draftRevision).toBeNull();
+    });
+
+    it("历史脏数据绕过管理端写入时，运行时仍回落代码默认值", async () => {
+      // 模拟本次校验上线前已存在的坏草稿：直接写 DB，再走发布接口
+      await prisma.promptTemplate.update({
+        where: { key: VAR_KEY },
+        data: { draftRevision: 2 },
+      });
+      await prisma.promptTemplateVersion.create({
+        data: {
+          templateId: (
+            await prisma.promptTemplate.findUniqueOrThrow({
+              where: { key: VAR_KEY },
+            })
+          ).id,
+          revision: 2,
+          content: "危险正文 {{notDeclaredVar}}",
+          authorUsername: "admin",
+        },
+      });
       await auth(
         request(app.getHttpServer()).post(
           `/analytics/prompts/${VAR_KEY}/publish`,
