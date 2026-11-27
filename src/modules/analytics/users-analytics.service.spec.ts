@@ -124,6 +124,41 @@ describe("UsersAnalyticsService.getSummary", () => {
       }),
     ).rejects.toThrow(BadRequestException);
   });
+
+  it("multiDeviceFamilies：1 台不算、2 台算、0 台不算，且不新增查询", async () => {
+    const prisma = buildPrisma({
+      users: [
+        { id: "u1", createdAt: new Date("2026-11-01T02:00:00Z") },
+        { id: "u2", createdAt: new Date("2026-11-01T02:00:00Z") },
+        { id: "u3", createdAt: new Date("2026-11-01T02:00:00Z") },
+        { id: "u4", createdAt: new Date("2026-11-01T02:00:00Z") },
+      ],
+      bindings: [
+        { userId: "u1", deviceId: "d1" },
+        { userId: "u2", deviceId: "d2" },
+        { userId: "u2", deviceId: "d3" },
+        { userId: "u3", deviceId: "d4" },
+        // u4 无绑定：0 台，不算多设备家庭
+      ],
+      childProfiles: [],
+      devices: [],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getSummary({});
+
+    expect(result.multiDeviceFamilies).toBe(1);
+    expect(prisma.userDeviceBinding.findMany).toHaveBeenCalledTimes(1);
+    // 既有字段与顺序不变，只追加 multiDeviceFamilies
+    expect(Object.keys(result).sort()).toEqual([
+      "avgDevicesPerUser",
+      "multiChildFamilies",
+      "multiDeviceFamilies",
+      "newUsersInRange",
+      "totalUsers",
+      "usersWithBoundDevice",
+    ]);
+  });
 });
 
 describe("UsersAnalyticsService.getDemographics", () => {

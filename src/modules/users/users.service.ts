@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import axios from "axios";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { UpdateProfileDto } from "./dto/update-profile.dto";
 
 export interface WechatLoginDto {
   code: string;
@@ -115,15 +116,43 @@ export class UsersService {
     return { success: true, skipped: result.count === 0 };
   }
 
+  /**
+   * 当前登录家长的档案（小程序「我的」页）。
+   * 不下发 openid；deviceCount 为绑定设备数，childCount 为绑定设备上的孩子档案数
+   * （共享设备下以设备归属为准，不按 childProfile.userId）。
+   */
   async getProfile(userId: string) {
-    return this.prisma.user.findUnique({
+    const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, openid: true, phone: true, createdAt: true },
+      select: { id: true, nickname: true, phone: true, createdAt: true },
     });
+    if (!user) {
+      return null;
+    }
+
+    const [deviceCount, childCount] = await Promise.all([
+      this.prisma.userDeviceBinding.count({ where: { userId } }),
+      this.prisma.childProfile.count({
+        where: { device: { bindings: { some: { userId } } } },
+      }),
+    ]);
+
+    return {
+      id: user.id,
+      nickname: user.nickname ?? null,
+      phone: user.phone ?? null,
+      createdAt: user.createdAt,
+      deviceCount,
+      childCount,
+    };
   }
 
-  async updateProfile(userId: string, dto: any) {
-    // TODO: 更新当前登录用户信息
-    return { userId, dto };
+  /** 更新家长档案（本期只有昵称，复用 users.nickname），写库后回读最新档案。 */
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { nickname: dto.nickname },
+    });
+    return this.getProfile(userId);
   }
 }

@@ -9,8 +9,11 @@ describe("UsersService", () => {
     user: {
       upsert: jest.Mock;
       findUnique: jest.Mock;
+      update: jest.Mock;
       updateMany: jest.Mock;
     };
+    userDeviceBinding: { count: jest.Mock };
+    childProfile: { count: jest.Mock };
   };
   let configService: { get: jest.Mock };
   let jwtService: { sign: jest.Mock };
@@ -20,8 +23,11 @@ describe("UsersService", () => {
       user: {
         upsert: jest.fn(),
         findUnique: jest.fn(),
+        update: jest.fn(),
         updateMany: jest.fn(),
       },
+      userDeviceBinding: { count: jest.fn().mockResolvedValue(0) },
+      childProfile: { count: jest.fn().mockResolvedValue(0) },
     };
     configService = { get: jest.fn() };
     jwtService = { sign: jest.fn().mockReturnValue("signed-token") };
@@ -87,13 +93,87 @@ describe("UsersService", () => {
     );
   });
 
-  it("bindPhone / getProfile / updateProfile", async () => {
+  it("bindPhone 保持原样回显 mock 手机号", async () => {
     expect(await service.bindPhone({})).toEqual({ phone: "mock-phone" });
-    prisma.user.findUnique.mockResolvedValue({ id: "u1" });
-    expect(await service.getProfile("u1")).toEqual({ id: "u1" });
-    expect(await service.updateProfile("u1", { name: "x" })).toEqual({
-      userId: "u1",
-      dto: { name: "x" },
+  });
+
+  describe("getProfile", () => {
+    it("只读 id/nickname/phone/createdAt + 两个计数，响应不含 openid", async () => {
+      const createdAt = new Date("2026-11-01T02:00:00Z");
+      prisma.user.findUnique.mockResolvedValue({
+        id: "u1",
+        nickname: "熊熊妈妈",
+        phone: "13800000000",
+        createdAt,
+      });
+      prisma.userDeviceBinding.count.mockResolvedValue(2);
+      prisma.childProfile.count.mockResolvedValue(2);
+
+      const result = await service.getProfile("u1");
+
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        select: { id: true, nickname: true, phone: true, createdAt: true },
+      });
+      expect(prisma.userDeviceBinding.count).toHaveBeenCalledWith({
+        where: { userId: "u1" },
+      });
+      // 孩子数以「绑定设备上的孩子档案」口径统计，不按 childProfile.userId
+      expect(prisma.childProfile.count).toHaveBeenCalledWith({
+        where: { device: { bindings: { some: { userId: "u1" } } } },
+      });
+      expect(result).toEqual({
+        id: "u1",
+        nickname: "熊熊妈妈",
+        phone: "13800000000",
+        createdAt,
+        deviceCount: 2,
+        childCount: 2,
+      });
+      expect(result).not.toHaveProperty("openid");
+      expect(Object.keys(result as object).sort()).toEqual([
+        "childCount",
+        "createdAt",
+        "deviceCount",
+        "id",
+        "nickname",
+        "phone",
+      ]);
+    });
+
+    it("用户不存在时返回 null，不做计数", async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.getProfile("missing")).resolves.toBeNull();
+      expect(prisma.userDeviceBinding.count).not.toHaveBeenCalled();
+      expect(prisma.childProfile.count).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("updateProfile", () => {
+    it("只写 nickname 并回读最新档案", async () => {
+      prisma.user.update.mockResolvedValue({ id: "u1" });
+      prisma.user.findUnique.mockResolvedValue({
+        id: "u1",
+        nickname: "小熊妈妈",
+        phone: null,
+        createdAt: new Date("2026-11-01T02:00:00Z"),
+      });
+
+      const result = await service.updateProfile("u1", {
+        nickname: "小熊妈妈",
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        data: { nickname: "小熊妈妈" },
+      });
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        select: { id: true, nickname: true, phone: true, createdAt: true },
+      });
+      expect(result).toMatchObject({ id: "u1", nickname: "小熊妈妈" });
+      expect(result).not.toHaveProperty("openid");
     });
   });
 
