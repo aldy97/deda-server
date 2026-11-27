@@ -212,6 +212,7 @@ Content-Type: application/json
 | `skipped` | boolean | 品牌为空或用户不存在时为 true（不写库） |
 
 - 只更新 `users.phoneBrand` / `phoneBrandReportedAt`，不采集型号、系统、IMEI 等额外信息。
+- 服务端按厂商归一化后再展示：忽略大小写/空格/标点，`iPhone`/`iPad`/`iPod` 计入 Apple，`Redmi`/`POCO` 计入小米，`OnePlus` 计入 OPPO 系，`iQOO` 计入 vivo 系，`moto` 计入联想，`nubia`/`RedMagic` 计入中兴，`mblu` 计入魅族，`pixel` 计入 Google；未识别值归「其他」。
 - 小程序建议在启动静默登录成功后、以及登录页登录成功后调用；品牌变化立即上报，否则 7 天补报一次。
 
 ---
