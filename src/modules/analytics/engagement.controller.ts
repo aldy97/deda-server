@@ -46,6 +46,14 @@ export class EngagementController {
     return this.engagementService.getModeUsage(query);
   }
 
+  @Get("network-usage")
+  @ApiOperation({
+    summary: "对话网络分布（WiFi/4G/未知，读日聚合表，不依赖 messages）",
+  })
+  getNetworkUsage(@Query() query: AnalyticsDateRangeQueryDto) {
+    return this.engagementService.getNetworkUsage(query);
+  }
+
   @Get("feature-adoption")
   @ApiOperation({
     summary: "功能渗透率（哄睡/冒险/习惯/英语，近 30 天活跃口径）",

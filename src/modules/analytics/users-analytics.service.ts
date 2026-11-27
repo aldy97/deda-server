@@ -6,6 +6,7 @@ import {
   reportDateInTimezone,
   reportDayRange,
 } from "../learning-stats/parent-report-date.util";
+import { resolvePhoneMaker } from "./phone-brand.util";
 
 export interface UsersSummaryQuery {
   startDate?: string;
@@ -81,6 +82,88 @@ export class UsersAnalyticsService {
           ? Math.round((bindings.length / usersWithBoundDevice) * 100) / 100
           : 0,
       multiChildFamilies,
+    };
+  }
+
+  /**
+   * 家长手机厂商分布：全量注册用户当前快照。
+   * 只返回聚合计数，不返回 userId / openid / 手机号。
+   */
+  async getPhoneBrands() {
+    const [totalUsers, groups, first] = await Promise.all([
+      this.prisma.user.count(),
+      this.prisma.user.groupBy({
+        by: ["phoneBrand"],
+        _count: { _all: true },
+      }),
+      this.prisma.user.aggregate({
+        _min: { phoneBrandReportedAt: true },
+        where: { phoneBrand: { not: null } },
+      }),
+    ]);
+
+    const buckets = new Map<
+      string,
+      {
+        makerKey: string;
+        makerLabel: string;
+        users: number;
+        rawBrands: Map<string, number>;
+      }
+    >();
+    let unknownUsers = 0;
+
+    for (const group of groups) {
+      const count = group._count._all;
+      const maker = resolvePhoneMaker(group.phoneBrand);
+      if (!maker) {
+        unknownUsers += count;
+        continue;
+      }
+      const rawBrand = (group.phoneBrand ?? "").trim();
+      let bucket = buckets.get(maker.makerKey);
+      if (!bucket) {
+        bucket = {
+          makerKey: maker.makerKey,
+          makerLabel: maker.makerLabel,
+          users: 0,
+          rawBrands: new Map<string, number>(),
+        };
+        buckets.set(maker.makerKey, bucket);
+      }
+      bucket.users += count;
+      bucket.rawBrands.set(
+        rawBrand,
+        (bucket.rawBrands.get(rawBrand) ?? 0) + count,
+      );
+    }
+
+    const reportedUsers = totalUsers - unknownUsers;
+    const share = (value: number, total: number): number | null =>
+      total > 0 ? Math.round((value / total) * 10000) / 10000 : null;
+
+    const brands = Array.from(buckets.values())
+      .map((bucket) => ({
+        makerKey: bucket.makerKey,
+        makerLabel: bucket.makerLabel,
+        users: bucket.users,
+        shareOfReported: share(bucket.users, reportedUsers),
+        shareOfTotal: share(bucket.users, totalUsers),
+        rawBrands: Array.from(bucket.rawBrands.entries())
+          .map(([brand, users]) => ({ brand, users }))
+          .sort((a, b) => a.brand.localeCompare(b.brand)),
+      }))
+      .sort(
+        (a, b) => b.users - a.users || a.makerKey.localeCompare(b.makerKey),
+      );
+
+    return {
+      totalUsers,
+      reportedUsers,
+      unknownUsers,
+      coverage: share(reportedUsers, totalUsers),
+      firstReportedAt: first._min.phoneBrandReportedAt?.toISOString() ?? null,
+      brands,
     };
   }
 

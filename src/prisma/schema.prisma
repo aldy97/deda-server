@@ -17,6 +17,8 @@ model User {
   phone         String?   @unique // 手机号，可选绑定
   nickname      String?   // 微信昵称
   avatarUrl     String?   // 头像
+  phoneBrand           String?   // 小程序上报的手机品牌原始值（终端分布统计）
+  phoneBrandReportedAt DateTime? // 最近一次品牌上报时间
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -267,6 +269,7 @@ model Message {
   status        String   @default("completed") // assistant: completed / failed
   conversationId String? // 厂商侧对话唯一 ID（如有）
   mode                String?  // 当前配置 mode 快照
+  networkMode         String?  // 对话发起时设备网络：wifi / 4g；null=未知（审计用，比例见 conversation_network_daily）
   cefrLevel           String?  // 当前配置 CEFR
   rawPayload      Json?    // Webhook 原始 payload
   spokeAt         DateTime // 消息发生时间
@@ -793,4 +796,42 @@ model AppAssetSlot {
   @@index([enabled])
   @@index([page])
   @@map("app_asset_slots")
+}
+
+/// 对话网络日聚合：消息落库时按 (date, deviceId) 累加，dashboard 只读本表。
+/// 无外键：删除 messages / devices 不影响历史聚合。
+model ConversationNetworkDaily {
+  id           String   @id @default(uuid())
+  date         String   // Asia/Shanghai YYYY-MM-DD
+  deviceId     String   // 业务设备 ID（小写 MAC）
+  wifiTurns    Int      @default(0)
+  fourGTurns   Int      @default(0)
+  unknownTurns Int      @default(0)
+  firstSeenAt  DateTime
+  lastSeenAt   DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([date, deviceId])
+  @@index([date])
+  @@map("conversation_network_daily")
+}
+
+/// 设备网络心跳日聚合：MQTT query 心跳内存聚合后 5 分钟 flush。
+/// 无外键：删除 devices 不影响历史聚合。
+model DeviceNetworkDaily {
+  id                String   @id @default(uuid())
+  date              String   // Asia/Shanghai YYYY-MM-DD
+  deviceId          String   // 业务设备 ID（小写 MAC）
+  wifiHeartbeats    Int      @default(0)
+  fourGHeartbeats   Int      @default(0)
+  unknownHeartbeats Int      @default(0)
+  firstSeenAt       DateTime
+  lastSeenAt        DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([date, deviceId])
+  @@index([date])
+  @@map("device_network_daily")
 }

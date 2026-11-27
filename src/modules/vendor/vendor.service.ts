@@ -31,6 +31,8 @@ import {
   ConversationSessionService,
 } from "./conversation-session.service";
 import { markPreviousReplyInterrupted } from "@/common/interruption/interruption.util";
+import { ConversationNetworkAggregator } from "@/modules/conversation-network/conversation-network-aggregator.service";
+import { normalizeConversationNetworkMode } from "@/modules/conversation-network/network-mode.util";
 import {
   BlockedSafetyCategory,
   ChildSafetyService,
@@ -58,6 +60,7 @@ export class VendorService {
     private readonly sleepVoiceConfigService: SleepVoiceConfigService,
     private readonly sleepMode: SleepModeService,
     private readonly promptRegistry: PromptRegistryService,
+    private readonly conversationNetwork: ConversationNetworkAggregator,
   ) {
     this.adventureService.registerTimeoutListener(
       async (deviceInternalId, adventureReply) => {
@@ -378,6 +381,7 @@ export class VendorService {
     // user 消息收到即落库，不等待 LLM（LLM 故障只影响后续 assistant 行）。
     // turnId 复用函数顶部生成的轮次 ID（安全/意图日志已带上同一 ID）。
     const sourceOccurredAt = new Date();
+    const networkMode = normalizeConversationNetworkMode(device.networkType);
     await this.prisma.message.create({
       data: {
         deviceId: device.id,
@@ -386,9 +390,15 @@ export class VendorService {
         content: dto.asrText,
         status: "completed",
         mode,
+        networkMode,
         rawPayload: dto as any,
         spokeAt: sourceOccurredAt,
       },
+    });
+    await this.conversationNetwork.recordTurn({
+      deviceId: device.deviceId,
+      networkMode,
+      spokeAt: sourceOccurredAt,
     });
 
     // 长期记忆异步提取，不阻塞 filler 首音；失败只影响记忆写入。
@@ -587,7 +597,7 @@ export class VendorService {
    * 供家长端后续做敏感事件时间线与告警。
    */
   private async sendSafetyReply(
-    device: { id: string; deviceId: string },
+    device: { id: string; deviceId: string; networkType?: string | null },
     verdict: SafetyVerdict & { category: BlockedSafetyCategory },
     asrText: string,
     // 由 handleTextIn 传入轮次 ID，与 L2 安全日志同轮；缺省自动生成（超时监听器等无轮次场景）
@@ -633,6 +643,8 @@ export class VendorService {
     // 话术已经通过 chunk 发出去了，落库只是审计与家长端时间线的素材。
     // 写库失败绝不能让整轮回复失败——那是把「审计缺失」升级成「孩子沉默」。
     try {
+      const spokeAt = new Date();
+      const networkMode = normalizeConversationNetworkMode(device.networkType);
       await this.prisma.message.create({
         data: {
           deviceId: device.id,
@@ -641,9 +653,15 @@ export class VendorService {
           content: asrText,
           status: "completed",
           mode: "free_chat",
+          networkMode,
           rawPayload: { asrText },
-          spokeAt: new Date(),
+          spokeAt,
         },
+      });
+      await this.conversationNetwork.recordTurn({
+        deviceId: device.deviceId,
+        networkMode,
+        spokeAt,
       });
       await this.prisma.message.create({
         data: {
@@ -688,7 +706,7 @@ export class VendorService {
    * rawPayload.sleepConfig 记录实际修改的字段，供家长端审计。
    */
   private async sendSleepConfigReply(
-    device: { id: string; deviceId: string },
+    device: { id: string; deviceId: string; networkType?: string | null },
     asrText: string,
     turnId: string = randomUUID(),
   ): Promise<VendorTextOutDto> {
@@ -730,6 +748,8 @@ export class VendorService {
       );
     }
 
+    const spokeAt = new Date();
+    const networkMode = normalizeConversationNetworkMode(device.networkType);
     await this.prisma.message.create({
       data: {
         deviceId: device.id,
@@ -738,9 +758,15 @@ export class VendorService {
         content: asrText,
         status: "completed",
         mode: "free_chat",
+        networkMode,
         rawPayload: { asrText },
-        spokeAt: new Date(),
+        spokeAt,
       },
+    });
+    await this.conversationNetwork.recordTurn({
+      deviceId: device.deviceId,
+      networkMode,
+      spokeAt,
     });
     await this.prisma.message.create({
       data: {
@@ -776,7 +802,7 @@ export class VendorService {
    * 逐次 await 对端 ack，最后显式收尾并发送全量兜底。
    */
   private async sendAdventureReply(
-    device: { id: string; deviceId: string },
+    device: { id: string; deviceId: string; networkType?: string | null },
     adventureReply: AdventureReply,
     asrText?: string,
     turnId: string = randomUUID(),
@@ -794,6 +820,10 @@ export class VendorService {
       // best-effort：这次 create 发生在任何 chunk 之前，抛错就等于整轮静音，
       // 而段落内容此时已经由引擎生成好了，没有理由因为它播不出去。
       try {
+        const spokeAt = new Date();
+        const networkMode = normalizeConversationNetworkMode(
+          device.networkType,
+        );
         const msg = await this.prisma.message.create({
           data: {
             deviceId: device.id,
@@ -802,11 +832,17 @@ export class VendorService {
             content: asrText,
             status: "completed",
             mode: "adventure_story",
+            networkMode,
             rawPayload: { asrText },
-            spokeAt: new Date(),
+            spokeAt,
           },
         });
         userMessageId = msg.id;
+        await this.conversationNetwork.recordTurn({
+          deviceId: device.deviceId,
+          networkMode,
+          spokeAt,
+        });
       } catch (error) {
         this.logger.error(
           `Failed to persist adventure user message for deviceId=${device.deviceId}: ${this.describeError(error)}`,

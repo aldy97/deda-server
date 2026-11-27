@@ -96,6 +96,25 @@ export class UsersService {
     return { phone: "mock-phone" };
   }
 
+  /**
+   * 家长手机品牌上报：只更新 users.phoneBrand / phoneBrandReportedAt 两列。
+   * 空品牌不写库，避免客户端读取失败时覆盖旧值；用户不存在时 updateMany 返回 0。
+   */
+  async reportClientInfo(
+    userId: string,
+    dto: { brand?: string },
+  ): Promise<{ success: boolean; skipped: boolean }> {
+    const brand = (dto.brand ?? "").trim();
+    if (!brand) {
+      return { success: true, skipped: true };
+    }
+    const result = await this.prisma.user.updateMany({
+      where: { id: userId },
+      data: { phoneBrand: brand, phoneBrandReportedAt: new Date() },
+    });
+    return { success: true, skipped: result.count === 0 };
+  }
+
   async getProfile(userId: string) {
     return this.prisma.user.findUnique({
       where: { id: userId },

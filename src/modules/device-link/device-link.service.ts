@@ -8,6 +8,7 @@ import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { DevicePresenceService } from "./device-presence.service";
+import { DeviceNetworkAggregationService } from "./device-network-aggregation.service";
 import {
   LOGIN_MAC_TOPIC,
   DEVICE_UP_TOPIC_PATTERN,
@@ -47,6 +48,7 @@ export class DeviceLinkService implements OnModuleInit {
     private readonly redisService: RedisService,
     private readonly prisma: PrismaService,
     private readonly presence: DevicePresenceService,
+    private readonly networkAggregation: DeviceNetworkAggregationService,
   ) {}
 
   onModuleInit(): void {
@@ -294,6 +296,9 @@ export class DeviceLinkService implements OnModuleInit {
     const networkMode = this.resolveNetworkMode(
       (data as { networkMode?: unknown }).networkMode,
     );
+    if (networkMode !== undefined) {
+      this.networkAggregation.record(mac, networkMode, new Date());
+    }
     const wifiRssi = this.resolveWifiRssi(
       (data as { wifiRssi?: unknown }).wifiRssi,
       networkMode === undefined ? current.networkMode : networkMode,

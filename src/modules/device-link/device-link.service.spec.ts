@@ -2,6 +2,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { BadRequestException, Logger } from "@nestjs/common";
 import { DeviceLinkService } from "./device-link.service";
 import { DevicePresenceService } from "./device-presence.service";
+import { DeviceNetworkAggregationService } from "./device-network-aggregation.service";
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -17,6 +18,7 @@ describe("DeviceLinkService", () => {
   let mqttService: any;
   let redisService: any;
   let prisma: any;
+  let networkAggregation: any;
   let module: TestingModule;
 
   beforeEach(async () => {
@@ -55,6 +57,10 @@ describe("DeviceLinkService", () => {
             flush: jest.fn().mockResolvedValue(undefined),
           },
         },
+        {
+          provide: DeviceNetworkAggregationService,
+          useValue: { record: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -62,6 +68,7 @@ describe("DeviceLinkService", () => {
     mqttService = module.get(MqttService);
     redisService = module.get(RedisService);
     prisma = module.get(PrismaService);
+    networkAggregation = module.get(DeviceNetworkAggregationService);
   });
 
   it("should be defined", () => {
@@ -394,6 +401,29 @@ describe("DeviceLinkService", () => {
         },
         data: { networkType: "WiFi" },
       });
+    });
+
+    it("心跳网络模式旁路写入设备网络日聚合；老固件缺省不记", async () => {
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({ networkMode: "wifi", wifiRssi: -50 }),
+      );
+      await flushPromises();
+
+      expect(networkAggregation.record).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        "wifi",
+        expect.any(Date),
+      );
+
+      networkAggregation.record.mockClear();
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({ battery: 90, volume: 70 }),
+      );
+      await flushPromises();
+
+      expect(networkAggregation.record).not.toHaveBeenCalled();
     });
 
     it("4G 模式：清空上一次的 wifiRssi 并同步 networkType=4G", async () => {

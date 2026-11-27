@@ -19,6 +19,7 @@ import { SleepModeService } from "@/modules/sleep-configs/sleep-mode.service";
 import { ADVENTURE_DEGRADED_REPLIES } from "@/modules/adventure/adventure.constants";
 import { PROMPT_REGISTRY_PROVIDER } from "@/modules/prompt-registry/prompt-registry.testing";
 import { FILLER_POOLS } from "@/modules/llm/filler-bank";
+import { ConversationNetworkAggregator } from "@/modules/conversation-network/conversation-network-aggregator.service";
 
 function expectBankReply(
   responseText: string,
@@ -58,6 +59,7 @@ describe("VendorService", () => {
   };
   let sleepVoiceConfigService: { handle: jest.Mock };
   let sleepMode: { enter: jest.Mock; exit: jest.Mock };
+  let conversationNetwork: { recordTurn: jest.Mock };
 
   async function* streamOf(
     deltas: string[],
@@ -97,6 +99,9 @@ describe("VendorService", () => {
 
   beforeEach(async () => {
     sleepMode = { enter: jest.fn(), exit: jest.fn() };
+    conversationNetwork = {
+      recordTurn: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PROMPT_REGISTRY_PROVIDER,
@@ -198,6 +203,10 @@ describe("VendorService", () => {
           },
         },
         { provide: SleepModeService, useValue: sleepMode },
+        {
+          provide: ConversationNetworkAggregator,
+          useValue: conversationNetwork,
+        },
       ],
     }).compile();
 
@@ -297,6 +306,7 @@ describe("VendorService", () => {
       prisma.device.create.mockResolvedValue({
         id: "uuid-001",
         deviceId: "dev-001",
+        networkType: "WiFi",
       } as any);
       prisma.deviceConfig.findFirst.mockResolvedValue({
         mode: "free_chat",
@@ -334,8 +344,14 @@ describe("VendorService", () => {
           turnId: expect.any(String),
           status: "completed",
           mode: "free_chat",
+          networkMode: "wifi",
         }),
       );
+      expect(conversationNetwork.recordTurn).toHaveBeenCalledWith({
+        deviceId: "dev-001",
+        networkMode: "wifi",
+        spokeAt: expect.any(Date),
+      });
       expect(userCall[0].data).not.toHaveProperty("textbookId");
       expect(userCall[0].data).not.toHaveProperty("unitId");
       // 落库为用户实际播报全文：模板池 filler + 大模型答案

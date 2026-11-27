@@ -3,6 +3,7 @@ import { MqttModule } from "@/common/mqtt/mqtt.module";
 import { RedisModule } from "@/common/redis/redis.module";
 import { DeviceLinkService } from "./device-link.service";
 import { DevicePresenceService } from "./device-presence.service";
+import { DeviceNetworkAggregationService } from "./device-network-aggregation.service";
 
 /**
  * 设备链路模块（机芯厂新 MQTT 三主题协议）
@@ -12,7 +13,11 @@ import { DevicePresenceService } from "./device-presence.service";
  */
 @Module({
   imports: [MqttModule, RedisModule],
-  providers: [DeviceLinkService, DevicePresenceService],
-  exports: [DeviceLinkService],
+  providers: [
+    DeviceLinkService,
+    DevicePresenceService,
+    DeviceNetworkAggregationService,
+  ],
+  exports: [DeviceLinkService, DeviceNetworkAggregationService],
 })
 export class DeviceLinkModule {}
