@@ -518,10 +518,11 @@ describe("Analytics fleet (e2e)", () => {
       expect(data.wifiName).toBe("HomeWiFi");
       expect(Array.isArray(data.boundUsers)).toBe(true);
       expect(data.boundUsers.length).toBe(1);
-      // boundUsers 只暴露 userId + isOwner + boundAt，不得夹带任何 PII
+      // boundUsers 只暴露 userId + isOwner + boundAt + phoneMaker，不得夹带任何 PII
       expect(Object.keys(data.boundUsers[0]).sort()).toEqual([
         "boundAt",
         "isOwner",
+        "phoneMaker",
         "userId",
       ]);
       expect(Array.isArray(data.presence)).toBe(true);

@@ -1482,6 +1482,14 @@ describe("FleetService.getDeviceDetail", () => {
           userId: "user-uuid-1",
           isOwner: true,
           createdAt: spokeAtOn("2026-11-01"),
+          user: { phoneBrand: "Apple" },
+        },
+        {
+          deviceId: "aa0000000001",
+          userId: "user-uuid-2",
+          isOwner: false,
+          createdAt: spokeAtOn("2026-11-02"),
+          user: { phoneBrand: null },
         },
       ],
       messages: [
@@ -1543,11 +1551,18 @@ describe("FleetService.getDeviceDetail", () => {
       charging: false,
       lastSeenAt: expect.any(Number),
     });
-    expect(result.boundUsers).toHaveLength(1);
+    expect(result.boundUsers).toHaveLength(2);
     expect(result.boundUsers[0]).toEqual({
       userId: "user-uuid-1",
       isOwner: true,
       boundAt: expect.any(String),
+      phoneMaker: "Apple",
+    });
+    expect(result.boundUsers[1]).toEqual({
+      userId: "user-uuid-2",
+      isOwner: false,
+      boundAt: expect.any(String),
+      phoneMaker: null,
     });
     expect(result.presence).toHaveLength(1);
     expect(result.presence[0]).toEqual({

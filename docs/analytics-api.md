@@ -558,11 +558,13 @@ GET /analytics/fleet/devices?keyword=&page=1&pageSize=20
 GET /analytics/fleet/devices/:deviceId?days=30
 → { deviceId, deviceUuid, characterKey, deviceCode, firmwareVersion,
     macAddress, wifiName, ipAddress, networkType, timezone, createdAt,
-    realtime, boundUsers: [{ userId, isOwner, boundAt }],
+    realtime, boundUsers: [{ userId, isOwner, boundAt, phoneMaker }],
     presence: [{ date, reportCount, firstSeenAt, lastSeenAt }],
     dailyTurns: [{ date, turns }],
     totals: { presenceDays, turns } }
    // days 范围 1–90；404 on missing；boundUsers 不含 PII
+   // phoneMaker：绑定账号上报的手机品牌归一化后的厂商展示名（如 Apple / 华为 / 小米），
+   //   与 /analytics/users/phone-brands 同一套 resolvePhoneMaker；未上报或无法识别 → null
 
 GET /analytics/fleet/devices/:deviceId/child-profile
 → { profile: { name, birthday, englishName, gender } | null }
