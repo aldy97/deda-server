@@ -17,6 +17,8 @@ import { EngagementController } from "./engagement.controller";
 import { EngagementService } from "./engagement.service";
 import { UsersAnalyticsController } from "./users-analytics.controller";
 import { UsersAnalyticsService } from "./users-analytics.service";
+import { ParentsAnalyticsController } from "./parents-analytics.controller";
+import { ParentsAnalyticsService } from "./parents-analytics.service";
 import {
   ContentController,
   QualityController,
@@ -66,6 +68,7 @@ import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
     RetentionController,
     EngagementController,
     UsersAnalyticsController,
+    ParentsAnalyticsController,
     ContentController,
     QualityController,
     FeedbackAnalyticsController,
@@ -100,6 +103,7 @@ import { BaiduAgentModule } from "../baidu-agent/baidu-agent.module";
     RetentionService,
     EngagementService,
     UsersAnalyticsService,
+    ParentsAnalyticsService,
     ContentService,
     QualityService,
     FeedbackAnalyticsService,

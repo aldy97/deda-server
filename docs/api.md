@@ -42,6 +42,42 @@
 
 ---
 
+## 1.2 家长档案（小程序「我的」页）
+
+`GET /users/profile` · 需用户 JWT
+
+成功：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "id": "uuid",
+    "nickname": "熊熊妈妈",
+    "phone": null,
+    "createdAt": "2026-11-01T02:00:00.000Z",
+    "deviceCount": 2,
+    "childCount": 2
+  }
+}
+```
+
+- `nickname` 未设置时为 `null`；`deviceCount` = 该家长绑定的设备数；
+  `childCount` = 这些绑定设备上的孩子档案数（共享设备按设备归属统计，不按档案的 userId）。
+- 不下发 `openid`。
+
+`PATCH /users/profile` · 需用户 JWT
+
+请求：`{ "nickname": "熊熊妈妈" }`
+
+- 校验：`nickname` 必填、先 trim 再校验、字符串、1–20 字；未知字段（含 `avatarUrl`）
+  因全局 `whitelist + forbidNonWhitelisted` 直接 400。
+- 成功：`data` 与 `GET /users/profile` **完全同形状**（写库后即回读最新档案）。
+- 本期只读写昵称：**家长不支持自定义头像，`avatarUrl` 暂不使用**（列保留不写）；
+  手机号绑定本期不做，`POST /users/phone` 行为不变。
+
+---
+
 ## 2. 设备列表 / 绑定 / 解绑
 
 - `GET /devices` → `Device[]`

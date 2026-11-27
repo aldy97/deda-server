@@ -138,7 +138,9 @@ GET /analytics/engagement/feature-adoption?date=
 
 ```
 GET /analytics/users/summary?startDate=&endDate=   (范围同时提供才返回 newUsersInRange，否则 null)
-→ { totalUsers, newUsersInRange, usersWithBoundDevice, avgDevicesPerUser, multiChildFamilies }
+→ { totalUsers, newUsersInRange, usersWithBoundDevice, avgDevicesPerUser, multiChildFamilies,
+    multiDeviceFamilies }
+   // multiDeviceFamilies = 绑定设备数 ≥2 的家长数（复用 summary 已查出的 bindings 分组统计）
 
 GET /analytics/users/demographics
 → { ageDistribution: [{ range: "0-3|3-6|6-9|9+|unknown", devices }],
@@ -155,9 +157,26 @@ GET /analytics/users/phone-brands
    // realme 单列；未识别品牌归 other；空/devtools 计入 unknownUsers。
    // shareOfReported 分母 = reportedUsers；shareOfTotal 分母 = totalUsers；
    // 只出聚合计数，不出 userId / openid / 手机号。
+
+GET /analytics/parents/:userId
+→ { user: { id, nickname, phone, registeredAt, phoneMaker },
+    summary: { deviceCount, childCount, feedbackCount },
+    devices: [{ deviceId, deviceCode, characterKey, firmwareVersion, networkType,
+                isOwner, boundAt, boundUserCount, lastPresenceDate,
+                childProfile: { name, englishName, gender, birthday } | null }] }
+   // 家长视角详情，dashboard 用户详情页用；家长不存在 → 404。
+   // user.phoneMaker = users.phoneBrand 归一化后的厂商展示名（Apple / 华为…），
+   // 与 phone-brands、设备详情 boundUsers 同一口径；未上报/无法识别 → null。
+   // devices 排序：binding.sortOrder asc, binding.createdAt asc。
+   // boundUserCount = 该设备上的绑定总数（>1 即共享设备）。
+   // lastPresenceDate = device_presence_daily 里该设备 max(date)，无记录 → null。
+   // childCount = 有 childProfile 的设备数（与 summary 同口径）；
+   // feedbackCount = feedback 表按 userId 计数。
 ```
 
 - PII 红线：只出年龄段与计数，不出姓名、生日、openid。
+- 家长视角（`GET /analytics/parents/:userId`）是**按 userId 精确取单条**的 PII 面
+  （昵称/手机号），不得出现在列表/搜索/聚合/导出接口；`openid` 永不下发。
 
 ## 内容与质量（P6）
 

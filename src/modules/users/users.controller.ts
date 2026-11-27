@@ -12,6 +12,7 @@ import { Request } from "express";
 import { UsersService, WechatLoginDto } from "./users.service";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { ReportClientInfoDto } from "./dto/report-client-info.dto";
+import { UpdateProfileDto } from "./dto/update-profile.dto";
 
 interface RequestWithUser extends Request {
   user: { userId: string; openid: string };
@@ -54,7 +55,10 @@ export class UsersController {
   @Patch("profile")
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  async updateProfile(@Body() dto: any, @Req() req: RequestWithUser) {
+  async updateProfile(
+    @Body() dto: UpdateProfileDto,
+    @Req() req: RequestWithUser,
+  ) {
     return this.usersService.updateProfile(req.user.userId, dto);
   }
 }

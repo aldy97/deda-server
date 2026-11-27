@@ -73,6 +73,21 @@ export class UsersAnalyticsService {
       (group) => group._count._all >= 2,
     ).length;
 
+    // 复用上面已查出的 bindings 按家长分组去重设备，不再额外查全表
+    const devicesByUser = new Map<string, Set<string>>();
+    for (const binding of bindings) {
+      let devices = devicesByUser.get(binding.userId);
+      if (!devices) {
+        devices = new Set<string>();
+        devicesByUser.set(binding.userId, devices);
+      }
+      devices.add(binding.deviceId);
+    }
+    let multiDeviceFamilies = 0;
+    for (const devices of devicesByUser.values()) {
+      if (devices.size >= 2) multiDeviceFamilies += 1;
+    }
+
     return {
       totalUsers,
       newUsersInRange,
@@ -82,6 +97,7 @@ export class UsersAnalyticsService {
           ? Math.round((bindings.length / usersWithBoundDevice) * 100) / 100
           : 0,
       multiChildFamilies,
+      multiDeviceFamilies,
     };
   }
 
