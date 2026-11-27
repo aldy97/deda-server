@@ -113,7 +113,7 @@
 
 - 结构化 warn 日志：`Sleep content degraded: contentType=song served=story ...`。
 - 本轮 assistant 的 `Message.rawPayload.sleepContentDegraded = { requested, served, reason }`
-  （JSON 列，无需 migration）；未降级时该键不存在，`filler` / `answer` 两个既有键不变。
+  （JSON 列，无需 migration）；未降级时该键不存在；`filler` / `answer` 两个既有键保留，filler 下线后 `filler` 恒为 null。
 
 目的是避免「配置项看起来永远已生效」——否则没人会发现儿歌其实一次都没播过。
 
@@ -137,12 +137,12 @@
 - 哄睡 prompt 要求平静、缓慢，不提问、不邀请互动，并逐渐安静收尾。
 - 分类器 prompt 显式覆盖困意语义（状态陈述、第三人称、撒娇式说法均算 `sleep_story`），
   并声明「是否真的进入哄睡由服务端时段门禁决定」——时段判断留在确定性代码里，不交给模型。
-- 长期记忆只注入真正的 `free_chat` 主回答，不注入 filler、故事或哄睡回答。
+- 长期记忆只注入真正的 `free_chat` 主回答，不注入故事或哄睡回答（filler 已下线）。
   注意：被时段门禁降级的轮次意图就是 `free_chat`，因此**会**注入长期记忆，
   这正好让主模型能结合孩子作息自然共情回应。
-- 消息落库继续使用现有 `Message.mode` 和 filler／answer 边界，不改变表结构；
+- 消息落库继续使用现有 `Message.mode` 和 `rawPayload.answer`；filler 已于 2026-11 下线，`rawPayload.filler` 恒为 null，表结构不变；
   哄睡内容降级证据挂在同一条 assistant 的 `rawPayload` 上（见「哄睡内容降级」）。
 
 ## 流式兼容性
 
-统一路由只决定本轮使用哪种对话模式，不改变既有 WS payload、chunk、`seq`、ack、全量兜底或 TTS 上传顺序。filler 仍全部先于 answer 上传，且每条 chunk 按顺序等待 ack。
+统一路由只决定本轮使用哪种对话模式，不改变既有 WS payload、chunk、`seq`、ack、全量兜底或 TTS 上传顺序。live 链路已无 filler，answer 从 `seq=0` 开始；vendor 备选链路仍保留 filler 且每条 chunk 按顺序等待 ack。

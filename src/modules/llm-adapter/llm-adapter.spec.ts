@@ -11,7 +11,6 @@ import {
   ChatCompletionRequest,
 } from "./dto/chat-completion.dto";
 import { LlmService, LlmUpstreamError } from "@/modules/llm/llm.service";
-import { FILLER_POOLS } from "@/modules/llm/filler-bank";
 import { ChildSafetyService } from "@/modules/vendor/child-safety.service";
 import { ChildMemoriesService } from "@/modules/child-memories/child-memories.service";
 import { ConversationSessionService } from "@/modules/vendor/conversation-session.service";
@@ -36,8 +35,6 @@ describe("LlmAdapterModule", () => {
   let controller: LlmAdapterController;
   let llm: {
     buildEnglishTutorPrompt: jest.Mock;
-    buildFillerPrompt: jest.Mock;
-    buildFillerHandoffMessage: jest.Mock;
     complete: jest.Mock;
     completeStream: jest.Mock;
     smallModelName: string;
@@ -93,13 +90,6 @@ describe("LlmAdapterModule", () => {
         { role: "system", content: "built-system" },
         { role: "user", content: asrText },
       ]),
-      buildFillerPrompt: jest
-        .fn()
-        .mockReturnValue([{ role: "system", content: "filler-sys" }]),
-      buildFillerHandoffMessage: jest.fn((text: string) => ({
-        role: "system",
-        content: `handoff:${text}`,
-      })),
       complete: jest.fn().mockResolvedValue({ text: "嗯——" }),
       completeStream: jest.fn(),
       smallModelName: "small-model",
@@ -739,223 +729,32 @@ describe("LlmAdapterModule", () => {
       );
     });
 
-    const enableFiller = () =>
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
-
     const mainCalls = () =>
       llm.completeStream.mock.calls.filter(
         (call: Array<{ scene: string }>) => call[0].scene === "chat_main",
       );
 
-    it("模板池 filler 先行播出，原文经 handoff 注入主模型，落库边界带来源", async () => {
-      enableFiller();
+    it("无 filler：首 chunk 即主模型输出，rawPayload 只含 answer", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       llm.completeStream.mockReturnValue(makeStream(["正式", "答案"])());
 
       const chunks = await collect(service.streamReply(boundRequest));
 
-      expect(chunks).toHaveLength(3);
-      expect(chunks.slice(1)).toEqual(["正式", "答案"]);
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
+      expect(chunks).toEqual(["正式", "答案"]);
       expect(llm.completeStream).toHaveBeenCalledTimes(1);
-      expect(llm.completeStream.mock.calls[0][0].scene).toBe("chat_main");
-      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
-
-      const mainMessages = mainCalls()[0][0].messages;
-      expect(mainMessages[mainMessages.length - 2]).toEqual({
-        role: "system",
-        content: `handoff:${chunks[0]}`,
-      });
-
+      const mainMessages = mainCalls()[0][0].messages as Array<{
+        role: string;
+        content: string;
+      }>;
+      expect(
+        mainMessages.some((message) => message.content.startsWith("handoff:")),
+      ).toBe(false);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.rawPayload).toEqual({
-        filler: chunks[0],
+        filler: null,
         answer: "正式答案",
-        fillerSource: "bank",
-        fillerBucket: "neutral",
-        fillerEmotion: "neutral",
       });
-      expect(assistantCall.data.content).toBe(`${chunks[0]}\n正式答案`);
-    });
-
-    it("连续两轮 filler 不同，且开头不撞", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      const recentRows: Array<{ rawPayload: { filler: string } }> = [];
-      prisma.message.findMany.mockImplementation(
-        (args: { where?: { role?: string } }) =>
-          args?.where?.role === "assistant"
-            ? Promise.resolve(recentRows)
-            : Promise.resolve([]),
-      );
-      llm.completeStream.mockReturnValue(makeStream(["答一"])());
-      const first = (await collect(service.streamReply(boundRequest)))[0];
-      recentRows.push({ rawPayload: { filler: first } });
-      llm.completeStream.mockReturnValue(makeStream(["答二"])());
-      const second = (await collect(service.streamReply(boundRequest)))[0];
-
-      expect(second).not.toBe(first);
-      const opener = (text: string) =>
-        text.replace(/[\s\p{P}\p{S}]/gu, "").slice(0, 4);
-      expect(opener(second)).not.toBe(opener(first));
-    });
-
-    it("LLM_ADAPTER_FILLER=false 时完全无 filler", async () => {
-      configGet.mockImplementation((key: string) => {
-        if (key === "LLM_ADAPTER_API_KEY") return VALID_TOKEN;
-        if (key === "LLM_ADAPTER_FILLER") return "false";
-        return undefined;
-      });
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
-
-      const chunks = await collect(service.streamReply(boundRequest));
-
-      expect(chunks).toEqual(["答"]);
-      expect(llm.completeStream).toHaveBeenCalledTimes(1);
-    });
-
-    it("最近 10 轮用过的 filler 不会再次出现", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      const recentRows = FILLER_POOLS.neutral.slice(0, 10).map((filler) => ({
-        rawPayload: { filler },
-      }));
-      prisma.message.findMany.mockImplementation(
-        (args: { where?: { role?: string } }) =>
-          args?.where?.role === "assistant"
-            ? Promise.resolve(recentRows)
-            : Promise.resolve([]),
-      );
-      llm.completeStream.mockReturnValue(makeStream(["答"])());
-
-      const chunks = await collect(service.streamReply(boundRequest));
-
-      expect(FILLER_POOLS.neutral.slice(0, 10)).not.toContain(chunks[0]);
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-    });
-
-    it("身份问句走 identity 桶，不调用小模型", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockReturnValue(makeStream(["我叫 Elly 呀"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "你叫什么名字？" }],
-      };
-
-      const chunks = await collect(service.streamReply(req));
-
-      expect(FILLER_POOLS.identity).toContain(chunks[0]);
-      expect(llm.completeStream).toHaveBeenCalledTimes(1);
-      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
-    });
-
-    it("intent 小模型给的情绪标签会传给 filler 选桶", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_chat",
-        source: "model",
-        emotion: "sad",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["我陪着你"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "我没事" }],
-      };
-
-      const chunks = await collect(service.streamReply(req));
-
-      expect(FILLER_POOLS.comfort).toContain(chunks[0]);
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload).toMatchObject({
-        fillerBucket: "comfort",
-        fillerEmotion: "sad",
-      });
-    });
-
-    it("停止轮走 stop 桶、情绪归 neutral，handoff 带 stop 动作", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_chat",
-        source: "model",
-        emotion: "sad",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["那我们就不听啦"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "我不要听了" }],
-      };
-
-      const chunks = await collect(service.streamReply(req));
-
-      expect(FILLER_POOLS.stop).toContain(chunks[0]);
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload).toMatchObject({
-        fillerBucket: "stop",
-        fillerEmotion: "neutral",
-      });
-      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("stop");
-    });
-
-    it("故事轮走重写后的 story 桶，handoff 带 story_tell", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_story",
-        source: "model",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["小河水往前流"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "给我讲个故事" }],
-      };
-
-      const chunks = await collect(service.streamReply(req));
-
-      expect(FILLER_POOLS.story).toContain(chunks[0]);
-      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("story_tell");
-    });
-
-    it("继续轮走 continue 桶，handoff 带 continue 动作", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "free_chat",
-        source: "continuation",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["接着往下讲"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "继续" }],
-      };
-
-      const chunks = await collect(service.streamReply(req));
-
-      expect(FILLER_POOLS.continue).toContain(chunks[0]);
-      expect(llm.buildFillerHandoffMessage.mock.calls[0][2]).toBe("continue");
-    });
-
-    it("主模型失败时 filler 已播，仍走兜底文案", async () => {
-      enableFiller();
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockImplementation(() =>
-        (async function* () {
-          throw new Error("down");
-        })(),
-      );
-
-      const chunks = await collect(service.streamReply(boundRequest));
-
-      expect(chunks).toHaveLength(2);
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-      expect(chunks[1]).toContain("走神");
-      const assistantCall = prisma.message.create.mock.calls[1][0];
-      expect(assistantCall.data.rawPayload.filler).toBe(chunks[0]);
+      expect(assistantCall.data.content).toBe("正式答案");
     });
 
     it("never touches the adventure engine when anonymous", async () => {
@@ -986,22 +785,13 @@ describe("LlmAdapterModule", () => {
       (async function* () {
         throw error;
       })();
-    const enableFiller = () =>
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
-
     const collect = async (gen: AsyncGenerator<string>): Promise<string[]> => {
       const out: string[] = [];
       for await (const c of gen) out.push(c);
       return out;
     };
 
-    it("filler 已播但主模型零输出失败时仍播兜底话术，不让孩子面对沉默", async () => {
-      // 实机事故（2026-11-10 成语故事模式「甲醇盆」）：filler 433ms 已播出，
-      // 主模型 10.7s 后 socket 断流零输出。旧条件 !answerText && !fillerText
-      // 不兜底，孩子听完半句 filler 后死寂
-      enableFiller();
+    it("主模型零输出失败时播兜底话术，不让孩子面对沉默", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       llm.completeStream.mockReturnValue(
         failingStream(
@@ -1013,30 +803,13 @@ describe("LlmAdapterModule", () => {
         ),
       );
       const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toHaveLength(2);
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-      expect(chunks[1]).toBe(FALLBACK);
+      expect(chunks).toEqual([FALLBACK]);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.status).toBe("failed");
       expect(assistantCall.data.rawPayload).toMatchObject({
-        filler: chunks[0],
+        filler: null,
         answer: FALLBACK,
       });
-    });
-
-    it("filler 未播且主模型零输出失败时播兜底话术", async () => {
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      llm.completeStream.mockReturnValue(
-        failingStream(
-          new LlmUpstreamError(
-            "upstream_error",
-            "HTTP 400: bad request",
-            false,
-          ),
-        ),
-      );
-      const chunks = await collect(service.streamReply(boundRequest));
-      expect(chunks).toEqual([FALLBACK]);
     });
 
     it("主模型说出残句后断流时不播兜底、不重试，仅标 failed", async () => {
@@ -1062,8 +835,6 @@ describe("LlmAdapterModule", () => {
     });
 
     it("可重试的上游失败自动重试一次，第二次成功则整轮正常", async () => {
-      // filler 播报 2.5-3.5s 正好掩盖一次重试延迟，孩子侧无感
-      enableFiller();
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       let mainAttempts = 0;
       llm.completeStream.mockImplementation(() => {
@@ -1079,11 +850,9 @@ describe("LlmAdapterModule", () => {
           : makeStream(["正式", "答案"])();
       });
       const chunks = await collect(service.streamReply(boundRequest));
-      // 主模型初次 + 一次重试（filler 不占用 completeStream）
+      // 主模型初次 + 一次重试；重试期间是纯静音
       expect(llm.completeStream).toHaveBeenCalledTimes(2);
-      expect(chunks).toHaveLength(3);
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-      expect(chunks.slice(1)).toEqual(["正式", "答案"]);
+      expect(chunks).toEqual(["正式", "答案"]);
       const assistantCall = prisma.message.create.mock.calls[1][0];
       expect(assistantCall.data.status).toBe("completed");
     });
@@ -1588,53 +1357,7 @@ describe("LlmAdapterModule", () => {
       );
     });
 
-    it("passes adventureDeclined context to the filler when the gate blocks entry", async () => {
-      // 显式开启 filler（生产默认开，测试默认关）
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
-      prisma.device.findFirst.mockResolvedValue(deviceRow);
-      session.resolveWithSource.mockResolvedValue({
-        intent: "adventure_story",
-        source: "model",
-      });
-      adventure.isCompletedToday.mockResolvedValue(true);
-      llm.completeStream.mockReturnValue(makeStream(["今天冒险完成啦"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "继续冒险故事" }],
-      };
-      const chunks = await collect(service.streamReply(req));
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-      expect(chunks[0]).not.toContain("冒险");
-      expect(llm.completeStream).toHaveBeenCalledTimes(1);
-      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
-    });
-
-    it("filler 不读取 persona，也不会出现角色名", async () => {
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
-      prisma.device.findFirst.mockResolvedValue({
-        ...deviceRow,
-        characterKey: "polly",
-      });
-      llm.completeStream.mockReturnValue(makeStream(["画得真好"])());
-      const req: ChatCompletionRequest = {
-        ...boundRequest,
-        messages: [{ role: "user", content: "我今天画了一只小猫" }],
-      };
-      const chunks = await collect(service.streamReply(req));
-      expect(FILLER_POOLS.neutral).toContain(chunks[0]);
-      expect(chunks[0]).not.toContain("Polly");
-      expect(chunks[0]).not.toContain("Elly");
-      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
-    });
-
-    it("孩子档案（含性别）传主模型，精简摘要传 filler", async () => {
-      configGet.mockImplementation((key: string) =>
-        key === "LLM_ADAPTER_API_KEY" ? VALID_TOKEN : undefined,
-      );
+    it("孩子档案（含性别）传主模型", async () => {
       prisma.device.findFirst.mockResolvedValue(deviceRow);
       prisma.childProfile.findUnique.mockResolvedValue({
         id: "cp-1",
@@ -1650,6 +1373,7 @@ describe("LlmAdapterModule", () => {
       llm.completeStream.mockReturnValue(makeStream(["Hi Lily"])());
 
       const chunks = await collect(service.streamReply(boundRequest));
+      expect(chunks).toEqual(["Hi Lily"]);
 
       expect(llm.buildEnglishTutorPrompt).toHaveBeenCalledWith(
         expect.any(String),
@@ -1663,10 +1387,6 @@ describe("LlmAdapterModule", () => {
           },
         }),
       );
-      expect(FILLER_POOLS.en_neutral).toContain(chunks[0]);
-      expect(chunks[0]).not.toContain("Lily");
-      expect(chunks[0]).not.toContain("莉莉");
-      expect(llm.buildFillerPrompt).not.toHaveBeenCalled();
     });
 
     it("raises main-stream maxTokens to 800 for story turns", async () => {

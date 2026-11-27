@@ -998,6 +998,11 @@ export class VendorService {
 
   /**
    * 双模型流式回复（首响加速）
+   *
+   * 与 live 链路的区别（2026-11）：百度 RTC 的 `llm-adapter` 已完全移除 filler，
+   * 首声 = 主模型首 chunk；本备选链路仍保留确定性模板池 filler，仅作为备份行为。
+   * 两条链路不再保持一致，待本链路退役时一并删除 filler。
+   *
    * 1) 大模型流由后台泵并发消费、先进缓冲，不直接外发；
    * 2) 小模型 filler chunk（打哈哈首响）到达即按 seq 外发；
    * 3) filler 收尾后按到达顺序 drain 大模型缓冲，再继续转发后续 chunk；

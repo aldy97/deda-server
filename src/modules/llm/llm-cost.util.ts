@@ -1,5 +1,5 @@
 /**
- * LLM 成本计价口径（主模型 DeepSeek 估算、小模型 qwen-flash 对账用）。
+ * LLM 成本计价口径（统一 qwen-flash：按百炼牌价估算，BSS 账单为真值）。
  *
  * 定价常量刻意写在代码而非 env：口径必须可追溯，调价即升 PRICING_VERSION 并发版；
  * 已落库的 llm_usage_logs.costMicroCny 不随之变化（历史金额按当时定价冻结）。
@@ -153,7 +153,7 @@ function beijingParts(at: Date): {
   };
 }
 
-/** 账单来源判定按模型名，不用 llm_usage_logs.tier（SMALL_LLM_MODEL 缺省时 tier 会全表退化为 small） */
+/** 账单来源判定按模型名（qwen→DashScope，deepseek→官方）：账单是账户级，不能按 scene 拆。 */
 export function vendorOfModel(model: string): LlmVendor {
   const name = normalizeModel(model);
   if (name.startsWith("deepseek")) return "deepseek";

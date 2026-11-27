@@ -237,7 +237,7 @@ retire 一集时，**当天已经被分配到这一集的孩子完全不动**（
 4. 跑题引回时先接住孩子话题一句，再引回交互问题；
 5. 安全判定不在本 prompt 内：L2 明确拦截时由代码直接返回 `ADVENTURE_UNSAFE_LINE`；L2 不可用时注入谨慎指令；情绪宣泄注入共情指令。
 
-模型走 `SMALL_LLM_*`（qwen-flash）；分类失败走关键词兜底，接话失败走 `fallbackText`。
+模型走统一 `OPENAI_*`（qwen-flash）；分类失败走关键词兜底，接话失败走 `fallbackText`。
 
 ## 9. 测试覆盖与验证
 

@@ -4,7 +4,6 @@ import axios, { AxiosError } from "axios";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
-import type { FillerAct } from "@/modules/llm/filler-act";
 import {
   RawUsage,
   costMicroCnyOf,
@@ -15,6 +14,7 @@ import {
 export const LLM_SCENES = [
   "safety_l2",
   "intent_classify",
+  // 历史值：2026-11 起 live 链路不再写入，保留以兼容历史看板查询
   "filler",
   "adventure_interaction",
   "adventure_script_convert",
@@ -26,6 +26,14 @@ export const LLM_SCENES = [
 ] as const;
 
 export type LlmScene = (typeof LLM_SCENES)[number];
+
+/** tier 口径按调用角色，不按模型名：统一 qwen-flash 后模型名无法区分主/小模型。 */
+const MAIN_SCENES = new Set<LlmScene>([
+  "chat_main",
+  "parent_report",
+  "sleep_story_generate",
+  "adventure_script_convert",
+]);
 
 export type LlmFailureReason =
   | "timeout"
@@ -67,7 +75,7 @@ export interface LlmCompleteOptions {
   timeoutMs?: number;
   thinking?: { type: "disabled" };
   /**
-   * 覆盖默认模型（如小模型首响场景）。
+   * 覆盖默认模型（兼容旧调用；统一 qwen-flash 后一般不需要传）。
    * 不传则使用 OPENAI_MODEL。
    */
   model?: string;
@@ -105,25 +113,20 @@ export class LlmService {
   ) {
     this.baseUrl =
       this.configService.get<string>("OPENAI_BASE_URL") ||
-      "https://api.deepseek.com/v1";
+      "https://dashscope.aliyuncs.com/compatible-mode/v1";
     this.apiKey = this.configService.get<string>("OPENAI_API_KEY") || "";
-    this.model =
-      this.configService.get<string>("OPENAI_MODEL") || "deepseek-flash";
-    // 首响「打哈哈」小模型；未配置时回落到主模型
-    this.smallModel =
-      this.configService.get<string>("SMALL_LLM_MODEL") || this.model;
-    // 小模型独立端点与 key（如百炼 DashScope）；未配置时回落主凭证，
-    // 保证本地无小模型 key 时主链路仍可跑通
-    this.smallBaseUrl =
-      this.configService.get<string>("SMALL_LLM_BASE_URL") || this.baseUrl;
-    this.smallApiKey =
-      this.configService.get<string>("SMALL_LLM_API_KEY") || this.apiKey;
+    this.model = this.configService.get<string>("OPENAI_MODEL") || "qwen-flash";
+    // 2026-11 起统一为单模型（qwen-flash）：以下字段仅作兼容别名保留，
+    // 与主模型完全同源；待 vendor 备选链路退役后一并删除。
+    this.smallModel = this.model;
+    this.smallBaseUrl = this.baseUrl;
+    this.smallApiKey = this.apiKey;
     this.defaultTimeoutMs =
       Number(this.configService.get<string>("LLM_TIMEOUT_MS")) || 30000;
   }
 
   /**
-   * 小模型名称（首响场景使用）
+   * 兼容别名：统一模型后与主模型相同；调用点暂不改名，避免扩大 diff。
    */
   get smallModelName(): string {
     return this.smallModel;
@@ -133,13 +136,13 @@ export class LlmService {
    * 思考开关参数：百炼 qwen 系（含 qwen-flash）用 enable_thinking 控制
    * （非 OpenAI 标准字段，直接放 body）；qwen-flash 默认非思考，这里再显式
    * 关闭一次作为双保险，避免日后换成默认开思考的别名后首 token 被拖慢。
-   * 主模型、以及未配置独立小模型（回落到同一模型）时沿用 thinking: disabled。
+   * 其他供应商沿用 thinking: disabled。
    */
   private thinkingParams(
-    isSmallModel: boolean,
+    model: string,
     thinking: LlmCompleteOptions["thinking"],
   ): Record<string, unknown> {
-    if (isSmallModel && this.smallModel !== this.model) {
+    if (/^qwen/i.test(model)) {
       return { enable_thinking: false };
     }
     return { thinking: thinking ?? { type: "disabled" } };
@@ -155,11 +158,7 @@ export class LlmService {
     const apiKey = isSmallModel ? this.smallApiKey : this.apiKey;
     const startedAt = Date.now();
     if (!apiKey) {
-      this.logger.error(
-        isSmallModel
-          ? "SMALL_LLM_API_KEY is not configured"
-          : "OPENAI_API_KEY is not configured",
-      );
+      this.logger.error("OPENAI_API_KEY is not configured");
       this.logUsage({
         options,
         model,
@@ -186,7 +185,7 @@ export class LlmService {
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 512,
-          ...this.thinkingParams(isSmallModel, options.thinking),
+          ...this.thinkingParams(model, options.thinking),
         },
         {
           headers: {
@@ -248,7 +247,7 @@ export class LlmService {
    */
   async *completeStream(options: LlmCompleteOptions): AsyncGenerator<string> {
     const model = options.model ?? this.model;
-    // 小模型走独立端点与 key（如百炼 DashScope；未配置时已回落主凭证）
+    // 兼容别名：统一模型后 small* 与主模型同源，仅保留旧调用路径
     const isSmallModel = model === this.smallModel;
     const effectiveBaseUrl = isSmallModel ? this.smallBaseUrl : this.baseUrl;
     const effectiveApiKey = isSmallModel ? this.smallApiKey : this.apiKey;
@@ -262,11 +261,7 @@ export class LlmService {
 
     try {
       if (!effectiveApiKey) {
-        this.logger.error(
-          isSmallModel
-            ? "SMALL_LLM_API_KEY is not configured"
-            : "OPENAI_API_KEY is not configured",
-        );
+        this.logger.error("OPENAI_API_KEY is not configured");
         failureReason = "upstream_error";
         failureDetail = "LLM API key is not configured";
         throw new LlmUpstreamError(failureReason, failureDetail, false);
@@ -287,11 +282,10 @@ export class LlmService {
             messages: options.messages,
             temperature: options.temperature ?? 0.7,
             max_tokens: options.maxTokens ?? 512,
-            ...this.thinkingParams(isSmallModel, options.thinking),
+            ...this.thinkingParams(model, options.thinking),
             stream: true,
-            // 仅小模型（DashScope）流式需要显式开启 usage 回传；
-            // DeepSeek 主网关流式原生返回 usage，加此参数反而会 400，故不下发
-            ...(isSmallModel
+            // DashScope（qwen）流式需显式开启 usage 回传；其他供应商不下发。
+            ...(/^qwen/i.test(model)
               ? { stream_options: { include_usage: true } }
               : {}),
           },
@@ -456,7 +450,6 @@ export class LlmService {
     /** 请求发起时刻：峰谷定价按调用发生时间判定，不用写库时间 */
     at: Date;
   }): void {
-    const isSmallModel = entry.model === this.smallModel;
     // 成本快照：任何异常都吞掉并写 null，绝不让定价缺项或脏 usage 影响主链路
     let cacheHitInputTokens: number | null = null;
     let costMicroCny: number | null = null;
@@ -479,7 +472,7 @@ export class LlmService {
         data: {
           scene: entry.options.scene,
           model: entry.model,
-          tier: isSmallModel ? "small" : "main",
+          tier: MAIN_SCENES.has(entry.options.scene) ? "main" : "small",
           success: entry.success,
           failureReason: entry.failureReason,
           failureDetail: entry.failureDetail ?? null,
@@ -517,76 +510,6 @@ export class LlmService {
     elly: PROMPT_DEFAULTS.persona_elly.template,
     polly: PROMPT_DEFAULTS.persona_polly.template,
   };
-
-  /**
-   * 串行链路 handoff：filler 原文已在主模型生成前播报完毕，
-   * 产出独立 system 消息，由调用方 splice 到本轮 user 消息前注入。
-   * 注入前清洗：去换行/多余空白、截断 100 字，防模板文案污染指令位。
-   */
-  buildFillerHandoffMessage(
-    fillerText: string,
-    recentOpeners: string[] = [],
-    act?: FillerAct,
-  ): LlmMessage {
-    const sanitized = fillerText.replace(/\s+/g, " ").trim().slice(0, 100);
-    const openerList = recentOpeners.map((opener) => `「${opener}」`).join("");
-    const openerSection =
-      recentOpeners.length > 0
-        ? `\n6. 最近几轮你的开场是：${openerList}；不要再用相同开头。`
-        : "";
-
-    if (act === "stop") {
-      return {
-        role: "system",
-        content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。孩子这一轮要停止，请只做一句温和收尾：
-1. 一句以内，≤20 个中文字或 ≤12 个英文词。
-2. 不要提议新的故事、儿歌、游戏或任何新内容，不要把孩子引向下一步活动。
-3. 不要追问为什么，不要评价孩子，不要用「好问题」「真棒」。
-4. 承接语已经说完了，直接收尾，不要重复或换写它。`,
-      };
-    }
-
-    if (act === "continue") {
-      return {
-        role: "system",
-        content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。孩子要接着听，请从断开处继续：
-1. 第一句直接接上刚才的内容，不要重新开头，不要复述已经播过的句子。
-2. ≤20 个中文字或 ≤12 个英文词。
-3. 不要用「好问题」「让我想想」「你知道吗」开场。${
-          recentOpeners.length > 0
-            ? `\n最近几轮你的开场是：${openerList}；不要再用相同开头。`
-            : ""
-        }`,
-      };
-    }
-
-    return {
-      role: "system",
-      content: `孩子刚刚已经通过语音听完这句承接语：「${sanitized}」。请从它自然接续：
-1. 第一句必须是实质内容：直接回答/共情/开始故事，≤20 个中文字或 ≤12 个英文词；不要用「好问题」「让我想想」「你知道吗」「我给你讲」开场。
-2. 第一个词用具体名词或动作，不要用「呀」「嗯」「哦」等语气词，也不要以孩子的名字开头。
-3. 不要重复或换写承接语里的词、情绪或内容；不要用「真棒」「真聪明」「真温柔」评价孩子。
-4. 可以最多加一句简单的追问，但不要每轮都问，也不要把回答变成考试。
-5. 如果孩子问的是问题，第一句先回答，不要用反问。${openerSection}`,
-    };
-  }
-
-  /** 取最近若干轮主回答的开场，供 handoff 避免重复。 */
-  static extractRecentAnswerOpeners(
-    history?: Array<{ role: "user" | "assistant"; content: string }>,
-    limit = 5,
-  ): string[] {
-    if (!history) return [];
-    const openers: string[] = [];
-    for (const message of history) {
-      if (message.role !== "assistant") continue;
-      const opener = message.content
-        .replace(/[\s\p{P}\p{S}]/gu, "")
-        .slice(0, 6);
-      if (opener) openers.push(opener);
-    }
-    return openers.slice(-limit);
-  }
 
   /**
    * 构建冒险故事互动接话 prompt。
@@ -666,8 +589,8 @@ export class LlmService {
    * @param history 同设备同模式的最近对话历史
    * @param options 扩展选项：孩子档案、自由对话子模式 prompt 模板、
    * 设备角色（characterKey → 人设段落，让模型始终以该角色自居）。
-   * filler 衔接（handoff）不在此处：由 buildFillerHandoffMessage 产出
-   * 独立 system 消息，调用方贴到本轮 user 消息前注入（方案 B）。
+   * filler 已在 2026-11 完全下线：不再注入承接语 handoff，主模型直接从
+   * 历史与当前 user 消息生成回答。
    */
   buildEnglishTutorPrompt(
     asrText: string,

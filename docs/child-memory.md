@@ -53,7 +53,7 @@ MVP 不包含向量检索或通用 RAG，不保存学校、地址、电话、健
 
 ## 配置与迁移
 
-沿用现有 `SMALL_LLM_*` 配置，不新增 API key。提取使用小模型、temperature 0、最多 300 tokens、5 秒超时。
+沿用现有 `OPENAI_*`（统一 qwen-flash）配置，不新增 API key。提取使用 qwen-flash、temperature 0、最多 300 tokens、5 秒超时。
 
 迁移文件：`src/prisma/migrations/20261030074000_add_child_memories/migration.sql`。
 

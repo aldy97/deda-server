@@ -50,7 +50,7 @@ export interface SyncResult {
   syncedAt: string;
 }
 
-/** tier 按模型名判定，不用 llm_usage_logs.tier（SMALL_LLM_MODEL 缺省时该字段会整体退化） */
+/** tier 按模型名判定，不用 llm_usage_logs.tier（后者是调用角色口径） */
 export function tierOfModel(model: string): string {
   const vendor = vendorOfModel(model);
   if (vendor === "dashscope") return "small";

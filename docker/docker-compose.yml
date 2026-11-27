@@ -81,14 +81,11 @@ services:
       # [DEPRECATED 2026-11-21] 保留在白名单只为回滚：旧镜像仍从 env 取映射，
       # 删掉它会让回滚后的 getvalue 全 500。下一次发布（确认无需回滚）再删除。
       CHARACTER_TIMBRE_JSON: ${CHARACTER_TIMBRE_JSON:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.deepseek.com/v1}
+      # 统一 qwen-flash（DashScope）：主对话 / L2 / 意图 / 记忆抽取同一模型
+      LLM_PROVIDER: ${LLM_PROVIDER:-dashscope}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-flash}
-      # 首响小模型（DashScope）
-      SMALL_LLM_BASE_URL: ${SMALL_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-      SMALL_LLM_API_KEY: ${SMALL_LLM_API_KEY:-}
-      SMALL_LLM_MODEL: ${SMALL_LLM_MODEL:-qwen-flash}
+      OPENAI_MODEL: ${OPENAI_MODEL:-qwen-flash}
       LLM_STREAM_ENABLED: ${LLM_STREAM_ENABLED:-true}
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-30000}
       # 机芯厂回复上传

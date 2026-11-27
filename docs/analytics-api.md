@@ -202,7 +202,7 @@ GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
 > 闸口：`SuperAdminGuard`，整组只对 superadmin 开放（含费用同步 POST）。
 
 数据源 `llm_usage_logs`：`LlmService.complete()/completeStream()` 单点埋点（fire-and-forget，
-写库失败只记日志不影响主链路）。scene 枚举：safety_l2 / intent_classify / filler /
+写库失败只记日志不影响主链路）。scene 枚举：safety_l2 / intent_classify / filler（历史值，2026-11 下线）/
 adventure_interaction / memory_extract / sleep_config_extract / sleep_story_generate /
 chat_main / parent_report。failureReason 枚举：timeout / rate_limit / parse_error /
 upstream_error / empty_response（空响应视为失败）。
@@ -232,6 +232,8 @@ GET /analytics/llm/turn-handoff?startDate=&endDate=&gapThresholdMs=0
    // turnsMissingFiller：有 chat_main 但无 filler（filler 静默降级）的轮数，本身是待盯信号
    // turnsUnknown：两者都有但 chat_main.firstTokenMs 为 null；topGaps 按 gapMs 倒序取前 10
    // 口径警示：生成侧时刻 ≠ 设备播放侧真实死空气（filler 播放时长不在 llm_usage_logs）
+   // 2026-11 起 live 链路无 filler：新数据 turnsMissingFiller 恒等于 turnsWithChat、
+   // gap 无样本；端点保留仅供历史区间，dashboard 暂容忍数字不具业务含义。
 
 GET /analytics/llm/slow-calls?startDate=&endDate=&scene=&limit=20
 → { items: [{ id, scene, tier, model, latencyMs, firstTokenMs, totalTokens,
