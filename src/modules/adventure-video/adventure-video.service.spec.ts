@@ -66,13 +66,17 @@ function makeService(configOverrides: Partial<VideoStudioConfig> = {}) {
     adventureEpisode: { findUnique: jest.fn() },
     adventureEpisodeVersion: { findUnique: jest.fn() },
     adventureVideoVoice: { findMany: jest.fn().mockResolvedValue([]) },
+    adventureVideoAsset: { findFirst: jest.fn() },
     adventureContentAuditLog: { create: jest.fn() },
     $transaction: jest.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
   };
   const config = {
     get: jest.fn(() => buildConfig(configOverrides)),
   } as unknown as ConfigService;
-  const service = new AdventureVideoService(prisma as never, config);
+  const service = new AdventureVideoService(prisma as never, config, {
+    put: jest.fn(),
+    signedUrl: jest.fn(() => "https://oss/final.mp4?sig=1"),
+  } as never);
   return { service, prisma, config };
 }
 
@@ -244,6 +248,47 @@ describe("AdventureVideoService", () => {
     });
     await expect(service.cancel("job1", ACTOR, REASON)).rejects.toMatchObject({
       response: { code: "JOB_NOT_CANCELABLE" },
+    });
+  });
+
+  it("preview-url：没有成片返回 404，有成片返回签名地址", async () => {
+    const { service, prisma } = makeService();
+    prisma.adventureVideoJob.findUnique.mockResolvedValue({ id: "job1" });
+    prisma.adventureVideoAsset.findFirst.mockResolvedValue(null);
+    await expect(service.previewUrl("job1")).rejects.toMatchObject({
+      response: { code: "PREVIEW_NOT_READY" },
+    });
+
+    prisma.adventureVideoAsset.findFirst.mockResolvedValue({
+      objectKey: "adventure-video/final.mp4",
+    });
+    await expect(service.previewUrl("job1")).resolves.toEqual({
+      url: "https://oss/final.mp4?sig=1",
+      expiresInSec: 3600,
+    });
+  });
+
+  it("preview-url：OSS 未配置时给 503，不把底层异常裸奔出去", async () => {
+    const prisma = {
+      adventureVideoJob: {
+        findUnique: jest.fn().mockResolvedValue({ id: "job1" }),
+      },
+      adventureVideoAsset: {
+        findFirst: jest.fn().mockResolvedValue({ objectKey: "k" }),
+      },
+    };
+    const service = new AdventureVideoService(
+      prisma as never,
+      { get: jest.fn(() => buildConfig()) } as never,
+      {
+        put: jest.fn(),
+        signedUrl: jest.fn(() => {
+          throw new Error("OSS 未配置");
+        }),
+      } as never,
+    );
+    await expect(service.previewUrl("job1")).rejects.toMatchObject({
+      response: { code: "OSS_NOT_CONFIGURED" },
     });
   });
 });

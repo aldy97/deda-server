@@ -9,6 +9,8 @@ import { AxiosTransport } from "./providers/axios-transport";
 import { BailianSpeechClient } from "./providers/bailian-speech.client";
 import { BailianVideoClient } from "./providers/bailian-video.client";
 import { HTTP_TRANSPORT } from "./providers/provider.types";
+import { ASSET_STORE } from "./ports/media.ports";
+import { OssAssetStore } from "./storage/oss-asset-store";
 
 /**
  * 冒险短视频模块（S1/S3：作业生命周期 + 供应商客户端 + 队列）。
@@ -28,6 +30,8 @@ import { HTTP_TRANSPORT } from "./providers/provider.types";
     BailianVideoClient,
     BailianSpeechClient,
     { provide: HTTP_TRANSPORT, useClass: AxiosTransport },
+    OssAssetStore,
+    { provide: ASSET_STORE, useExisting: OssAssetStore },
     SuperAdminGuard,
     ContentAdminGuard,
   ],
@@ -37,6 +41,7 @@ import { HTTP_TRANSPORT } from "./providers/provider.types";
     BailianVideoClient,
     BailianSpeechClient,
     HTTP_TRANSPORT,
+    ASSET_STORE,
   ],
 })
 export class AdventureVideoModule {}

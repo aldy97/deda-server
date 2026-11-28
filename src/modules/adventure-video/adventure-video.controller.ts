@@ -85,6 +85,12 @@ export class AdventureVideoController {
     return this.service.get(jobId);
   }
 
+  @Get("jobs/:jobId/preview-url")
+  @ApiOperation({ summary: "成片播放地址（私有桶现签，1 小时有效）" })
+  previewUrl(@Param("jobId") jobId: string) {
+    return this.service.previewUrl(jobId);
+  }
+
   @Post("jobs/:jobId/retry")
   @ApiOperation({ summary: "重试失败/已取消的作业（同一行，不新建）" })
   retry(

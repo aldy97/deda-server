@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Inject,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -19,6 +20,7 @@ import {
   isSupportedResolution,
 } from "./pricing/video-pricing";
 import type { CreateVideoJobDto, VideoJobQueryDto } from "./dto/video-job.dto";
+import { ASSET_STORE, type AssetStore } from "./ports/media.ports";
 
 const TEASER_SECONDS = 60;
 const ESTIMATED_IMAGE_COUNT = 3;
@@ -73,6 +75,7 @@ export class AdventureVideoService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
+    @Inject(ASSET_STORE) private readonly store: AssetStore,
   ) {}
 
   get config(): VideoStudioConfig {
@@ -292,6 +295,47 @@ export class AdventureVideoService {
       });
     }
     return job;
+  }
+
+  /**
+   * 成片播放地址：私有桶，按需现签，不把 URL 落库。
+   * 没有成片（还在跑/失败）返回 404；OSS 未配置返回 503，前端按可操作提示展示。
+   */
+  async previewUrl(jobId: string) {
+    const job = await this.prisma.adventureVideoJob.findUnique({
+      where: { id: jobId },
+      select: { id: true },
+    });
+    if (!job) {
+      throw new NotFoundException({
+        code: "JOB_NOT_FOUND",
+        message: "作业不存在。",
+      });
+    }
+    const asset = await this.prisma.adventureVideoAsset.findFirst({
+      where: { jobId, kind: "final_video" },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!asset) {
+      throw new NotFoundException({
+        code: "PREVIEW_NOT_READY",
+        message: "还没有成片。",
+      });
+    }
+    try {
+      return {
+        url: this.store.signedUrl(asset.objectKey),
+        expiresInSec: this.config.oss.signedUrlTtlSec,
+      };
+    } catch (error) {
+      throw new ServiceUnavailableException({
+        code: "OSS_NOT_CONFIGURED",
+        message:
+          error instanceof Error
+            ? error.message
+            : "OSS 未配置，无法生成播放地址。",
+      });
+    }
   }
 
   async retry(jobId: string, actor: AuditActor, reasonInput?: string) {
