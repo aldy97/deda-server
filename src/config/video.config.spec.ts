@@ -23,7 +23,8 @@ describe("resolveVideoStudioConfig", () => {
 
   it("只有显式 true 才开启", () => {
     expect(
-      resolveVideoStudioConfig(reader({ ADVENTURE_VIDEO_ENABLED: "1" })).enabled,
+      resolveVideoStudioConfig(reader({ ADVENTURE_VIDEO_ENABLED: "1" }))
+        .enabled,
     ).toBe(false);
     expect(
       resolveVideoStudioConfig(reader({ ADVENTURE_VIDEO_ENABLED: "TRUE" }))

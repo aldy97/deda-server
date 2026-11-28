@@ -6,8 +6,9 @@ import { resolveVideoStudioConfig } from "@/config/video.config";
 jest.mock("ali-oss", () => {
   const client = {
     put: jest.fn().mockResolvedValue({ name: "k" }),
-    signatureUrl: jest.fn((key: string, options: { expires?: number }) =>
-      `https://oss/${key}?expires=${options?.expires ?? ""}`,
+    signatureUrl: jest.fn(
+      (key: string, options: { expires?: number }) =>
+        `https://oss/${key}?expires=${options?.expires ?? ""}`,
     ),
   };
   return { __esModule: true, default: jest.fn(() => client) };
