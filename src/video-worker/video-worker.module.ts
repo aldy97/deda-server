@@ -10,11 +10,7 @@ import { LlmModule } from "@/modules/llm/llm.module";
 import { AdventureVideoModule } from "@/modules/adventure-video/adventure-video.module";
 import { AdventureVideoWorkerService } from "@/modules/adventure-video/worker/adventure-video-worker.service";
 import { FfmpegMediaAssembler } from "@/modules/adventure-video/assembly/ffmpeg-media.assembler";
-import { OssAssetStore } from "@/modules/adventure-video/storage/oss-asset-store";
-import {
-  ASSET_STORE,
-  MEDIA_ASSEMBLER,
-} from "@/modules/adventure-video/ports/media.ports";
+import { MEDIA_ASSEMBLER } from "@/modules/adventure-video/ports/media.ports";
 import { VideoWorkerRunner } from "./video-worker.runner";
 
 /**
@@ -39,8 +35,6 @@ import { VideoWorkerRunner } from "./video-worker.runner";
   providers: [
     AdventureVideoWorkerService,
     FfmpegMediaAssembler,
-    OssAssetStore,
-    { provide: ASSET_STORE, useExisting: OssAssetStore },
     { provide: MEDIA_ASSEMBLER, useExisting: FfmpegMediaAssembler },
     VideoWorkerRunner,
   ],
