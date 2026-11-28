@@ -846,7 +846,7 @@ model DeviceNetworkDaily {
 // 视频作业与产物仍可追溯，删除也不会被外键挡住。
 // ---------------------------------------------------------------------------
 
-/// 一次 60 秒预告的生成作业。同一 (episodeVersionId, 参数组合) 可多次生成，
+/// 一次故事短片的生成作业。同一 (episodeVersionId, 参数组合) 可多次生成，
 /// 用 requestId 做点击幂等；重试走同一行，不新建 job。
 model AdventureVideoJob {
   id                 String    @id @default(uuid())
@@ -855,8 +855,8 @@ model AdventureVideoJob {
   businessKey        String // {characterKey}/{season}/{episodeNumber}
   contentHash        String // 发布快照的 canonical sha256，内容一变就不复用
   kind               String    @default("teaser") // teaser
-  status             String    @default("queued") // queued / running / succeeded / failed / canceled
-  stage              String    @default("queued") // queued / storyboard / voice / visual / assemble / upload / done
+  status             String    @default("queued") // queued / running / awaiting_review / succeeded / failed / canceled
+  stage              String    @default("queued") // queued / storyboard / voice / review / visual / assemble / upload / done
   aspect             String    @default("9:16")
   resolution         String    @default("720P") // 480P / 720P / 1080P
   renderer           String    @default("wan3.0-video")
@@ -864,6 +864,14 @@ model AdventureVideoJob {
   voiceSetVersion    String // 系统音色hash 或 三条复刻音色 id 的 hash
   requestId          String    @unique // 前端弹窗生成；重复点击返回同一 job
   storyboard         Json?
+  /// 分镜编辑稿版本：审核保存与并发编辑用乐观锁，不用 updatedAt（心跳也会改它）
+  storyboardRevision   Int       @default(0)
+  storyboardApprovedAt DateTime?
+  storyboardApprovedBy String?   @db.VarChar(64)
+  /// 已生成音频对应的文案指纹；改文案后必须重新配音才能审批
+  voiceTextHash        String?   @db.VarChar(64)
+  /// TTS 实测总时长（秒），审批闸口用
+  voiceTotalSec        Float?
   estimatedCostCents Int       @default(0)
   actualCostCents    Int       @default(0)
   errorCode          String?
@@ -886,7 +894,7 @@ model AdventureVideoJob {
   @@map("adventure_video_jobs")
 }
 
-/// 视频分段：60 秒预告由 1~2 段组成，每段对应一次 wan3.0 调用。
+/// 视频分段：故事短片由 1~2 段组成，每段对应一次 wan3.0 调用。
 /// prompt/seed 落库是为了「只重跑这一段」时参数可复现。
 model AdventureVideoShot {
   id             String   @id @default(uuid())

@@ -4,6 +4,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -97,3 +98,41 @@ export class VideoJobActionDto {
   @MaxLength(500)
   reason?: string;
 }
+
+/** 分镜编辑稿：只收可编辑字段，结构锁定由 service 校验并回填。 */
+export class StoryboardValidateDto {
+  @ApiProperty({
+    description:
+      "分镜编辑稿：stylePrompt + beats（文案/画面/情绪/optional 可改）",
+    type: Object,
+  })
+  @IsObject()
+  storyboard!: Record<string, unknown>;
+}
+
+export class StoryboardDraftDto extends StoryboardValidateDto {
+  @ApiProperty({ description: "客户端读到的 storyboardRevision，乐观锁" })
+  @IsInt()
+  @Min(0)
+  expectedRevision!: number;
+
+  @ApiPropertyOptional({ description: "编辑理由，可写进内容审计" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
+export class StoryboardRevoiceDto {
+  @ApiProperty({ description: "客户端读到的 storyboardRevision，乐观锁" })
+  @IsInt()
+  @Min(0)
+  expectedRevision!: number;
+
+  @ApiProperty({ description: "变更理由，至少 8 个字" })
+  @IsString()
+  @MaxLength(500)
+  reason!: string;
+}
+
+export class ApproveStoryboardDto extends StoryboardRevoiceDto {}

@@ -75,6 +75,28 @@ describe("AdventureVideoQueueService", () => {
     });
   });
 
+  it("TTS 完成后进入待审核：只认 running，写实测时长与文案指纹", async () => {
+    const { queue, prisma } = makeQueue();
+    prisma.adventureVideoJob.updateMany.mockResolvedValue({ count: 1 });
+
+    await queue.awaitReview("job1", {
+      voiceTextHash: "hash-1",
+      voiceTotalSec: 57.2,
+    });
+
+    expect(prisma.adventureVideoJob.updateMany).toHaveBeenCalledWith({
+      where: { id: "job1", status: "running" },
+      data: expect.objectContaining({
+        status: "awaiting_review",
+        stage: "review",
+        voiceTextHash: "hash-1",
+        voiceTotalSec: 57.2,
+        storyboardApprovedAt: null,
+        heartbeatAt: null,
+      }),
+    });
+  });
+
   it("超时回收：未达上限回 queued 并 attempts+1，达上限判失败", async () => {
     const { queue, prisma } = makeQueue();
     prisma.adventureVideoJob.findMany.mockResolvedValue([

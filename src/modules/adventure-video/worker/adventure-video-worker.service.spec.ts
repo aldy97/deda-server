@@ -5,6 +5,7 @@ import {
   type VideoStudioConfig,
 } from "@/config/video.config";
 import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
+import { computeVoiceTextHash } from "../storyboard/storyboard.types";
 
 const PAYLOAD = {
   title: "星星湖",
@@ -15,46 +16,29 @@ const PAYLOAD = {
   ],
 };
 
+const LONG_TEXT = "星星".repeat(33);
+
 const STORYBOARD = {
   stylePrompt: "柔和 3D 毛绒质感，暖色，儿童绘本动画",
-  beats: [
-    {
-      order: 0,
-      sourceSegmentOrders: [0],
-      speaker: "narrator",
-      text: "小象沿着湖边慢慢走。",
-      emotion: "calm",
-      characters: ["elly"],
-      shot: "远景，镜头缓慢向前推",
-      visualPrompt: "月光下的湖边，小象踩着浅水",
-      optional: false,
-    },
-    {
-      order: 1,
-      sourceSegmentOrders: [1],
-      speaker: "narrator",
-      text: "忽然，湖面上亮起一颗星星。",
-      emotion: "curious",
-      characters: ["elly"],
-      shot: "特写，小象抬头",
-      visualPrompt: "湖面亮起一颗星星",
-      optional: false,
-    },
-    {
-      order: 2,
-      sourceSegmentOrders: [2],
-      speaker: "elly",
-      text: "你愿意和我一起找星星吗？",
-      emotion: "gentle",
-      characters: ["elly"],
-      shot: "近景，小象看向镜头",
-      visualPrompt: "小象伸出鼻子，像在邀请",
-      optional: false,
-    },
-  ],
+  beats: Array.from({ length: 4 }, (_, index) => ({
+    order: index,
+    sourceSegmentOrders: [Math.min(index, 2)],
+    speaker: index === 2 ? ("elly" as const) : ("narrator" as const),
+    text: LONG_TEXT,
+    emotion:
+      index === 0
+        ? ("calm" as const)
+        : index === 2
+          ? ("gentle" as const)
+          : ("curious" as const),
+    characters: ["elly"],
+    shot: "远景，镜头缓慢向前推",
+    visualPrompt: "月光下的湖边，小象踩着浅水",
+    optional: false,
+  })),
   clips: [
     { order: 0, beats: [0, 1] },
-    { order: 1, beats: [2] },
+    { order: 1, beats: [2, 3] },
   ],
 };
 
@@ -68,17 +52,32 @@ function buildConfig() {
   };
 }
 
-function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
+interface MakeWorkerOptions {
+  approved?: boolean;
+  audioDurationSec?: number;
+  voiceTextHash?: string;
+  ttsMode?: "system" | "cloned";
+  ttsInstruction?: "on" | "off";
+}
+
+function makeWorker(options: MakeWorkerOptions = {}) {
+  const approved = options.approved === true;
+  const voiceSetVersion = "system:abc";
   const prisma = {
     adventureVideoJob: { findUnique: jest.fn(), update: jest.fn() },
     adventureEpisodeVersion: { findUnique: jest.fn() },
     adventureVideoVoice: { findMany: jest.fn().mockResolvedValue([]) },
-    adventureVideoAsset: { create: jest.fn(), createMany: jest.fn() },
+    adventureVideoAsset: {
+      create: jest.fn(),
+      createMany: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
   };
   const queue = {
     claimNext: jest.fn(),
     markStage: jest.fn(),
     heartbeat: jest.fn(),
+    awaitReview: jest.fn(),
     succeed: jest.fn(),
     fail: jest.fn(),
   };
@@ -87,10 +86,20 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
   const llm = { complete: jest.fn() };
   const promptRegistry = { render: jest.fn().mockReturnValue("DB-SYS-PROMPT") };
   const http = { post: jest.fn(), get: jest.fn(), getBuffer: jest.fn() };
-  const store = { put: jest.fn(), signedUrl: jest.fn() };
+  const store = {
+    put: jest.fn(),
+    get: jest.fn().mockResolvedValue(Buffer.from("audio-bytes")),
+    signedUrl: jest.fn(),
+  };
   const assembler = { probe: jest.fn(), assemble: jest.fn() };
   const config = {
-    get: jest.fn(() => ({ ...buildConfig(), ...configOverrides })),
+    get: jest.fn(() => ({
+      ...buildConfig(),
+      ...(options.ttsMode ? { ttsMode: options.ttsMode } : {}),
+      ...(options.ttsInstruction
+        ? { ttsInstruction: options.ttsInstruction }
+        : {}),
+    })),
   } as unknown as ConfigService;
 
   const worker = new AdventureVideoWorkerService(
@@ -106,6 +115,18 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
     config as never,
   );
 
+  const audioDurationSec = options.audioDurationSec ?? 14;
+  const audioAssets = Array.from({ length: 4 }, (_, order) => ({
+    id: `asset-${order}`,
+    jobId: "job1",
+    kind: "audio",
+    objectKey: `adventure-video/jobs/elly/1/3/hash-v1/job1/audio/beat-${order}.wav`,
+    bytes: 10,
+    durationSec: audioDurationSec,
+    sha256: "sha",
+    createdAt: new Date(2026, 0, 1, 0, 0, order),
+  }));
+
   queue.claimNext.mockResolvedValue({ id: "job1", attempts: 0 });
   prisma.adventureVideoJob.findUnique.mockResolvedValue({
     id: "job1",
@@ -117,8 +138,21 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
     resolution: "720P",
     renderer: "wan3.0-video",
     ttsMode: "system",
+    voiceSetVersion,
     status: "running",
+    storyboard: approved ? STORYBOARD : null,
+    storyboardRevision: approved ? 1 : 0,
+    storyboardApprovedAt: approved ? new Date() : null,
+    storyboardApprovedBy: approved ? "alice" : null,
+    voiceTextHash: approved
+      ? (options.voiceTextHash ??
+        computeVoiceTextHash(STORYBOARD.beats, voiceSetVersion))
+      : null,
+    voiceTotalSec: approved ? audioDurationSec * 4 : null,
   });
+  if (approved) {
+    prisma.adventureVideoAsset.findMany.mockResolvedValue(audioAssets);
+  }
   prisma.adventureEpisodeVersion.findUnique.mockResolvedValue({
     id: "v1",
     payload: PAYLOAD,
@@ -126,7 +160,7 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
   llm.complete.mockResolvedValue({ text: JSON.stringify(STORYBOARD) });
   speech.synthesize.mockResolvedValue({
     audioUrl: "https://dashscope/audio.wav",
-    characters: 12,
+    characters: LONG_TEXT.length,
   });
   http.getBuffer.mockResolvedValue(Buffer.from("audio-bytes"));
   store.put.mockImplementation(async (objectKey: string, body: Buffer) => ({
@@ -136,7 +170,7 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
   }));
   store.signedUrl.mockReturnValue("https://oss/elly.png?sig=1");
   assembler.probe.mockResolvedValue({
-    durationSec: 12,
+    durationSec: audioDurationSec,
     width: 720,
     height: 1280,
     fps: 30,
@@ -149,7 +183,7 @@ function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
   });
   assembler.assemble.mockResolvedValue({
     buffer: Buffer.from("final"),
-    durationSec: 40,
+    durationSec: 57,
     srt: "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
   });
   return {
@@ -173,7 +207,7 @@ describe("AdventureVideoWorkerService", () => {
     await expect(worker.runOnce()).resolves.toBe(false);
   });
 
-  it("跑通一条：分镜 → 3 段配音 → 2 段视频 → 合成 → 成功", async () => {
+  it("首次执行：分镜 + 4 段配音后暂停待审核，不调用视频", async () => {
     const {
       worker,
       prisma,
@@ -182,7 +216,6 @@ describe("AdventureVideoWorkerService", () => {
       speech,
       llm,
       promptRegistry,
-      store,
       assembler,
     } = makeWorker();
 
@@ -200,16 +233,40 @@ describe("AdventureVideoWorkerService", () => {
     );
     expect(prisma.adventureVideoJob.update).toHaveBeenCalledWith({
       where: { id: "job1" },
-      data: { storyboard: expect.any(Object) },
+      data: {
+        storyboard: expect.any(Object),
+        storyboardRevision: { increment: 1 },
+      },
     });
 
-    expect(speech.synthesize).toHaveBeenCalledTimes(3);
+    expect(speech.synthesize).toHaveBeenCalledTimes(4);
     expect(speech.synthesize.mock.calls[0][0]).toMatchObject({
       model: "cosyvoice-v3-flash",
       voice: "longwan_v3",
       format: "wav",
     });
+    expect(assembler.probe).toHaveBeenCalledTimes(4);
 
+    expect(queue.awaitReview).toHaveBeenCalledWith("job1", {
+      voiceTextHash: computeVoiceTextHash(STORYBOARD.beats, "system:abc"),
+      voiceTotalSec: 56,
+    });
+    expect(video.submit).not.toHaveBeenCalled();
+    expect(assembler.assemble).not.toHaveBeenCalled();
+    expect(queue.succeed).not.toHaveBeenCalled();
+    expect(queue.fail).not.toHaveBeenCalled();
+  });
+
+  it("审批后执行：跳过分镜与配音，直接出 2 段视频并合成", async () => {
+    const { worker, queue, video, speech, llm, store, assembler } = makeWorker({
+      approved: true,
+    });
+
+    await expect(worker.runOnce()).resolves.toBe(true);
+
+    expect(llm.complete).not.toHaveBeenCalled();
+    expect(speech.synthesize).not.toHaveBeenCalled();
+    expect(store.get).toHaveBeenCalledTimes(4);
     expect(video.submit).toHaveBeenCalledTimes(2);
     for (const [input] of video.submit.mock.calls) {
       expect(input.audio).toBe(false);
@@ -218,20 +275,44 @@ describe("AdventureVideoWorkerService", () => {
       expect(input.durationSec).toBeLessThanOrEqual(30);
       expect(input.referenceImageUrls).toEqual(["https://oss/elly.png?sig=1"]);
     }
-
-    expect(store.put).toHaveBeenCalled();
-    expect(assembler.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({
-        aspect: "9:16",
-        resolution: "720P",
-      }),
-    );
-    expect(assembler.assemble.mock.calls[0][0].cues).toHaveLength(3);
+    expect(assembler.assemble.mock.calls[0][0].cues).toHaveLength(4);
     expect(queue.succeed).toHaveBeenCalledWith("job1", {
       actualCostCents: expect.any(Number),
     });
     expect(queue.succeed.mock.calls[0][1].actualCostCents).toBeGreaterThan(0);
     expect(queue.fail).not.toHaveBeenCalled();
+  });
+
+  it("文案改过但音频没重配：审批后拒绝出片", async () => {
+    const { worker, queue, video } = makeWorker({
+      approved: true,
+      voiceTextHash: "stale-hash",
+    });
+
+    await worker.runOnce();
+
+    expect(queue.fail).toHaveBeenCalledWith(
+      "job1",
+      "VOICE_STALE",
+      expect.stringContaining("重新配音"),
+    );
+    expect(video.submit).not.toHaveBeenCalled();
+  });
+
+  it("实测旁白不足 54 秒：拒绝出片并落领域码", async () => {
+    const { worker, queue, video } = makeWorker({
+      approved: true,
+      audioDurationSec: 10,
+    });
+
+    await worker.runOnce();
+
+    expect(queue.fail).toHaveBeenCalledWith(
+      "job1",
+      "VOICE_TOO_SHORT",
+      expect.stringContaining("低于 54 秒"),
+    );
+    expect(video.submit).not.toHaveBeenCalled();
   });
 
   it("分镜文案含违禁词：重试一次后失败，不提交任何视频任务", async () => {
@@ -254,7 +335,7 @@ describe("AdventureVideoWorkerService", () => {
   it("system 试跑音色不下发 instruction：v3-flash 三个音色不支持，发了会被 428 拒", async () => {
     const { worker, speech } = makeWorker();
     await worker.runOnce();
-    expect(speech.synthesize).toHaveBeenCalledTimes(3);
+    expect(speech.synthesize).toHaveBeenCalledTimes(4);
     for (const [input] of speech.synthesize.mock.calls) {
       expect(input.model).toBe("cosyvoice-v3-flash");
       expect(input.instruction).toBeUndefined();
@@ -291,7 +372,7 @@ describe("AdventureVideoWorkerService", () => {
   });
 
   it("视频任务失败时落 failed，错误码透传", async () => {
-    const { worker, queue, video } = makeWorker();
+    const { worker, queue, video } = makeWorker({ approved: true });
     video.poll.mockResolvedValue({
       status: "failed",
       errorCode: "UPSTREAM_500",
@@ -306,13 +387,14 @@ describe("AdventureVideoWorkerService", () => {
 });
 
 describe("分镜系统 prompt 的代码默认值契约", () => {
-  it("完整故事导演硬规则在位（受控压缩 + 三幕闭环）", () => {
+  it("完整故事导演硬规则在位（受控压缩 + 三幕闭环 + 54–58 秒）", () => {
     const template = PROMPT_DEFAULTS.adventure_video_storyboard_system.template;
     for (const keyword of [
       "忠于原文",
       "三幕闭环",
       "最多 8 个 beat",
-      "180",
+      "54–58 秒",
+      "230–265",
       "只输出一个 JSON",
     ]) {
       expect(template).toContain(keyword);

@@ -13,8 +13,14 @@ export interface PutResult {
 
 export interface AssetStore {
   put(objectKey: string, body: Buffer, contentType: string): Promise<PutResult>;
+  /** 读回已存对象；审批后的音频复用需要它 */
+  get(objectKey: string): Promise<Buffer>;
   /** 私有桶签名 URL；同步签名，供拼 prompt 与前端播放使用 */
-  signedUrl(objectKey: string, ttlSec?: number): string;
+  signedUrl(
+    objectKey: string,
+    ttlSec?: number,
+    response?: Record<string, string>,
+  ): string;
 }
 
 export interface ProbeResult {

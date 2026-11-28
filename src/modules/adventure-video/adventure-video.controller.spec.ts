@@ -10,6 +10,13 @@ function makeController() {
     get: jest.fn(),
     retry: jest.fn(),
     cancel: jest.fn(),
+    previewUrl: jest.fn(),
+    downloadUrl: jest.fn(),
+    validateStoryboardDraft: jest.fn(),
+    saveStoryboard: jest.fn(),
+    revoiceStoryboard: jest.fn(),
+    regenerateStoryboard: jest.fn(),
+    approveStoryboard: jest.fn(),
   };
   const config = {
     get: jest.fn((key: string) =>
@@ -65,6 +72,70 @@ describe("AdventureVideoController", () => {
         { user: {} } as never,
       ),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it("分镜审核路由：validate 不传 actor，写操作都带审计身份", async () => {
+    const { controller, service } = makeController();
+    service.validateStoryboardDraft.mockResolvedValue({ ok: true });
+    service.saveStoryboard.mockResolvedValue({});
+    service.revoiceStoryboard.mockResolvedValue({});
+    service.regenerateStoryboard.mockResolvedValue({});
+    service.approveStoryboard.mockResolvedValue({});
+    service.downloadUrl.mockResolvedValue({ url: "https://oss/x" });
+
+    const storyboard = { stylePrompt: "p", beats: [] };
+    await controller.validateStoryboard("job1", { storyboard });
+    await controller.saveStoryboard(
+      "job1",
+      { storyboard, expectedRevision: 1, reason: "改文案" },
+      REQ,
+    );
+    await controller.revoiceStoryboard(
+      "job1",
+      { expectedRevision: 1, reason: "重新配音" },
+      REQ,
+    );
+    await controller.regenerateStoryboard(
+      "job1",
+      { expectedRevision: 1, reason: "重新生成" },
+      REQ,
+    );
+    await controller.approveStoryboard(
+      "job1",
+      { expectedRevision: 1, reason: "审批通过" },
+      REQ,
+    );
+    await controller.downloadUrl("job1");
+
+    expect(service.validateStoryboardDraft).toHaveBeenCalledWith("job1", {
+      storyboard,
+    });
+    const actor = {
+      username: "xiong",
+      displayName: "熊总",
+      profile: "authoring",
+    };
+    expect(service.saveStoryboard).toHaveBeenCalledWith(
+      "job1",
+      expect.any(Object),
+      actor,
+    );
+    expect(service.revoiceStoryboard).toHaveBeenCalledWith(
+      "job1",
+      expect.any(Object),
+      actor,
+    );
+    expect(service.regenerateStoryboard).toHaveBeenCalledWith(
+      "job1",
+      expect.any(Object),
+      actor,
+    );
+    expect(service.approveStoryboard).toHaveBeenCalledWith(
+      "job1",
+      expect.any(Object),
+      actor,
+    );
+    expect(service.downloadUrl).toHaveBeenCalledWith("job1");
   });
 
   it("retry / cancel 透传 reason", async () => {

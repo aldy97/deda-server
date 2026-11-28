@@ -28,7 +28,11 @@ declare module "ali-oss" {
     list(query: { prefix?: string; "max-keys"?: number }): Promise<unknown>;
     signatureUrl(
       name: string,
-      options?: { expires?: number; method?: string },
+      options?: {
+        expires?: number;
+        method?: string;
+        response?: Record<string, string>;
+      },
     ): string;
     getBucketInfo(
       name?: string,

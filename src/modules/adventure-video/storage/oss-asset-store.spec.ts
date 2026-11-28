@@ -6,6 +6,7 @@ import { resolveVideoStudioConfig } from "@/config/video.config";
 jest.mock("ali-oss", () => {
   const client = {
     put: jest.fn().mockResolvedValue({ name: "k" }),
+    get: jest.fn().mockResolvedValue({ content: Buffer.from("bytes") }),
     signatureUrl: jest.fn(
       (key: string, options: { expires?: number }) =>
         `https://oss/${key}?expires=${options?.expires ?? ""}`,
@@ -57,6 +58,27 @@ describe("OssAssetStore", () => {
     const store = makeStore();
     expect(store.signedUrl("v.mp4")).toContain("expires=3600");
     expect(store.signedUrl("v.mp4", 60)).toContain("expires=60");
+  });
+
+  it("下载签名把 response 头透传给 OSS（附件下载）", () => {
+    const store = makeStore();
+    store.signedUrl("v.mp4", 60, {
+      "content-disposition": 'attachment; filename="a.mp4"',
+    });
+    const client = MockOss.mock.results[0].value;
+    expect(client.signatureUrl).toHaveBeenCalledWith("v.mp4", {
+      expires: 60,
+      response: { "content-disposition": 'attachment; filename="a.mp4"' },
+    });
+  });
+
+  it("get 读回已存对象，审批后复用音频", async () => {
+    const store = makeStore();
+    await expect(store.get("a/beat-0.wav")).resolves.toEqual(
+      Buffer.from("bytes"),
+    );
+    const client = MockOss.mock.results[0].value;
+    expect(client.get).toHaveBeenCalledWith("a/beat-0.wav");
   });
 
   it("客户端只构造一次，避免每次签名都新建连接", () => {
