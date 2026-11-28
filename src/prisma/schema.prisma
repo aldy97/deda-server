@@ -837,3 +837,113 @@ model DeviceNetworkDaily {
   @@index([date])
   @@map("device_network_daily")
 }
+
+// ---------------------------------------------------------------------------
+// 冒险短视频（Adventure Video Studio）
+//
+// 设计约束：只新增表，不改动任何既有表与字段。job 与 episode/version 之间是
+// 松引用（不建外键），与 AdventureContentAuditLog 同思路——内容被清理后，
+// 视频作业与产物仍可追溯，删除也不会被外键挡住。
+// ---------------------------------------------------------------------------
+
+/// 一次 60 秒预告的生成作业。同一 (episodeVersionId, 参数组合) 可多次生成，
+/// 用 requestId 做点击幂等；重试走同一行，不新建 job。
+model AdventureVideoJob {
+  id                 String    @id @default(uuid())
+  episodeId          String
+  episodeVersionId   String
+  businessKey        String // {characterKey}/{season}/{episodeNumber}
+  contentHash        String // 发布快照的 canonical sha256，内容一变就不复用
+  kind               String    @default("teaser") // teaser
+  status             String    @default("queued") // queued / running / succeeded / failed / canceled
+  stage              String    @default("queued") // queued / storyboard / voice / visual / assemble / upload / done
+  aspect             String    @default("9:16")
+  resolution         String    @default("720P") // 480P / 720P / 1080P
+  renderer           String    @default("wan3.0-video")
+  ttsMode            String    @default("system") // system / cloned
+  voiceSetVersion    String // 系统音色hash 或 三条复刻音色 id 的 hash
+  requestId          String    @unique // 前端弹窗生成；重复点击返回同一 job
+  storyboard         Json?
+  estimatedCostCents Int       @default(0)
+  actualCostCents    Int       @default(0)
+  errorCode          String?
+  errorMessage       String?
+  attempts           Int       @default(0)
+  heartbeatAt        DateTime?
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  createdBy          String
+  createdByName      String
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  shots  AdventureVideoShot[]
+  assets AdventureVideoAsset[]
+
+  @@index([status, createdAt])
+  @@index([episodeId, createdAt])
+  @@index([episodeVersionId])
+  @@map("adventure_video_jobs")
+}
+
+/// 视频分段：60 秒预告由 1~2 段组成，每段对应一次 wan3.0 调用。
+/// prompt/seed 落库是为了「只重跑这一段」时参数可复现。
+model AdventureVideoShot {
+  id             String   @id @default(uuid())
+  jobId          String
+  order          Int
+  durationSec    Int
+  startSec       Int
+  endSec         Int
+  prompt         String
+  seed           Int
+  provider       String?
+  providerTaskId String?
+  audioObjectKey String?
+  videoObjectKey String?
+  status         String   @default("pending") // pending / submitting / running / succeeded / failed
+  attempts       Int      @default(0)
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  job AdventureVideoJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, order])
+  @@map("adventure_video_shots")
+}
+
+/// 产物与中间素材索引。objectKey 是 OSS 相对路径，公网 URL 由服务端签名生成，
+/// 不落库——签名会过期，存下来只会得到一堆死链。
+model AdventureVideoAsset {
+  id          String   @id @default(uuid())
+  jobId       String?
+  kind        String // final_video / clip / audio / image / ref / storyboard / srt
+  objectKey   String
+  bytes       Int
+  durationSec Float?
+  sha256      String
+  createdAt   DateTime @default(now())
+
+  job AdventureVideoJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([jobId, kind])
+  @@map("adventure_video_assets")
+}
+
+/// 三条音色（elly / polly / narrator）的复刻结果。样本到位前本表为空，
+/// 作业走 VIDEO_TTS_MODE=system 的系统音色试跑。
+/// TODO(voice-samples): 样本到位后由 scripts/clone-adventure-video-voices.ts 写入。
+model AdventureVideoVoice {
+  id              String   @id @default(uuid())
+  role            String   @unique // elly / polly / narrator
+  model           String // 复刻时绑定的 target_model
+  voiceId         String
+  sampleObjectKey String?
+  status          String   @default("ready") // ready / undeployed
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("adventure_video_voices")
+}
