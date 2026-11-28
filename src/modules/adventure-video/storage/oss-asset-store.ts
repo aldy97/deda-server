@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import OSS from "ali-oss";
+import OSS = require("ali-oss");
 import type { VideoStudioConfig } from "@/config/video.config";
 import type { AssetStore, PutResult } from "../ports/media.ports";
 

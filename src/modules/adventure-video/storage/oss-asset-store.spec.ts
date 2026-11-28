@@ -1,5 +1,5 @@
 import { ConfigService } from "@nestjs/config";
-import OSS from "ali-oss";
+import OSS = require("ali-oss");
 import { OssAssetStore } from "./oss-asset-store";
 import { resolveVideoStudioConfig } from "@/config/video.config";
 
@@ -11,7 +11,8 @@ jest.mock("ali-oss", () => {
         `https://oss/${key}?expires=${options?.expires ?? ""}`,
     ),
   };
-  return { __esModule: true, default: jest.fn(() => client) };
+  // export= 形态下 require("ali-oss") 拿到的就是模块本体，直接返回构造函数
+  return jest.fn(() => client);
 });
 
 const MockOss = OSS as unknown as jest.Mock;

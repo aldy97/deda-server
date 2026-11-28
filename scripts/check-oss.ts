@@ -1,8 +1,9 @@
 import axios from "axios";
-import OSS from "ali-oss";
+import OSS = require("ali-oss");
 import {
   runOssReadinessChecks,
   summarizeChecks,
+  type OssClientLike,
 } from "../src/modules/adventure-video/tools/oss-readiness";
 
 /**
@@ -25,14 +26,34 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const client = new OSS({
+  const bucketName = process.env.OSS_BUCKET!;
+  const raw = new OSS({
     region: process.env.OSS_REGION!,
-    bucket: process.env.OSS_BUCKET!,
+    bucket: bucketName,
     accessKeyId: process.env.OSS_ACCESS_KEY_ID!,
     accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET!,
     ...(process.env.OSS_ENDPOINT ? { endpoint: process.env.OSS_ENDPOINT } : {}),
     secure: true,
   });
+
+  // OssClientLike 是与 SDK 解耦的隔离层，真 SDK 的两处怪癖在这里归一化：
+  // 1. getBucketInfo 的地域在返回体 bucket.Location（形如 oss-cn-beijing），
+  //    而 OssClientLike 约定的是 cn-beijing 形式，需去 oss- 前缀；
+  // 2. getBucketACL 不像 getBucketInfo 那样回退到默认 bucket，必须显式传桶名，
+  //    否则请求落到服务端点被 RAM 当成 ListBuckets 拒绝。
+  const client: OssClientLike = {
+    async getBucketInfo() {
+      const info = await raw.getBucketInfo(bucketName);
+      return { region: (info.bucket?.Location ?? "").replace(/^oss-/, "") };
+    },
+    async getBucketACL() {
+      const result = await raw.getBucketACL(bucketName);
+      return { acl: result.acl };
+    },
+    put: (key, body, options) => raw.put(key, body, options),
+    signatureUrl: (key, options) => raw.signatureUrl(key, options),
+    list: (query) => raw.list(query),
+  };
 
   const probe = {
     async status(
@@ -71,7 +92,7 @@ async function main(): Promise<void> {
   );
 
   try {
-    await client.delete(testKey);
+    await raw.delete(testKey);
   } catch {
     // 清理失败不影响判定；生命周期规则会兜底。
   }
