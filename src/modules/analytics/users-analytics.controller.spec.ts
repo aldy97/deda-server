@@ -13,3 +13,16 @@ describe("UsersAnalyticsController.getPhoneBrands", () => {
     expect(service.getPhoneBrands).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("UsersAnalyticsController.getParentDemographics", () => {
+  it("委托 service 返回家长画像聚合", async () => {
+    const result = { totalUsers: 1, genderSplit: {}, ageDistribution: [] };
+    const service = {
+      getParentDemographics: jest.fn().mockResolvedValue(result),
+    };
+    const controller = new UsersAnalyticsController(service as never);
+
+    await expect(controller.getParentDemographics()).resolves.toBe(result);
+    expect(service.getParentDemographics).toHaveBeenCalledTimes(1);
+  });
+});

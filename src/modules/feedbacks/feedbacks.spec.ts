@@ -36,10 +36,12 @@ describe("Feedbacks", () => {
   let app: INestApplication;
   let service: FeedbacksService;
   let prismaCreate: jest.Mock;
+  let prismaUpdateMany: jest.Mock;
   let redisGetClient: jest.Mock;
 
   beforeEach(async () => {
     prismaCreate = jest.fn();
+    prismaUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
     redisGetClient = jest.fn().mockReturnValue(undefined);
     prismaCreate.mockImplementation((args: CreateFeedbackArguments) =>
       Promise.resolve({ ...args.data, createdAt: CREATED_AT }),
@@ -51,7 +53,10 @@ describe("Feedbacks", () => {
         FeedbacksService,
         {
           provide: PrismaService,
-          useValue: { feedback: { create: prismaCreate } },
+          useValue: {
+            feedback: { create: prismaCreate },
+            user: { updateMany: prismaUpdateMany },
+          },
         },
         {
           provide: RedisService,
@@ -116,6 +121,10 @@ describe("Feedbacks", () => {
         contact: "13800138000",
       },
     });
+    expect(prismaUpdateMany).toHaveBeenCalledWith({
+      where: { id: "user-001" },
+      data: { phone: "13800138000" },
+    });
   });
 
   it("stores NULL when contact is omitted or blank", async () => {
@@ -132,6 +141,24 @@ describe("Feedbacks", () => {
 
     expect(prismaCreate.mock.calls[0][0].data.contact).toBeNull();
     expect(prismaCreate.mock.calls[1][0].data.contact).toBeNull();
+    expect(prismaUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("回写最新手机号；手机号更新失败不影响反馈提交", async () => {
+    prismaUpdateMany.mockRejectedValue(new Error("db down"));
+
+    const response = await request(app.getHttpServer())
+      .post("/feedbacks")
+      .set("Authorization", VALID_TOKEN)
+      .send({ content: "有效反馈", contact: "13900139000" })
+      .expect(200);
+
+    expect(response.body.code).toBe(0);
+    expect(prismaCreate).toHaveBeenCalledTimes(1);
+    expect(prismaUpdateMany).toHaveBeenCalledWith({
+      where: { id: "user-001" },
+      data: { phone: "13900139000" },
+    });
   });
 
   it("inserts separate rows when the same contact is reused", async () => {

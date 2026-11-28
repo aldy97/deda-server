@@ -5,10 +5,12 @@ function buildPrisma(options: {
   bindings?: any[];
   feedbackCount?: number;
   presence?: Array<{ deviceId: string; date: string }>;
+  samePhoneUserCount?: number;
 }) {
   const prisma = {
     user: {
       findUnique: jest.fn().mockResolvedValue(options.user ?? null),
+      count: jest.fn().mockResolvedValue(options.samePhoneUserCount ?? 0),
     },
     userDeviceBinding: {
       findMany: jest.fn().mockResolvedValue(options.bindings ?? []),
@@ -68,6 +70,8 @@ describe("ParentsAnalyticsService.getParentDetail", () => {
     id: "u1",
     nickname: "熊熊妈妈",
     phone: "13800000000",
+    gender: "female",
+    birthday: "1990-05-20",
     phoneBrand: "iPhone15,2",
     createdAt: new Date("2026-10-01T02:00:00Z"),
   };
@@ -135,6 +139,9 @@ describe("ParentsAnalyticsService.getParentDetail", () => {
         id: "u1",
         nickname: "熊熊妈妈",
         phone: "13800000000",
+        phoneDuplicate: false,
+        gender: "female",
+        birthday: "1990-05-20",
         registeredAt: "2026-10-01T02:00:00.000Z",
         // 与 /analytics/users/phone-brands 同一口径：下发展示名 makerLabel
         phoneMaker: "Apple",
@@ -196,9 +203,12 @@ describe("ParentsAnalyticsService.getParentDetail", () => {
     const result = await service.getParentDetail("u1");
 
     expect(Object.keys(result!.user).sort()).toEqual([
+      "birthday",
+      "gender",
       "id",
       "nickname",
       "phone",
+      "phoneDuplicate",
       "phoneMaker",
       "registeredAt",
     ]);
@@ -220,6 +230,9 @@ describe("ParentsAnalyticsService.getParentDetail", () => {
         id: "u1",
         nickname: null,
         phone: null,
+        phoneDuplicate: false,
+        gender: "female",
+        birthday: "1990-05-20",
         registeredAt: "2026-10-01T02:00:00.000Z",
         phoneMaker: null,
       },
@@ -255,5 +268,32 @@ describe("ParentsAnalyticsService.getParentDetail", () => {
       birthday: null,
     });
     expect(result!.summary.childCount).toBe(1);
+  });
+
+  it("同一手机号被其他账号使用过 → phoneDuplicate=true", async () => {
+    const { prisma, service } = buildPrisma({
+      user,
+      bindings: [],
+      samePhoneUserCount: 1,
+    });
+
+    const result = await service.getParentDetail("u1");
+
+    expect(prisma.user.count).toHaveBeenCalledWith({
+      where: { phone: "13800000000", id: { not: "u1" } },
+    });
+    expect(result!.user.phoneDuplicate).toBe(true);
+  });
+
+  it("手机号为空时不查重复，phoneDuplicate=false", async () => {
+    const { prisma, service } = buildPrisma({
+      user: { ...user, phone: null },
+      bindings: [],
+    });
+
+    const result = await service.getParentDetail("u1");
+
+    expect(prisma.user.count).not.toHaveBeenCalled();
+    expect(result!.user.phoneDuplicate).toBe(false);
   });
 });

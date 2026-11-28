@@ -14,9 +14,11 @@ datasource db {
 model User {
   id            String    @id @default(uuid())
   openid        String    @unique // 微信小程序 openid
-  phone         String?   @unique // 手机号，可选绑定
+  phone         String?   // 手机号；用户反馈填写的联系方式会回写到这里，允许重复
   nickname      String?   // 微信昵称
   avatarUrl     String?   // 头像
+  gender        String?   // 家长性别：male / female；NULL 表示未设置
+  birthday      String?   // 家长生日 YYYY-MM-DD；NULL 表示未设置
   phoneBrand           String?   // 小程序上报的手机品牌原始值（终端分布统计）
   phoneBrandReportedAt DateTime? // 最近一次品牌上报时间
   createdAt     DateTime  @default(now())

@@ -98,12 +98,14 @@ describe("UsersService", () => {
   });
 
   describe("getProfile", () => {
-    it("只读 id/nickname/phone/createdAt + 两个计数，响应不含 openid", async () => {
+    it("只读档案字段 + 两个计数，响应不含 openid", async () => {
       const createdAt = new Date("2026-11-01T02:00:00Z");
       prisma.user.findUnique.mockResolvedValue({
         id: "u1",
         nickname: "熊熊妈妈",
         phone: "13800000000",
+        gender: "female",
+        birthday: "1990-05-20",
         createdAt,
       });
       prisma.userDeviceBinding.count.mockResolvedValue(2);
@@ -113,7 +115,14 @@ describe("UsersService", () => {
 
       expect(prisma.user.findUnique).toHaveBeenCalledWith({
         where: { id: "u1" },
-        select: { id: true, nickname: true, phone: true, createdAt: true },
+        select: {
+          id: true,
+          nickname: true,
+          phone: true,
+          gender: true,
+          birthday: true,
+          createdAt: true,
+        },
       });
       expect(prisma.userDeviceBinding.count).toHaveBeenCalledWith({
         where: { userId: "u1" },
@@ -126,15 +135,19 @@ describe("UsersService", () => {
         id: "u1",
         nickname: "熊熊妈妈",
         phone: "13800000000",
+        gender: "female",
+        birthday: "1990-05-20",
         createdAt,
         deviceCount: 2,
         childCount: 2,
       });
       expect(result).not.toHaveProperty("openid");
       expect(Object.keys(result as object).sort()).toEqual([
+        "birthday",
         "childCount",
         "createdAt",
         "deviceCount",
+        "gender",
         "id",
         "nickname",
         "phone",
@@ -151,29 +164,102 @@ describe("UsersService", () => {
   });
 
   describe("updateProfile", () => {
-    it("只写 nickname 并回读最新档案", async () => {
+    it("只写传入的字段并回读最新档案", async () => {
       prisma.user.update.mockResolvedValue({ id: "u1" });
       prisma.user.findUnique.mockResolvedValue({
         id: "u1",
         nickname: "小熊妈妈",
         phone: null,
+        gender: "female",
+        birthday: "1990-05-20",
         createdAt: new Date("2026-11-01T02:00:00Z"),
       });
 
       const result = await service.updateProfile("u1", {
         nickname: "小熊妈妈",
+        gender: "female",
+        birthday: "1990-05-20",
       });
 
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: "u1" },
-        data: { nickname: "小熊妈妈" },
+        data: {
+          nickname: "小熊妈妈",
+          gender: "female",
+          birthday: "1990-05-20",
+        },
       });
       expect(prisma.user.findUnique).toHaveBeenCalledWith({
         where: { id: "u1" },
-        select: { id: true, nickname: true, phone: true, createdAt: true },
+        select: {
+          id: true,
+          nickname: true,
+          phone: true,
+          gender: true,
+          birthday: true,
+          createdAt: true,
+        },
       });
-      expect(result).toMatchObject({ id: "u1", nickname: "小熊妈妈" });
+      expect(result).toMatchObject({
+        id: "u1",
+        nickname: "小熊妈妈",
+        gender: "female",
+        birthday: "1990-05-20",
+      });
       expect(result).not.toHaveProperty("openid");
+    });
+
+    it("只传性别时昵称不被覆盖", async () => {
+      prisma.user.update.mockResolvedValue({ id: "u1" });
+      prisma.user.findUnique.mockResolvedValue({
+        id: "u1",
+        nickname: "熊爸爸",
+        phone: null,
+        gender: "male",
+        birthday: null,
+        createdAt: new Date("2026-11-01T02:00:00Z"),
+      });
+
+      await service.updateProfile("u1", { gender: "male" });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        data: {
+          nickname: undefined,
+          gender: "male",
+          birthday: undefined,
+        },
+      });
+    });
+
+    it("null 表示清空性别与生日", async () => {
+      prisma.user.update.mockResolvedValue({ id: "u1" });
+      prisma.user.findUnique.mockResolvedValue({
+        id: "u1",
+        nickname: "熊爸爸",
+        phone: null,
+        gender: null,
+        birthday: null,
+        createdAt: new Date("2026-11-01T02:00:00Z"),
+      });
+
+      await service.updateProfile("u1", { gender: null, birthday: null });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: "u1" },
+        data: {
+          nickname: undefined,
+          gender: null,
+          birthday: null,
+        },
+      });
+    });
+
+    it("空更新直接 400，不写库", async () => {
+      await expect(service.updateProfile("u1", {})).rejects.toThrow(
+        "至少提供一个要更新的档案字段",
+      );
+      expect(prisma.user.update).not.toHaveBeenCalled();
     });
   });
 

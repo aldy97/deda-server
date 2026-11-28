@@ -3,6 +3,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
 } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -20,6 +21,7 @@ interface MemoryRateLimitEntry {
 
 @Injectable()
 export class FeedbacksService {
+  private readonly logger = new Logger(FeedbacksService.name);
   private readonly memoryRateLimits = new Map<string, MemoryRateLimitEntry>();
 
   constructor(
@@ -53,10 +55,31 @@ export class FeedbacksService {
       },
     });
 
+    if (contact) {
+      await this.syncPhone(userId, contact);
+    }
+
     return {
       feedbackId: feedback.id,
       createdAt: feedback.createdAt,
     };
+  }
+
+  /**
+   * 把反馈里最新填写的手机号回写到账号档案。
+   * 反馈是求助通道：写手机号失败只记日志，不让反馈提交失败。
+   * users.phone 允许重复，dashboard 在家长档案里用「重复」tag 标出。
+   */
+  private async syncPhone(userId: string, phone: string): Promise<void> {
+    try {
+      await this.prisma.user.updateMany({
+        where: { id: userId },
+        data: { phone },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`反馈手机号回写失败 userId=${userId}: ${message}`);
+    }
   }
 
   private async enforceRateLimit(userId: string, ip: string): Promise<void> {

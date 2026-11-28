@@ -54,7 +54,9 @@
   "data": {
     "id": "uuid",
     "nickname": "熊熊妈妈",
-    "phone": null,
+    "phone": "13800138000",
+    "gender": "female",
+    "birthday": "1990-05-20",
     "createdAt": "2026-11-01T02:00:00.000Z",
     "deviceCount": 2,
     "childCount": 2
@@ -62,19 +64,31 @@
 }
 ```
 
-- `nickname` 未设置时为 `null`；`deviceCount` = 该家长绑定的设备数；
+- `nickname` / `phone` / `gender` / `birthday` 未设置时为 `null`；`deviceCount` = 该家长绑定的设备数；
   `childCount` = 这些绑定设备上的孩子档案数（共享设备按设备归属统计，不按档案的 userId）。
 - 不下发 `openid`。
 
 `PATCH /users/profile` · 需用户 JWT
 
-请求：`{ "nickname": "熊熊妈妈" }`
+请求：`{ "nickname": "熊熊妈妈", "gender": "female", "birthday": "1990-05-20" }`
 
-- 校验：`nickname` 必填、先 trim 再校验、字符串、1–20 字；未知字段（含 `avatarUrl`）
-  因全局 `whitelist + forbidNonWhitelisted` 直接 400。
+- 三个字段全部可选，至少传一个；空对象 → 400。
+- `nickname`：先 trim 再校验，字符串，1–20 字。
+- `gender`：`male` / `female` / `null`（null 清空）。
+- `birthday`：`YYYY-MM-DD` / `null`（null 清空）；必须是真实日历日，范围 `1900-01-01` 至今天（按 Asia/Shanghai）。
+- 未知字段（含 `avatarUrl`）因全局 `whitelist + forbidNonWhitelisted` 直接 400。
 - 成功：`data` 与 `GET /users/profile` **完全同形状**（写库后即回读最新档案）。
-- 本期只读写昵称：**家长不支持自定义头像，`avatarUrl` 暂不使用**（列保留不写）；
+- **家长不支持自定义头像，`avatarUrl` 暂不使用**（列保留不写）；
   手机号绑定本期不做，`POST /users/phone` 行为不变。
+
+`POST /feedbacks` · 需用户 JWT
+
+请求：`{ "content": "问题或建议", "contact": "13800138000" }`
+
+- `contact` 选填；提交成功后，服务端把该手机号 best-effort 回写到当前账号的 `users.phone`。
+- 再提交新的 `contact` 会覆盖旧值；不填 `contact` 不会清空旧手机号。
+- 手机号允许重复：多个家长账号可以填写同一号码，dashboard 家长档案用「重复」tag 标注。
+- 回写失败只记日志，不影响反馈提交。
 
 ---
 

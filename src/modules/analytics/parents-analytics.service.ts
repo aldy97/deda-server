@@ -7,6 +7,9 @@ export interface ParentDetail {
     id: string;
     nickname: string | null;
     phone: string | null;
+    phoneDuplicate: boolean;
+    gender: string | null;
+    birthday: string | null;
     registeredAt: string;
     phoneMaker: string | null;
   };
@@ -50,6 +53,8 @@ export class ParentsAnalyticsService {
         id: true,
         nickname: true,
         phone: true,
+        gender: true,
+        birthday: true,
         phoneBrand: true,
         createdAt: true,
       },
@@ -58,7 +63,7 @@ export class ParentsAnalyticsService {
       return null;
     }
 
-    const [bindings, feedbackCount] = await Promise.all([
+    const [bindings, feedbackCount, samePhoneUserCount] = await Promise.all([
       this.prisma.userDeviceBinding.findMany({
         where: { userId },
         select: {
@@ -88,6 +93,12 @@ export class ParentsAnalyticsService {
         orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
       }),
       this.prisma.feedback.count({ where: { userId } }),
+      // 同一手机号可能被多个家长在反馈里填写；先填后填都标记「重复」。
+      user.phone
+        ? this.prisma.user.count({
+            where: { phone: user.phone, id: { not: userId } },
+          })
+        : Promise.resolve(0),
     ]);
 
     const internalDeviceIds = bindings.map((binding) => binding.device.id);
@@ -127,6 +138,9 @@ export class ParentsAnalyticsService {
         id: user.id,
         nickname: user.nickname ?? null,
         phone: user.phone ?? null,
+        phoneDuplicate: samePhoneUserCount > 0,
+        gender: user.gender ?? null,
+        birthday: user.birthday ?? null,
         registeredAt: user.createdAt.toISOString(),
         // 与 /analytics/users/phone-brands、设备详情 boundUsers 同一口径：只下发展示名
         phoneMaker: resolvePhoneMaker(user.phoneBrand)?.makerLabel ?? null,
