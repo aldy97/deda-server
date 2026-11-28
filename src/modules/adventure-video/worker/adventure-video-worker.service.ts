@@ -71,7 +71,7 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * 60 秒预告流水线。
+ * 60 秒完整故事短片流水线（受控压缩：忠于原文讲完开端→经过→结局）。
  *
  * 顺序是硬约束：分镜 → TTS → 量真实时长 → 切段 → 视频 → 合成。
  * 先出音再出画，画面时间戳才跟旁白一致；反过来做一定会出现「话说完了镜头还在走」。
@@ -126,7 +126,7 @@ export class AdventureVideoWorkerService {
     const payload = (version.payload ?? {}) as unknown as StoryboardPayload;
     const voices = await this.resolveVoices(config);
 
-    const storyboard = await this.generateStoryboard(job, payload);
+    const storyboard = await this.generateStoryboard(job, payload, config);
     await this.prisma.adventureVideoJob.update({
       where: { id: job.id },
       data: { storyboard: storyboard as unknown as Prisma.InputJsonValue },
@@ -285,9 +285,10 @@ export class AdventureVideoWorkerService {
       resolution: string;
     },
     payload: StoryboardPayload,
+    config: VideoStudioConfig,
   ): Promise<Storyboard> {
     const envelope = {
-      title: payload.title ?? "预告",
+      title: payload.title ?? "故事短片",
       businessKey: job.businessKey,
       episodeVersionId: job.episodeVersionId,
       contentHash: job.contentHash,
@@ -328,6 +329,7 @@ export class AdventureVideoWorkerService {
           extractJsonObject(result.text),
           payload,
           envelope,
+          { forbiddenWords: config.lintForbiddenWords },
         );
       } catch (error) {
         lastError = error;

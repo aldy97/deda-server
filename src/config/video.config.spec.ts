@@ -63,6 +63,20 @@ describe("resolveVideoStudioConfig", () => {
         .workerConcurrency,
     ).toBe(2);
   });
+
+  it("违禁词按中英逗号分隔解析，空配置为空数组", () => {
+    expect(resolveVideoStudioConfig(reader({})).lintForbiddenWords).toEqual([]);
+    expect(
+      resolveVideoStudioConfig(
+        reader({ ADVENTURE_LINT_FORBIDDEN_WORDS: "暴力, 恐怖，血腥" }),
+      ).lintForbiddenWords,
+    ).toEqual(["暴力", "恐怖", "血腥"]);
+    expect(
+      resolveVideoStudioConfig(
+        reader({ ADVENTURE_LINT_FORBIDDEN_WORDS: "，,  " }),
+      ).lintForbiddenWords,
+    ).toEqual([]);
+  });
 });
 
 describe("parseTtsMode", () => {

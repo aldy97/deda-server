@@ -41,6 +41,8 @@ export interface ValidateStoryboardOptions {
   maxClipSeconds?: number;
   maxTotalSeconds?: number;
   maxOptionalBeats?: number;
+  /** 儿童内容违禁词（复用 ADVENTURE_LINT_FORBIDDEN_WORDS 同源），命中即拒 */
+  forbiddenWords?: string[];
 }
 
 const SPEAKERS: VideoSpeaker[] = ["narrator", "elly", "polly"];
@@ -169,6 +171,16 @@ export function validateStoryboard(
     if (/[\r\n]/.test(text)) {
       fail("STORYBOARD_TEXT_NEWLINE", `${path}.text 不能换行`, `${path}.text`);
     }
+    const forbiddenHits = (options.forbiddenWords ?? []).filter((word) =>
+      text.includes(word),
+    );
+    if (forbiddenHits.length > 0) {
+      fail(
+        "STORYBOARD_FORBIDDEN_WORD",
+        `${path}.text 含违禁词：${forbiddenHits.join("、")}`,
+        `${path}.text`,
+      );
+    }
     if (
       !Array.isArray(raw.sourceSegmentOrders) ||
       raw.sourceSegmentOrders.length === 0
@@ -203,16 +215,8 @@ export function validateStoryboard(
         );
       }
     }
-    const sourceText = sourceSegmentOrders
-      .map((order) => segments[order]?.text ?? "")
-      .join("");
-    if (!sourceText.includes(text)) {
-      fail(
-        "STORYBOARD_NOT_VERBATIM",
-        `${path}.text 不是原文的连续子串，预告不允许改写故事`,
-        `${path}.text`,
-      );
-    }
+    // 受控压缩模式：text 是忠于原文的改写而非子串，溯源靠
+    // sourceSegmentOrders 标注来源；忠实度由 prompt 规则 + 违禁词扫描兜底。
 
     if (speaker !== "narrator") nonNarratorCount += 1;
     if (raw.optional === true) optionalCount += 1;
@@ -238,8 +242,24 @@ export function validateStoryboard(
   if (nonNarratorCount > 1) {
     fail(
       "STORYBOARD_SPEAKER_LIMIT",
-      "60 秒预告最多只允许一处角色台词，其余必须是旁白",
+      "60 秒短片最多只允许一处角色台词，其余必须是旁白",
       "beats",
+    );
+  }
+  // 三幕闭环的结构守卫：开端与结局是整个故事不可裁剪的部分，
+  // clips 覆盖规则保证 beats[0] 与 beats[len-1] 分别就是开端与结局。
+  if (beats[0].optional) {
+    fail(
+      "STORYBOARD_ENDING_REQUIRED",
+      "开端 beat 不能标记 optional",
+      "beats[0].optional",
+    );
+  }
+  if (beats[beats.length - 1].optional) {
+    fail(
+      "STORYBOARD_ENDING_REQUIRED",
+      "结局 beat 不能标记 optional",
+      `beats[${beats.length - 1}].optional`,
     );
   }
   if (optionalCount > maxOptionalBeats) {

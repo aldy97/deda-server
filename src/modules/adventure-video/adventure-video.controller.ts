@@ -65,7 +65,7 @@ export class AdventureVideoController {
   }
 
   @Post("jobs")
-  @ApiOperation({ summary: "对当前发布版本创建一支 60 秒预告（幂等）" })
+  @ApiOperation({ summary: "对当前发布版本创建一支 60 秒故事短片（幂等）" })
   async create(
     @Body() dto: CreateVideoJobDto,
     @Req() req: RequestWithContentAdmin,

@@ -87,13 +87,30 @@ describe("validateStoryboard", () => {
     );
   });
 
-  it("改写原文必须失败：不是原文连续子串", () => {
+  it("受控压缩：忠于原文的改写可以通过（不再要求原文连续子串）", () => {
     const input = validInput();
     input.beats[0].text = "小象在湖边散步。";
+    const result = validateStoryboard(input, PAYLOAD, ENVELOPE);
+    expect(result.beats[0].text).toBe("小象在湖边散步。");
+  });
+
+  it("违禁词命中失败", () => {
+    const input = validInput();
+    input.beats[0].text = "小象打败了大坏人。";
     expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_NOT_VERBATIM",
+      () =>
+        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+          forbiddenWords: ["坏人"],
+        }),
+      "STORYBOARD_FORBIDDEN_WORD",
     );
+  });
+
+  it("违禁词列表未配置时不扫描", () => {
+    const input = validInput();
+    input.beats[0].text = "小象在湖边散步。";
+    const result = validateStoryboard(input, PAYLOAD, ENVELOPE);
+    expect(result.beats[0].text).toBe("小象在湖边散步。");
   });
 
   it("跨相邻段拼成一句时，按拼接后的原文校验", () => {
@@ -161,14 +178,31 @@ describe("validateStoryboard", () => {
     );
   });
 
-  it("optional 段数受限", () => {
+  it("optional 段数受限（开端与结局已被结构守卫排除，只统计中段）", () => {
+    const input = validInput();
+    input.beats[1].optional = true;
+    expectCode(
+      () =>
+        validateStoryboard(input, PAYLOAD, ENVELOPE, { maxOptionalBeats: 0 }),
+      "STORYBOARD_OPTIONAL_LIMIT",
+    );
+  });
+
+  it("开端 beat 标 optional 失败：三幕闭环不可裁剪开头", () => {
     const input = validInput();
     input.beats[0].optional = true;
-    input.beats[1].optional = true;
+    expectCode(
+      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
+      "STORYBOARD_ENDING_REQUIRED",
+    );
+  });
+
+  it("结局 beat 标 optional 失败：禁止以可裁剪段收尾", () => {
+    const input = validInput();
     input.beats[2].optional = true;
     expectCode(
       () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_OPTIONAL_LIMIT",
+      "STORYBOARD_ENDING_REQUIRED",
     );
   });
 

@@ -14,7 +14,7 @@ import {
 } from "@/config/video.config";
 
 const ACTOR = { username: "xiong", displayName: "熊总", profile: "authoring" };
-const REASON = "给这一集做一支 60 秒预告，用于投放测试";
+const REASON = "给这一集做一支 60 秒故事短片，用于投放测试";
 
 function buildConfig(
   overrides: Partial<VideoStudioConfig> = {},

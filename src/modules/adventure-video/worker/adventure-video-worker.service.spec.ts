@@ -46,7 +46,7 @@ const STORYBOARD = {
       characters: ["elly"],
       shot: "近景，小象看向镜头",
       visualPrompt: "小象伸出鼻子，像在邀请",
-      optional: true,
+      optional: false,
     },
   ],
   clips: [
@@ -61,6 +61,7 @@ function buildConfig() {
     enabled: true,
     pollIntervalMs: 1,
     referenceKeys: { elly: "adventure-video/refs/elly.png" },
+    lintForbiddenWords: ["坏人"],
   };
 }
 
@@ -230,10 +231,10 @@ describe("AdventureVideoWorkerService", () => {
     expect(queue.fail).not.toHaveBeenCalled();
   });
 
-  it("分镜不是原文子串：重试一次后失败，不提交任何视频任务", async () => {
+  it("分镜文案含违禁词：重试一次后失败，不提交任何视频任务", async () => {
     const { worker, queue, video, llm } = makeWorker();
     const rewritten = JSON.parse(JSON.stringify(STORYBOARD));
-    rewritten.beats[0].text = "小象在湖边散步。";
+    rewritten.beats[0].text = "小象打败了大坏人。";
     llm.complete.mockResolvedValue({ text: JSON.stringify(rewritten) });
 
     await worker.runOnce();
@@ -241,8 +242,8 @@ describe("AdventureVideoWorkerService", () => {
     expect(llm.complete).toHaveBeenCalledTimes(2);
     expect(queue.fail).toHaveBeenCalledWith(
       "job1",
-      "STORYBOARD_NOT_VERBATIM",
-      expect.stringContaining("原文"),
+      "STORYBOARD_FORBIDDEN_WORD",
+      expect.stringContaining("坏人"),
     );
     expect(video.submit).not.toHaveBeenCalled();
   });
@@ -263,10 +264,11 @@ describe("AdventureVideoWorkerService", () => {
 });
 
 describe("分镜系统 prompt 的代码默认值契约", () => {
-  it("保留硬约束关键词（搬进注册表时只搬家、不改文案）", () => {
+  it("完整故事导演硬规则在位（受控压缩 + 三幕闭环）", () => {
     const template = PROMPT_DEFAULTS.adventure_video_storyboard_system.template;
     for (const keyword of [
-      "连续子串",
+      "忠于原文",
+      "三幕闭环",
       "最多 8 个 beat",
       "180",
       "只输出一个 JSON",
