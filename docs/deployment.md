@@ -24,6 +24,10 @@ GitHub push
 
 - **两个环境完全隔离**：独立容器、独立数据卷、独立数据库，staging 的 migration 不会污染生产库。
 - **镜像即制品**：每次部署对应唯一 tag（`staging-<sha>` / `prod-<sha>`），回滚 = 换 tag 重新部署。
+- **worker 镜像按需构建**：staging 部署只在 diff 命中 worker 运行面（`.github/worker-trigger-paths.json`）时
+  构建/传输 `deda-server-video-worker:staging-<sha>` 并以 `--profile video` 拉起容器；纯 API 侧模块
+  （mqtt、device-configs、dashboard 路由等）与前端改动不触发。清单完整性由
+  `src/common/workflows/worker-trigger-gate.spec.ts` 的闭包守卫钉住；prod 暂未接入。
 - **备案期间访问方式**：staging 走 `http://ECS公网IP:3001`（非标端口不受备案拦截）；生产仅监听回环，等备案完成。
 
 ## 2. 分支模型
@@ -100,6 +104,17 @@ IMAGE_TAG=staging-latest docker compose -p deda-staging --env-file env/.env.stag
 # prod 同理：-p deda-prod、--env-file env/.env.prod、-f docker/docker-compose.prod.yml、IMAGE_TAG=prod-latest
 ```
 
+worker 容器只在传过对应 tag 的 worker 镜像时才能拉起；手动操作要显式加 `--profile video`：
+
+```bash
+docker compose -p deda-staging --env-file env/.env.staging \
+  -f docker/docker-compose.yml -f docker/docker-compose.staging.yml --profile video up -d
+```
+
+若只想让流水线重建 worker 而不改业务代码（例如首次预置镜像、或改了 `/opt/deda/env/.env.staging`
+里的 `VIDEO_*` 需要重载），手动跑一次 Deploy Staging：`workflow_dispatch` 的 `force_worker`
+默认即 `true`。
+
 ### 回滚
 
 镜像 tag 即版本。回滚到某个历史提交：
@@ -155,7 +170,7 @@ chmod +x /opt/deda/backup.sh
 
 - **部署前备份**：`deploy-prod.yml` 在部署前自动执行 `backup.sh`（未安装则告警跳过）。
 - **自动回滚**：部署成功才写入 `/opt/deda/env/.last-good-tag`；健康检查失败时 workflow 自动把 `IMAGE_TAG` 指回上一个好版本重新 `up -d`（见 §4 回滚）。首次部署无历史好版本时报错人工介入。
-- **镜像保留策略**：ECS `/opt/deda/prune-images.sh`（cron 每周日 04:07），保留最近 5 个 `prod-*` 与 3 个 `staging-*` 镜像，其余删除——2026-11-13 实测僵尸镜像占 25G/33G 磁盘。
+- **镜像保留策略**：ECS `/opt/deda/prune-images.sh`（cron 每周日 04:07），保留最近 5 个 `prod-*` 与 3 个 `staging-*` 镜像，其余删除——2026-11-13 实测僵尸镜像占 25G/33G 磁盘。worker 镜像同样按 `staging-<sha>` 累积，**需确认该脚本的镜像过滤包含 `deda-server-video-worker`**（脚本不在仓库内），否则只增不减。
 - **磁盘告警**：云监控磁盘 >75% 告警。
 - **生产 MQTT**：prod compose 含 mosquitto（容器 `deda-mqtt-prod`，宿主机端口 `1884`，配置在 `/opt/deda/mosquitto-prod/`），设备接入 `mqtt://valleyletters.com:1884`。1883 归 staging，互不干扰。
 

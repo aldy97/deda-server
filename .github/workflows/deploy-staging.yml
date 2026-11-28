@@ -2,7 +2,19 @@ name: Deploy Staging
 
 on:
   workflow_call:
+    inputs:
+      force_worker:
+        description: 强制重建 video worker 镜像（默认 false；仅当 diff 命中 worker 运行面才重建）
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
+    inputs:
+      force_worker:
+        description: 强制重建 video worker 镜像（人工补部署 / 首次预置镜像时打开）
+        type: boolean
+        required: false
+        default: true
 
 # 同一环境串行部署，避免并发部署互相踩踏
 concurrency:
@@ -13,15 +25,45 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: staging
-    # 正常一次部署约 5-6 分钟（PR #74 实测 5m29s：build + SSH 直传 + compose up + health check）。
-    # 20 分钟留足重试余量，又能保证任一步骤僵死时及时释放 concurrency group——
+    # 正常一次 API-only 部署约 5-6 分钟（PR #74 实测 5m29s：build + SSH 直传 + compose up + health check）。
+    # 命中 worker 重建时另加：worker 镜像 build（npm ci 两遍 + ffmpeg/字体）约 4-6 分钟、
+    # 传输约 1-3 分钟。30 分钟留足余量，又不至于步骤僵死时长期占住 concurrency group——
     # 该 group 是 cancel-in-progress:false，一旦被占住，后续部署只能干等（2026-11-19 等了 1h21m）。
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 需要 before..HEAD 的完整历史来判定 worker 相关 diff（仓库 .git 约 15M，代价可忽略）。
+          fetch-depth: 0
+
+      # worker 重建判定：只看 diff 是否命中 .github/worker-trigger-paths.json 的清单。
+      # 清单的完整性由 src/common/workflows/worker-trigger-gate.spec.ts 的闭包守卫钉住——
+      # 新增 worker 依赖会让 CI 变红，而不是让线上悄悄跑旧镜像。
+      - name: Detect worker-relevant changes
+        id: detect
+        env:
+          FORCE_WORKER: ${{ inputs.force_worker }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # 新分支 / force push / 手工触发时 before 可能是空或全零；
+          # 拿不到基线就 fail-safe 重建，避免“以为没改、worker 停在旧代码”。
+          if [ -z "${BEFORE_SHA:-}" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "::warning::无可用 diff 基线（before=${BEFORE_SHA:-空}），fail-safe 重建 worker"
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" \
+            | WORKER_FORCE="${FORCE_WORKER:-false}" node .github/scripts/worker-affected.mjs >> "$GITHUB_OUTPUT"
 
       - name: Build image
         run: docker build -f docker/Dockerfile -t "deda-server:staging-${{ github.sha }}" .
+
+      # 不命中则完全跳过：不 build、不传输、不动容器，部署耗时与改造前一致。
+      - name: Build worker image
+        if: steps.detect.outputs.rebuild == 'true'
+        run: docker build -f docker/Dockerfile.worker -t "deda-server-video-worker:staging-${{ github.sha }}" .
 
       - name: Setup SSH
         run: |
@@ -46,24 +88,62 @@ jobs:
               "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
               "timeout 600 sh -c 'gunzip | docker load'"
 
+      - name: Transfer worker image
+        if: steps.detect.outputs.rebuild == 'true'
+        run: |
+          docker save "deda-server-video-worker:staging-${{ github.sha }}" | gzip | \
+            timeout 600 ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=15 \
+              "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+              "timeout 600 sh -c 'gunzip | docker load'"
+
       - name: Sync compose files to ECS
         run: |
           ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
             "mkdir -p /opt/deda /opt/deda/dashboard/staging"
           scp -r docker nginx "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}:/opt/deda/"
 
+      # 只有本次真正传过 worker 镜像才加 `--profile video`：compose 的 worker 镜像名由
+      # IMAGE_TAG（staging-<sha>）决定，未重建时会找不存在的镜像并尝试在 ECS 上 build
+      # （服务器没有源码，必失败）。
+      # 环境变量经 ssh 命令前缀传入，heredoc 用引号形式避免本地 shell 提前展开 $PROFILE。
       - name: Deploy on ECS
         run: |
-          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<EOF
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" \
+            "REBUILD_WORKER='${{ steps.detect.outputs.rebuild }}' IMAGE_TAG='staging-${{ github.sha }}' bash -s" <<'EOF'
           set -e
           cd /opt/deda
-          docker tag deda-server:staging-${{ github.sha }} deda-server:staging-latest
-          export IMAGE_TAG="staging-${{ github.sha }}"
+          docker tag "deda-server:${IMAGE_TAG}" deda-server:staging-latest
+          PROFILE=""
+          if [ "${REBUILD_WORKER}" = "true" ]; then
+            PROFILE="--profile video"
+          fi
           docker compose -p deda-staging --env-file env/.env.staging \
-            -f docker/docker-compose.yml -f docker/docker-compose.staging.yml up -d
+            -f docker/docker-compose.yml -f docker/docker-compose.staging.yml ${PROFILE} up -d
           EOF
 
       - name: Health check
         run: |
           curl -fsS --retry 8 --retry-delay 5 --retry-all-errors \
             "http://${{ secrets.ECS_HOST }}:3001/api/docs" > /dev/null
+
+      # worker 不监听端口，只能以「容器 running + 启动日志出现」判定。
+      # runner.video-worker.runner.ts 只有两条启动日志，两条都算就绪。
+      - name: Worker health check
+        if: steps.detect.outputs.rebuild == 'true'
+        run: |
+          ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<'EOF'
+          set -e
+          for _ in $(seq 1 12); do
+            status="$(docker inspect -f '{{.State.Status}}' deda-server-video-worker 2>/dev/null || echo missing)"
+            logs="$(docker logs --tail 200 deda-server-video-worker 2>&1 || true)"
+            if [ "$status" = "running" ] && printf '%s' "$logs" | grep -qE 'worker 启动|worker 不启动轮询'; then
+              echo "video-worker 就绪（status=$status）"
+              exit 0
+            fi
+            sleep 5
+          done
+          docker inspect -f '{{.State.Status}}' deda-server-video-worker || true
+          docker logs --tail 200 deda-server-video-worker || true
+          echo "::error::video-worker 未在 60 秒内就绪"
+          exit 1
+          EOF

@@ -1,3 +1,4 @@
+import { DEFAULT_FORBIDDEN_WORDS } from "@/common/content/forbidden-words";
 import {
   ADVENTURE_CHARACTER_KEYS,
   ADVENTURE_INTERACTION_TYPES,
@@ -58,7 +59,7 @@ export interface LintThresholds {
   maxStarsPerEpisode: number;
   /** 二选一 text 最小长度：引擎用 includes 匹配，过短会误命中 */
   minChoiceTextChars: number;
-  /** 禁用词，命中即阻断；默认空，由 config/env 注入 */
+  /** 禁用词，命中即阻断；内置 baseline，env 只能追加 */
   forbiddenWords: string[];
 }
 
@@ -68,7 +69,7 @@ export const DEFAULT_LINT_THRESHOLDS: LintThresholds = {
   maxTitleChars: 40,
   maxStarsPerEpisode: 5,
   minChoiceTextChars: 2,
-  forbiddenWords: [],
+  forbiddenWords: [...DEFAULT_FORBIDDEN_WORDS],
 };
 
 export interface LintContext {

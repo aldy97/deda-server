@@ -11,6 +11,7 @@ import {
   EpisodeContentDraft,
 } from "./adventure-content.types";
 import { DEFAULT_LINT_THRESHOLDS } from "./adventure-linter";
+import { DEFAULT_FORBIDDEN_WORDS } from "@/common/content/forbidden-words";
 import { DEFAULT_SIMULATION_THRESHOLDS } from "./adventure-simulator";
 import { ADVENTURE_EXIT_TEXT } from "@/modules/adventure/adventure.constants";
 
@@ -860,7 +861,11 @@ describe("AdventureContentQueryService", () => {
 
       const caps = tuned.capabilities();
       expect(caps.lintThresholds.maxNarrationTextChars).toBe(200);
-      expect(caps.lintThresholds.forbiddenWords).toEqual(["暴力", "恐怖"]);
+      // 「恐怖」已在 baseline 里，env 追加时去重，只多出「暴力」
+      expect(caps.lintThresholds.forbiddenWords).toEqual([
+        ...DEFAULT_FORBIDDEN_WORDS,
+        "暴力",
+      ]);
       // 未覆盖的阈值保持默认，避免半套配置静默生效
       expect(caps.lintThresholds.maxTitleChars).toBe(
         DEFAULT_LINT_THRESHOLDS.maxTitleChars,

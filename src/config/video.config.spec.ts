@@ -6,6 +6,7 @@ import {
   supportsTtsInstruction,
   VIDEO_SYSTEM_VOICES,
 } from "./video.config";
+import { DEFAULT_FORBIDDEN_WORDS } from "@/common/content/forbidden-words";
 
 function reader(values: Record<string, string | undefined>) {
   return (key: string) => values[key];
@@ -66,18 +67,24 @@ describe("resolveVideoStudioConfig", () => {
     ).toBe(2);
   });
 
-  it("违禁词按中英逗号分隔解析，空配置为空数组", () => {
-    expect(resolveVideoStudioConfig(reader({})).lintForbiddenWords).toEqual([]);
-    expect(
-      resolveVideoStudioConfig(
-        reader({ ADVENTURE_LINT_FORBIDDEN_WORDS: "暴力, 恐怖，血腥" }),
-      ).lintForbiddenWords,
-    ).toEqual(["暴力", "恐怖", "血腥"]);
+  it("违禁词空配置回落 baseline，env 只追加", () => {
+    expect(resolveVideoStudioConfig(reader({})).lintForbiddenWords).toEqual([
+      ...DEFAULT_FORBIDDEN_WORDS,
+    ]);
+    const merged = resolveVideoStudioConfig(
+      reader({ ADVENTURE_LINT_FORBIDDEN_WORDS: "人贩子, 谣言，血腥" }),
+    ).lintForbiddenWords;
+    expect(merged.slice(0, DEFAULT_FORBIDDEN_WORDS.length)).toEqual([
+      ...DEFAULT_FORBIDDEN_WORDS,
+    ]);
+    expect(merged).toContain("人贩子");
+    expect(merged).toContain("谣言");
+    expect(merged.filter((word) => word === "血腥")).toHaveLength(1);
     expect(
       resolveVideoStudioConfig(
         reader({ ADVENTURE_LINT_FORBIDDEN_WORDS: "，,  " }),
       ).lintForbiddenWords,
-    ).toEqual([]);
+    ).toEqual([...DEFAULT_FORBIDDEN_WORDS]);
   });
 
   it("VIDEO_REFERENCE_KEYS 解析合法 JSON，非法 JSON 回落空对象", () => {
