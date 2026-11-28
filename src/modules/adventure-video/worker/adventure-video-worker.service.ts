@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
+import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
 import type { VideoStudioConfig, VideoVoiceRole } from "@/config/video.config";
 import {
   estimateTeaserCostCents,
@@ -15,7 +16,6 @@ import {
 import {
   buildStoryboardUserPrompt,
   extractJsonObject,
-  STORYBOARD_SYSTEM_PROMPT,
 } from "../storyboard/storyboard.prompt";
 import type {
   Storyboard,
@@ -89,6 +89,7 @@ export class AdventureVideoWorkerService {
     private readonly video: BailianVideoClient,
     private readonly speech: BailianSpeechClient,
     private readonly llm: LlmService,
+    private readonly promptRegistry: PromptRegistryService,
     @Inject(HTTP_TRANSPORT) private readonly http: HttpTransport,
     @Inject(ASSET_STORE) private readonly store: AssetStore,
     @Inject(MEDIA_ASSEMBLER) private readonly assembler: MediaAssembler,
@@ -310,7 +311,12 @@ export class AdventureVideoWorkerService {
       const result = await this.llm.complete({
         scene: "adventure_video_storyboard",
         messages: [
-          { role: "system", content: STORYBOARD_SYSTEM_PROMPT },
+          {
+            role: "system",
+            content: this.promptRegistry.render(
+              "adventure_video_storyboard_system",
+            ),
+          },
           { role: "user", content: userPrompt },
         ],
         temperature: 0.4,

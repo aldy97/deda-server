@@ -9,6 +9,8 @@
 - 内容：纯叙事；最多一处角色提问；不含二选一互动。
 - 画面：`wan3.0-video`，2 段以内、每段 ≤30 秒，`audio=false`。
 - 配音：CosyVoice；默认 `VIDEO_TTS_MODE=system` 试跑，样本到位后切 `cloned`。
+- 分镜导演 prompt：已进 prompt-registry（key `adventure_video_storyboard_system`，
+  分类 `adventure_video`），可在看板 `/prompts` 热改，发布后最长 60 秒生效。
 
 ## 2. 架构
 

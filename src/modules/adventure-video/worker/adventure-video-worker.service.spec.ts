@@ -1,6 +1,7 @@
 import { ConfigService } from "@nestjs/config";
 import { AdventureVideoWorkerService } from "./adventure-video-worker.service";
 import { resolveVideoStudioConfig } from "@/config/video.config";
+import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
 
 const PAYLOAD = {
   title: "星星湖",
@@ -80,6 +81,7 @@ function makeWorker() {
   const video = { submit: jest.fn(), poll: jest.fn() };
   const speech = { synthesize: jest.fn() };
   const llm = { complete: jest.fn() };
+  const promptRegistry = { render: jest.fn().mockReturnValue("DB-SYS-PROMPT") };
   const http = { post: jest.fn(), get: jest.fn(), getBuffer: jest.fn() };
   const store = { put: jest.fn(), signedUrl: jest.fn() };
   const assembler = { probe: jest.fn(), assemble: jest.fn() };
@@ -93,6 +95,7 @@ function makeWorker() {
     video as never,
     speech as never,
     llm as never,
+    promptRegistry as never,
     http as never,
     store as never,
     assembler as never,
@@ -145,7 +148,18 @@ function makeWorker() {
     durationSec: 40,
     srt: "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
   });
-  return { worker, prisma, queue, video, speech, llm, http, store, assembler };
+  return {
+    worker,
+    prisma,
+    queue,
+    video,
+    speech,
+    llm,
+    promptRegistry,
+    http,
+    store,
+    assembler,
+  };
 }
 
 describe("AdventureVideoWorkerService", () => {
@@ -156,13 +170,29 @@ describe("AdventureVideoWorkerService", () => {
   });
 
   it("跑通一条：分镜 → 3 段配音 → 2 段视频 → 合成 → 成功", async () => {
-    const { worker, prisma, queue, video, speech, llm, store, assembler } =
-      makeWorker();
+    const {
+      worker,
+      prisma,
+      queue,
+      video,
+      speech,
+      llm,
+      promptRegistry,
+      store,
+      assembler,
+    } = makeWorker();
 
     await expect(worker.runOnce()).resolves.toBe(true);
 
     expect(llm.complete).toHaveBeenCalledWith(
       expect.objectContaining({ scene: "adventure_video_storyboard" }),
+    );
+    expect(llm.complete.mock.calls[0][0].messages[0]).toEqual({
+      role: "system",
+      content: "DB-SYS-PROMPT",
+    });
+    expect(promptRegistry.render).toHaveBeenCalledWith(
+      "adventure_video_storyboard_system",
     );
     expect(prisma.adventureVideoJob.update).toHaveBeenCalledWith({
       where: { id: "job1" },
@@ -229,5 +259,19 @@ describe("AdventureVideoWorkerService", () => {
 
     expect(queue.fail).toHaveBeenCalledWith("job1", "UPSTREAM_500", "boom");
     expect(queue.succeed).not.toHaveBeenCalled();
+  });
+});
+
+describe("分镜系统 prompt 的代码默认值契约", () => {
+  it("保留硬约束关键词（搬进注册表时只搬家、不改文案）", () => {
+    const template = PROMPT_DEFAULTS.adventure_video_storyboard_system.template;
+    for (const keyword of [
+      "连续子串",
+      "最多 8 个 beat",
+      "180",
+      "只输出一个 JSON",
+    ]) {
+      expect(template).toContain(keyword);
+    }
   });
 });
