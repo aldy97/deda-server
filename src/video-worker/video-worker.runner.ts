@@ -32,11 +32,6 @@ export class VideoWorkerRunner implements OnModuleInit, OnModuleDestroy {
       this.logger.log("ADVENTURE_VIDEO_ENABLED=false，worker 不启动轮询");
       return;
     }
-    if (config.lintForbiddenWords.length === 0) {
-      this.logger.warn(
-        "ADVENTURE_LINT_FORBIDDEN_WORDS 未配置，分镜违禁词扫描为空转",
-      );
-    }
     const concurrency = Math.max(1, config.workerConcurrency);
     this.logger.log(`worker 启动，并发 ${concurrency}`);
     this.loops = Array.from({ length: concurrency }, (_, index) =>

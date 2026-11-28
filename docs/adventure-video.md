@@ -122,7 +122,7 @@ POST /analytics/adventure-video/jobs/:id/cancel {reason}
 | `EPISODE_RETIRED` | 已下架 |
 | `BUDGET_EXCEEDED` | 预估超预算 |
 | `VOICE_NOT_READY` | cloned 模式但三条音色未齐 |
-| `STORYBOARD_FORBIDDEN_WORD` | 分镜文案命中违禁词（ADVENTURE_LINT_FORBIDDEN_WORDS 同源扫描），已重试一次仍失败 |
+| `STORYBOARD_FORBIDDEN_WORD` | 分镜文案命中违禁词（baseline 见 `src/common/content/forbidden-words.ts`，env 只能追加），已重试一次仍失败 |
 | `STORYBOARD_ENDING_REQUIRED` | 开端或结局 beat 被标 optional（三幕闭环不可裁剪），已重试一次仍失败 |
 | `STORYBOARD_CHAR_BUDGET` / `STORYBOARD_CLIP_TOO_LONG` | 分镜超字数/超 30 秒 |
 | `OVER_BUDGET`（clip planner） | 真实配音超 58 秒且无 optional 可丢 |

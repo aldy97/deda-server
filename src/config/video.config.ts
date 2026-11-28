@@ -1,5 +1,6 @@
 import { registerAs } from "@nestjs/config";
 import { createHash } from "crypto";
+import { resolveForbiddenWords } from "@/common/content/forbidden-words";
 
 /**
  * 冒险短视频的配置解析。
@@ -130,17 +131,11 @@ export function resolveVideoStudioConfig(get: EnvReader): VideoStudioConfig {
     workerConcurrency: parsePositiveInt(get("VIDEO_WORKER_CONCURRENCY"), 2),
     referenceKeys: parseReferenceKeys(get("VIDEO_REFERENCE_KEYS")),
     fontsDir: nonEmpty(get("VIDEO_FONTS_DIR")) ?? "/usr/share/fonts",
-    lintForbiddenWords: parseWordList(get("ADVENTURE_LINT_FORBIDDEN_WORDS")),
+    lintForbiddenWords: resolveForbiddenWords(
+      get("ADVENTURE_LINT_FORBIDDEN_WORDS"),
+    ),
     pollIntervalMs: parsePositiveInt(get("VIDEO_POLL_INTERVAL_MS"), 15_000),
   };
-}
-
-/** 违禁词列表：与 adventure-admin 的 wordList 同规则——英/中文逗号分隔、trim、去空项。 */
-function parseWordList(raw: string | undefined): string[] {
-  return (raw ?? "")
-    .split(/[,，]/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
 }
 
 function parseReferenceKeys(raw: string | undefined): {
