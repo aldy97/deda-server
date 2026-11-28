@@ -35,6 +35,8 @@
     "tsconfig.json",
     "nest-cli.json",
     "docker/Dockerfile.worker",
+    "docker/docker-compose.yml",
+    "docker/docker-compose.staging.yml",
     ".dockerignore"
   ]
 }

@@ -75,3 +75,10 @@ services:
     # staging 不部署 nginx；profiles 使其不会被 up -d 自动拉起
     profiles:
       - disabled-in-staging
+
+  # worker 必须用 staging 专属容器名：base compose 的 `deda-server-video-worker`
+  # 是全局固定名，ECS 上可能已有 prod/历史手工容器占用，staging 复用会被 Docker
+  # 以 `container name already in use` 拒绝（2026-11-28 首次自动部署实测）。
+  # 健康检查（deploy-staging.yml）必须与此名保持一致，由 worker-trigger-gate.spec.ts 钉住。
+  video-worker:
+    container_name: deda-server-video-worker-staging

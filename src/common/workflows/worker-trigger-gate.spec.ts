@@ -8,8 +8,15 @@ const REPO_ROOT = resolve(__dirname, "../../..");
 const SCRIPT = join(REPO_ROOT, ".github/scripts/worker-affected.mjs");
 const CONFIG = join(REPO_ROOT, ".github/worker-trigger-paths.json");
 const WORKFLOW = join(REPO_ROOT, ".github/workflows/deploy-staging.yml");
+const BASE_COMPOSE = join(REPO_ROOT, "docker/docker-compose.yml");
+const STAGING_COMPOSE = join(REPO_ROOT, "docker/docker-compose.staging.yml");
+/** staging 专用容器名：base compose 的固定名会与 prod/历史手工容器冲突。 */
+const STAGING_WORKER_CONTAINER = "deda-server-video-worker-staging";
 
 type TriggerConfig = { prefixes: string[]; exact: string[] };
+type Compose = {
+  services?: Record<string, { container_name?: string }>;
+};
 type Step = {
   id?: string;
   name?: string;
@@ -172,6 +179,34 @@ describe("deploy-staging.yml 接线", () => {
 
   it("超时上界为 worker 构建/传输留出余量", () => {
     expect(workflow().jobs?.deploy?.["timeout-minutes"]).toBe(30);
+  });
+});
+
+describe("staging worker 容器名隔离", () => {
+  function composeServices(path: string): Compose["services"] {
+    return (load(readFileSync(path, "utf8")) as Compose).services;
+  }
+
+  it("base compose 的固定容器名是冲突源，staging 必须覆盖", () => {
+    expect(
+      composeServices(BASE_COMPOSE)?.["video-worker"]?.container_name,
+    ).toBe("deda-server-video-worker");
+    expect(
+      composeServices(STAGING_COMPOSE)?.["video-worker"]?.container_name,
+    ).toBe(STAGING_WORKER_CONTAINER);
+  });
+
+  it("健康检查只操作 staging 专属容器，不碰 base 固定名", () => {
+    const run = stepByName("Worker health check").run ?? "";
+    expect(run).toContain(STAGING_WORKER_CONTAINER);
+    // 裸名（未带 -staging 后缀）在任何位置都不允许出现
+    expect(run).not.toMatch(/deda-server-video-worker(?!-staging)/);
+  });
+
+  it("compose 文件变更会触发 worker 重建（env/镜像 tag 必须一起生效）", () => {
+    const exact = readConfig().exact;
+    expect(exact).toContain("docker/docker-compose.yml");
+    expect(exact).toContain("docker/docker-compose.staging.yml");
   });
 });
 
