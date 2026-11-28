@@ -113,7 +113,43 @@ describe("validateStoryboard", () => {
     expect(result.beats[0].text).toBe("小象在湖边散步。");
   });
 
-  it("跨相邻段拼成一句时，按拼接后的原文校验", () => {
+  it("shot 含违禁词失败", () => {
+    const input = validInput();
+    input.beats[0].shot = "镜头扫过一片血迹";
+    expectCode(
+      () =>
+        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+          forbiddenWords: ["血迹"],
+        }),
+      "STORYBOARD_FORBIDDEN_WORD",
+    );
+  });
+
+  it("visualPrompt 含违禁词失败", () => {
+    const input = validInput();
+    input.beats[0].visualPrompt = "地上有血迹，小象后退";
+    expectCode(
+      () =>
+        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+          forbiddenWords: ["血迹"],
+        }),
+      "STORYBOARD_FORBIDDEN_WORD",
+    );
+  });
+
+  it("stylePrompt 含违禁词失败", () => {
+    const input = validInput();
+    input.stylePrompt = "阴暗恐怖的森林，冷色";
+    expectCode(
+      () =>
+        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+          forbiddenWords: ["恐怖"],
+        }),
+      "STORYBOARD_FORBIDDEN_WORD",
+    );
+  });
+
+  it("跨相邻段合并时保留多段溯源下标", () => {
     const input = validInput();
     input.beats = [
       beat({
@@ -185,6 +221,15 @@ describe("validateStoryboard", () => {
       () =>
         validateStoryboard(input, PAYLOAD, ENVELOPE, { maxOptionalBeats: 0 }),
       "STORYBOARD_OPTIONAL_LIMIT",
+    );
+  });
+
+  it("optional 必须是布尔值，字符串形式失败", () => {
+    const input = validInput();
+    (input.beats[1] as unknown as Record<string, unknown>).optional = "true";
+    expectCode(
+      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
+      "STORYBOARD_TYPE",
     );
   });
 
