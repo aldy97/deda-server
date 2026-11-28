@@ -36,6 +36,7 @@ import { HTTP_TRANSPORT } from "./providers/provider.types";
     AdventureVideoQueueService,
     BailianVideoClient,
     BailianSpeechClient,
+    HTTP_TRANSPORT,
   ],
 })
 export class AdventureVideoModule {}

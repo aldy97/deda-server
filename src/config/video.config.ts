@@ -56,6 +56,12 @@ export interface VideoStudioConfig {
     signedUrlTtlSec: number;
   };
   workerConcurrency: number;
+  /** 角色参考图在 OSS 里的 objectKey；缺省则不带参考图生成（质量降级） */
+  referenceKeys: { elly?: string; polly?: string };
+  /** 中文字体目录，烧字幕用；镜像里是 /usr/share/fonts */
+  fontsDir: string;
+  /** 视频任务轮询间隔；测试里设 0 避免真等 */
+  pollIntervalMs: number;
 }
 
 type EnvReader = (key: string) => string | undefined;
@@ -120,7 +126,32 @@ export function resolveVideoStudioConfig(get: EnvReader): VideoStudioConfig {
       ),
     },
     workerConcurrency: parsePositiveInt(get("VIDEO_WORKER_CONCURRENCY"), 2),
+    referenceKeys: parseReferenceKeys(get("VIDEO_REFERENCE_KEYS")),
+    fontsDir: nonEmpty(get("VIDEO_FONTS_DIR")) ?? "/usr/share/fonts",
+    pollIntervalMs: parsePositiveInt(get("VIDEO_POLL_INTERVAL_MS"), 15_000),
   };
+}
+
+function parseReferenceKeys(raw: string | undefined): {
+  elly?: string;
+  polly?: string;
+} {
+  const text = (raw ?? "").trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const result: { elly?: string; polly?: string } = {};
+    for (const role of ["elly", "polly"] as const) {
+      const value = parsed[role];
+      if (typeof value === "string" && value.trim()) {
+        result[role] = value.trim();
+      }
+    }
+    return result;
+  } catch {
+    // 配置拼错时宁可不带参考图出片，也不让 worker 启动即崩；错误会在日志里可见。
+    return {};
+  }
 }
 
 export default registerAs("video", () =>
