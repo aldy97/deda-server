@@ -28,6 +28,7 @@
     "src/modules/llm/llm.service.ts",
     "src/modules/safety/safety-profile.ts",
     "src/modules/vendor/child-safety.service.ts",
+    "src/common/content/forbidden-words.ts",
     "src/common/filters/http-exception.filter.ts",
     "package.json",
     "package-lock.json",
