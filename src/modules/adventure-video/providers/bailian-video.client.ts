@@ -90,8 +90,11 @@ export class BailianVideoClient {
   }
 
   async poll(taskId: string): Promise<VideoTaskState> {
+    // 任务查询接口必须带鉴权：裸 GET 会 401 InvalidApiKey（2026-11-28 首次真实
+    // 出片实测暴露——提交成功后第一次轮询即失败，作业误落 failed）。
     const response = (await this.http.get(
       `${this.baseUrl()}/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      { Authorization: `Bearer ${this.apiKey()}` },
     )) as {
       output?: {
         task_status?: unknown;
