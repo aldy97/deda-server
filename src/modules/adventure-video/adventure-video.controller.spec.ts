@@ -41,7 +41,7 @@ describe("AdventureVideoController", () => {
       episodeId: "ep1",
       episodeVersionId: "v1",
       requestId: "req-12345678",
-      reason: "给这一集做一支 60 秒预告",
+      reason: "给这一集做一支 60 秒故事短片",
     };
 
     await controller.create(dto, REQ);

@@ -41,6 +41,8 @@ export interface ValidateStoryboardOptions {
   maxClipSeconds?: number;
   maxTotalSeconds?: number;
   maxOptionalBeats?: number;
+  /** 儿童内容违禁词（复用 ADVENTURE_LINT_FORBIDDEN_WORDS 同源），命中即拒 */
+  forbiddenWords?: string[];
 }
 
 const SPEAKERS: VideoSpeaker[] = ["narrator", "elly", "polly"];
@@ -77,6 +79,22 @@ function requireString(
   return text;
 }
 
+/** 违禁词是子串命中：text 与三类画面字段都要过同一张表。 */
+function assertNoForbiddenWords(
+  value: string,
+  path: string,
+  forbiddenWords: string[],
+): void {
+  const hits = forbiddenWords.filter((word) => value.includes(word));
+  if (hits.length > 0) {
+    fail(
+      "STORYBOARD_FORBIDDEN_WORD",
+      `${path} 含违禁词：${hits.join("、")}`,
+      path,
+    );
+  }
+}
+
 /**
  * 分镜校验。所有失败都带机器码与路径，worker 可以据此决定
  * 「让导演模型重试一次」还是「直接失败、不要浪费视频调用」。
@@ -100,7 +118,9 @@ export function validateStoryboard(
     fail("STORYBOARD_TYPE", "分镜必须是 JSON 对象");
   }
   const segments = Array.isArray(payload.segments) ? payload.segments : [];
+  const forbiddenWords = options.forbiddenWords ?? [];
   const stylePrompt = requireString(input.stylePrompt, "stylePrompt", 400);
+  assertNoForbiddenWords(stylePrompt, "stylePrompt", forbiddenWords);
   const rawBeats = input.beats;
   if (!Array.isArray(rawBeats) || rawBeats.length === 0) {
     fail("STORYBOARD_BEATS", "beats 必须是非空数组", "beats");
@@ -121,6 +141,13 @@ export function validateStoryboard(
         "STORYBOARD_ORDER",
         `${path}.order 必须等于 ${index}`,
         `${path}.order`,
+      );
+    }
+    if (raw.optional !== undefined && typeof raw.optional !== "boolean") {
+      fail(
+        "STORYBOARD_TYPE",
+        `${path}.optional 必须是布尔值`,
+        `${path}.optional`,
       );
     }
     const speakerValue = raw.speaker;
@@ -169,6 +196,7 @@ export function validateStoryboard(
     if (/[\r\n]/.test(text)) {
       fail("STORYBOARD_TEXT_NEWLINE", `${path}.text 不能换行`, `${path}.text`);
     }
+    assertNoForbiddenWords(text, `${path}.text`, forbiddenWords);
     if (
       !Array.isArray(raw.sourceSegmentOrders) ||
       raw.sourceSegmentOrders.length === 0
@@ -203,20 +231,25 @@ export function validateStoryboard(
         );
       }
     }
-    const sourceText = sourceSegmentOrders
-      .map((order) => segments[order]?.text ?? "")
-      .join("");
-    if (!sourceText.includes(text)) {
-      fail(
-        "STORYBOARD_NOT_VERBATIM",
-        `${path}.text 不是原文的连续子串，预告不允许改写故事`,
-        `${path}.text`,
-      );
-    }
+    // 受控压缩模式：text 是忠于原文的改写而非子串，溯源靠
+    // sourceSegmentOrders 标注来源；忠实度由 prompt 规则 + 违禁词扫描兜底。
 
     if (speaker !== "narrator") nonNarratorCount += 1;
     if (raw.optional === true) optionalCount += 1;
     charTotal += text.length;
+
+    const shot = requireString(raw.shot, `${path}.shot`, 120);
+    assertNoForbiddenWords(shot, `${path}.shot`, forbiddenWords);
+    const visualPrompt = requireString(
+      raw.visualPrompt,
+      `${path}.visualPrompt`,
+      400,
+    );
+    assertNoForbiddenWords(
+      visualPrompt,
+      `${path}.visualPrompt`,
+      forbiddenWords,
+    );
 
     return {
       order: index,
@@ -225,12 +258,8 @@ export function validateStoryboard(
       text,
       emotion: emotion as VideoEmotion,
       characters,
-      shot: requireString(raw.shot, `${path}.shot`, 120),
-      visualPrompt: requireString(
-        raw.visualPrompt,
-        `${path}.visualPrompt`,
-        400,
-      ),
+      shot,
+      visualPrompt,
       optional: raw.optional === true,
     };
   });
@@ -238,8 +267,24 @@ export function validateStoryboard(
   if (nonNarratorCount > 1) {
     fail(
       "STORYBOARD_SPEAKER_LIMIT",
-      "60 秒预告最多只允许一处角色台词，其余必须是旁白",
+      "60 秒短片最多只允许一处角色台词，其余必须是旁白",
       "beats",
+    );
+  }
+  // 三幕闭环的结构守卫：开端与结局是整个故事不可裁剪的部分，
+  // clips 覆盖规则保证 beats[0] 与 beats[len-1] 分别就是开端与结局。
+  if (beats[0].optional) {
+    fail(
+      "STORYBOARD_ENDING_REQUIRED",
+      "开端 beat 不能标记 optional",
+      "beats[0].optional",
+    );
+  }
+  if (beats[beats.length - 1].optional) {
+    fail(
+      "STORYBOARD_ENDING_REQUIRED",
+      "结局 beat 不能标记 optional",
+      `beats[${beats.length - 1}].optional`,
     );
   }
   if (optionalCount > maxOptionalBeats) {

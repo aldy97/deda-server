@@ -60,6 +60,8 @@ export interface VideoStudioConfig {
   referenceKeys: { elly?: string; polly?: string };
   /** 中文字体目录，烧字幕用；镜像里是 /usr/share/fonts */
   fontsDir: string;
+  /** 儿童内容违禁词（与 ADVENTURE_LINT_FORBIDDEN_WORDS 同源，逗号分隔），分镜文案扫描用 */
+  lintForbiddenWords: string[];
   /** 视频任务轮询间隔；测试里设 0 避免真等 */
   pollIntervalMs: number;
 }
@@ -128,8 +130,17 @@ export function resolveVideoStudioConfig(get: EnvReader): VideoStudioConfig {
     workerConcurrency: parsePositiveInt(get("VIDEO_WORKER_CONCURRENCY"), 2),
     referenceKeys: parseReferenceKeys(get("VIDEO_REFERENCE_KEYS")),
     fontsDir: nonEmpty(get("VIDEO_FONTS_DIR")) ?? "/usr/share/fonts",
+    lintForbiddenWords: parseWordList(get("ADVENTURE_LINT_FORBIDDEN_WORDS")),
     pollIntervalMs: parsePositiveInt(get("VIDEO_POLL_INTERVAL_MS"), 15_000),
   };
+}
+
+/** 违禁词列表：与 adventure-admin 的 wordList 同规则——英/中文逗号分隔、trim、去空项。 */
+function parseWordList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function parseReferenceKeys(raw: string | undefined): {

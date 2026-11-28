@@ -22,10 +22,10 @@ export function buildStoryboardUserPrompt(
     `标题：${input.title}`,
     input.recap ? `前情回顾：${input.recap}` : null,
     "",
-    "原文段落（只能从中逐字选句）：",
+    "原文段落（改写时必须忠于这些段落，sourceSegmentOrders 标注每句来源）：",
     ...lines,
     "",
-    "请输出 60 秒预告分镜 JSON。",
+    "请输出 60 秒完整小故事的分镜 JSON（开端→经过→结局）。",
   ]
     .filter((line) => line !== null)
     .join("\n");

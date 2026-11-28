@@ -1,11 +1,12 @@
 /**
- * 60 秒预告的分镜契约。
+ * 60 秒完整小故事的分镜契约。
  *
  * 这是唯一中间产物：导演模型产出它，配音/画面/合成三个阶段都只读它。
  * 三条硬约束（由 validator 执行）：
- * 1. text 必须是发布快照里原文的连续子串——预告可以少讲，不能改写；
+ * 1. text 是受控压缩后的口播文案：忠于原文（结局一致、不加情节），
+ *    允许压缩合并与调整语序，禁止凭空创作；
  * 2. 最多一处角色台词，其余全部旁白；
- * 3. 总字数 ≤180，切成 1–2 段、每段 ≤30 秒。
+ * 3. 总字数 ≤180，切成 1–2 段、每段 ≤30 秒；开端与结局不得标 optional。
  */
 
 export type VideoSpeaker = "narrator" | "elly" | "polly";
@@ -17,7 +18,7 @@ export interface StoryboardBeat {
   /** 原文 segments 下标，允许连续多段拼成一句 */
   sourceSegmentOrders: number[];
   speaker: VideoSpeaker;
-  /** 原文连续子串，逐字一致 */
+  /** 受控压缩后的口播文案：忠于原文，允许压缩合并，禁止凭空创作 */
   text: string;
   emotion: VideoEmotion;
   /** 画面里出现的角色，只能是两个 IP */

@@ -154,12 +154,12 @@ export class AdventureVideoService {
       fail("EPISODE_RETIRED", "这一集已下架，不能生成短视频。");
     }
     if (!episode.published || !episode.currentVersionId) {
-      fail("EPISODE_NOT_PUBLISHED", "只有已发布的故事才能生成预告。");
+      fail("EPISODE_NOT_PUBLISHED", "只有已发布的故事才能生成故事短片。");
     }
     if (dto.episodeVersionId !== episode.currentVersionId) {
       fail(
         "VERSION_NOT_CURRENT",
-        "只能对当前发布版本生成预告；历史版本请先回滚发布后再试。",
+        "只能对当前发布版本生成故事短片；历史版本请先回滚发布后再试。",
       );
     }
 
