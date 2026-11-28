@@ -10,6 +10,7 @@ import {
   Prisma,
 } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { resolveForbiddenWords } from "@/common/content/forbidden-words";
 import {
   ADVENTURE_CHARACTER_KEYS,
   ADVENTURE_INTERACTION_TYPES,
@@ -286,9 +287,8 @@ export class AdventureContentQueryService {
         "ADVENTURE_LINT_MIN_CHOICE_TEXT_CHARS",
         DEFAULT_LINT_THRESHOLDS.minChoiceTextChars,
       ),
-      forbiddenWords: this.wordList(
-        "ADVENTURE_LINT_FORBIDDEN_WORDS",
-        DEFAULT_LINT_THRESHOLDS.forbiddenWords,
+      forbiddenWords: resolveForbiddenWords(
+        this.configService.get<string>("ADVENTURE_LINT_FORBIDDEN_WORDS"),
       ),
     };
     this.simulationOverrides = {
@@ -305,18 +305,6 @@ export class AdventureContentQueryService {
 
   private number(key: string, fallback: number): number {
     return Number(this.configService.get<string>(key)) || fallback;
-  }
-
-  private wordList(key: string, fallback: string[]): string[] {
-    const raw = this.configService.get<string>(key);
-    if (!raw) {
-      return fallback;
-    }
-    const words = raw
-      .split(/[,，]/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-    return words.length > 0 ? words : fallback;
   }
 
   capabilities(): ContentAdminProfileCapabilities {

@@ -609,6 +609,15 @@ describe("adventure-linter", () => {
       expect(report.ok).toBe(false);
     });
 
+    it("默认阈值就带 baseline 禁用词，不依赖 env", () => {
+      const report = lintEpisode(
+        identity,
+        { ...valid(), segments: [narration(0, "地上有一片血迹。")] },
+        { forPublish: true },
+      );
+      expect(codes(report.errors)).toContain("FORBIDDEN_WORD");
+    });
+
     /**
      * 草稿阶段只 warning：草稿对孩子不可见，发布时会按发布标准重新判一次。
      * 在草稿阶段就硬拦等于让作者没法把写到一半的稿子停下来，浏览器一关就全丢。
