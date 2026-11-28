@@ -22,6 +22,7 @@ const staging = readCompose("docker-compose.staging.yml");
 const baseEnv = base.services?.app?.environment ?? {};
 const prodEnv = prod.services?.app?.environment ?? {};
 const stagingEnv = staging.services?.app?.environment ?? {};
+const workerEnv = base.services?.["video-worker"]?.environment ?? {};
 
 /**
  * compose 的 environment 是白名单：--env-file 只做变量替换，不会把变量注入容器。
@@ -91,6 +92,16 @@ describe("compose 环境变量白名单", () => {
   it("代码消费的键必须在 base 白名单里", () => {
     const missing = MUST_FORWARD.filter((key) => !(key in baseEnv));
     expect(missing).toEqual([]);
+  });
+
+  it("video-worker 的违禁词扫描输入必须可达", () => {
+    // app 服务 2026-11 起已转发本键，但 video-worker 服务漏配：
+    // 分镜文案/画面字段的违禁词扫描在 worker 容器里拿到的是 undefined，
+    // 词表等于空转（2026-11-28 出片链路核查发现）。
+    expect("ADVENTURE_LINT_FORBIDDEN_WORDS" in workerEnv).toBe(true);
+    expect(
+      SUBSTITUTION.test(workerEnv.ADVENTURE_LINT_FORBIDDEN_WORDS ?? ""),
+    ).toBe(true);
   });
 
   it("代码实际读取的环境变量也必须可达或显式豁免", () => {
