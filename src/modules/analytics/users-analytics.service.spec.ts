@@ -31,6 +31,7 @@ function buildPrisma(data: {
         ({ where }: any = {}) =>
           applyDateRange(data.users, "createdAt", where?.createdAt).length,
       ),
+      findMany: jest.fn(() => data.users),
     },
     userDeviceBinding: {
       findMany: jest.fn(() => data.bindings),
@@ -291,5 +292,72 @@ describe("边界补测", () => {
       result.ageDistribution.map((a) => [a.range, a.devices]),
     );
     expect(byRange.get("unknown")).toBe(1);
+  });
+});
+
+describe("UsersAnalyticsService.getParentDemographics", () => {
+  /** 取一个稳定落在目标年龄的生日（5 月，避开跨年边界）。 */
+  function birthdayForAge(age: number): string {
+    const year = new Date().getFullYear() - age;
+    return `${year}-05-01`;
+  }
+
+  it("按家长账号统计性别与年龄段，生日缺失/非法归 unknown", async () => {
+    const prisma = buildPrisma({
+      users: [
+        { gender: "male", birthday: birthdayForAge(17) },
+        { gender: "female", birthday: birthdayForAge(18) },
+        { gender: "female", birthday: birthdayForAge(24) },
+        { gender: null, birthday: birthdayForAge(25) },
+        { gender: "male", birthday: birthdayForAge(34) },
+        { gender: "female", birthday: birthdayForAge(35) },
+        { gender: "male", birthday: birthdayForAge(44) },
+        { gender: "female", birthday: birthdayForAge(45) },
+        { gender: null, birthday: null },
+        { gender: "male", birthday: "not-a-date" },
+      ],
+      bindings: [],
+      childProfiles: [],
+      devices: [],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getParentDemographics();
+    const byRange = new Map(
+      result.ageDistribution.map((item) => [item.range, item.users]),
+    );
+
+    expect(result.totalUsers).toBe(10);
+    expect(result.genderSplit).toEqual({ male: 4, female: 4, unset: 2 });
+    expect(byRange.get("<18")).toBe(1);
+    expect(byRange.get("18-24")).toBe(2);
+    expect(byRange.get("25-34")).toBe(2);
+    expect(byRange.get("35-44")).toBe(2);
+    expect(byRange.get("45+")).toBe(1);
+    expect(byRange.get("unknown")).toBe(2);
+  });
+
+  it("空表返回全零分布，unknown 桶仍存在", async () => {
+    const prisma = buildPrisma({
+      users: [],
+      bindings: [],
+      childProfiles: [],
+      devices: [],
+    });
+    const service = await buildService(prisma);
+
+    const result = await service.getParentDemographics();
+
+    expect(result.totalUsers).toBe(0);
+    expect(result.genderSplit).toEqual({ male: 0, female: 0, unset: 0 });
+    expect(result.ageDistribution.map((item) => item.range)).toEqual([
+      "<18",
+      "18-24",
+      "25-34",
+      "35-44",
+      "45+",
+      "unknown",
+    ]);
+    expect(result.ageDistribution.every((item) => item.users === 0)).toBe(true);
   });
 });

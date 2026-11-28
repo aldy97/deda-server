@@ -74,11 +74,19 @@ describe("Analytics parents (e2e)", () => {
         nickname: "熊熊妈妈",
         phone: `139${suffix.padStart(8, "0").slice(0, 8)}`,
         phoneBrand: "iPhone15,2",
+        gender: "female",
+        birthday: "1990-05-20",
       },
     });
     parentId = parent.id;
 
-    const other = await prisma.user.create({ data: { openid: otherOpenid } });
+    const other = await prisma.user.create({
+      data: {
+        openid: otherOpenid,
+        // 与家长同手机号，验证「重复」标记先填后填都成立
+        phone: `139${suffix.padStart(8, "0").slice(0, 8)}`,
+      },
+    });
     otherUserId = other.id;
 
     const deviceA = await prisma.device.create({
@@ -219,9 +227,12 @@ describe("Analytics parents (e2e)", () => {
     const data = res.body.data;
 
     expect(Object.keys(data.user).sort()).toEqual([
+      "birthday",
+      "gender",
       "id",
       "nickname",
       "phone",
+      "phoneDuplicate",
       "phoneMaker",
       "registeredAt",
     ]);
@@ -229,6 +240,9 @@ describe("Analytics parents (e2e)", () => {
       id: parentId,
       nickname: "熊熊妈妈",
       phone: expect.stringMatching(/^139/),
+      phoneDuplicate: true,
+      gender: "female",
+      birthday: "1990-05-20",
       phoneMaker: "Apple",
     });
     expect(data.user.registeredAt).toEqual(expect.any(String));

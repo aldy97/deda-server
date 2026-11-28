@@ -20,6 +20,15 @@ const AGE_RANGES = [
   { range: "9+", min: 9, max: Infinity },
 ] as const;
 
+/** 家长年龄段：<18 单列，作为数据质量信号，不混进 unknown。 */
+const PARENT_AGE_RANGES = [
+  { range: "<18", min: 0, max: 18 },
+  { range: "18-24", min: 18, max: 25 },
+  { range: "25-34", min: 25, max: 35 },
+  { range: "35-44", min: 35, max: 45 },
+  { range: "45+", min: 45, max: Infinity },
+] as const;
+
 /** 周岁年龄（按 Asia/Shanghai 当日），birthday 非法返回 null */
 function ageFromBirthday(birthday: string | null): number | null {
   if (!birthday || !/^\d{4}-\d{2}-\d{2}$/.test(birthday)) return null;
@@ -180,6 +189,45 @@ export class UsersAnalyticsService {
       coverage: share(reportedUsers, totalUsers),
       firstReportedAt: first._min.phoneBrandReportedAt?.toISOString() ?? null,
       brands,
+    };
+  }
+
+  /**
+   * 家长画像：性别与年龄段分布，统计单位是家长账号。
+   * 只出聚合计数，不出 userId / openid / 手机号 / 生日原值。
+   */
+  async getParentDemographics() {
+    const users = await this.prisma.user.findMany({
+      select: { gender: true, birthday: true },
+    });
+
+    const genderSplit = { male: 0, female: 0, unset: 0 };
+    const ageDistribution: Array<{ range: string; users: number }> =
+      PARENT_AGE_RANGES.map(({ range }) => ({ range, users: 0 }));
+    let unknown = 0;
+
+    for (const user of users) {
+      if (user.gender === "male") genderSplit.male += 1;
+      else if (user.gender === "female") genderSplit.female += 1;
+      else genderSplit.unset += 1;
+
+      const age = ageFromBirthday(user.birthday);
+      if (age === null) {
+        unknown += 1;
+        continue;
+      }
+      const index = PARENT_AGE_RANGES.findIndex(
+        ({ min, max }) => age >= min && age < max,
+      );
+      if (index === -1) unknown += 1;
+      else ageDistribution[index].users += 1;
+    }
+    ageDistribution.push({ range: "unknown", users: unknown });
+
+    return {
+      totalUsers: users.length,
+      genderSplit,
+      ageDistribution,
     };
   }
 
