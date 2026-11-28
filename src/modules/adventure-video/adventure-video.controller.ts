@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Query,
   Req,
   UnauthorizedException,
@@ -14,13 +15,21 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
 import type { Request } from "express";
 import { SuperAdminGuard } from "@/modules/analytics/guards/super-admin.guard";
-import { ContentAdminGuard } from "@/modules/adventure-admin/guards/content-admin.guard";
+import {
+  ContentAdminGuard,
+  ContentReadOnly,
+  VideoReviewWrite,
+} from "@/modules/adventure-admin/guards/content-admin.guard";
 import { ContentAdminExceptionFilter } from "@/modules/adventure-admin/filters/content-admin-exception.filter";
 import { resolveContentAdminProfile } from "@/modules/adventure-admin/content-admin-profile";
 import type { AuditActor } from "@/modules/adventure-admin/adventure-audit.service";
 import { AdventureVideoService } from "./adventure-video.service";
 import {
+  ApproveStoryboardDto,
   CreateVideoJobDto,
+  StoryboardDraftDto,
+  StoryboardRevoiceDto,
+  StoryboardValidateDto,
   VideoJobActionDto,
   VideoJobQueryDto,
 } from "./dto/video-job.dto";
@@ -65,7 +74,7 @@ export class AdventureVideoController {
   }
 
   @Post("jobs")
-  @ApiOperation({ summary: "对当前发布版本创建一支 60 秒故事短片（幂等）" })
+  @ApiOperation({ summary: "对当前发布版本创建一支故事短片（幂等）" })
   async create(
     @Body() dto: CreateVideoJobDto,
     @Req() req: RequestWithContentAdmin,
@@ -85,10 +94,72 @@ export class AdventureVideoController {
     return this.service.get(jobId);
   }
 
+  @Post("jobs/:jobId/storyboard/validate")
+  @ContentReadOnly()
+  @ApiOperation({ summary: "校验分镜编辑稿（不写库，只读环境也可用）" })
+  validateStoryboard(
+    @Param("jobId") jobId: string,
+    @Body() dto: StoryboardValidateDto,
+  ) {
+    return this.service.validateStoryboardDraft(jobId, dto);
+  }
+
+  @Put("jobs/:jobId/storyboard")
+  @VideoReviewWrite()
+  @ApiOperation({ summary: "保存分镜编辑稿（乐观锁 + 审计）" })
+  saveStoryboard(
+    @Param("jobId") jobId: string,
+    @Body() dto: StoryboardDraftDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.service.saveStoryboard(jobId, dto, this.actor(req));
+  }
+
+  @Post("jobs/:jobId/storyboard/revoice")
+  @VideoReviewWrite()
+  @ApiOperation({ summary: "按当前分镜重新配音，回到待审核" })
+  revoiceStoryboard(
+    @Param("jobId") jobId: string,
+    @Body() dto: StoryboardRevoiceDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.service.revoiceStoryboard(jobId, dto, this.actor(req));
+  }
+
+  @Post("jobs/:jobId/storyboard/regenerate")
+  @VideoReviewWrite()
+  @ApiOperation({ summary: "重新生成分镜（结构不对时使用）" })
+  regenerateStoryboard(
+    @Param("jobId") jobId: string,
+    @Body() dto: StoryboardRevoiceDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.service.regenerateStoryboard(jobId, dto, this.actor(req));
+  }
+
+  @Post("jobs/:jobId/storyboard/approve")
+  @VideoReviewWrite()
+  @ApiOperation({ summary: "审批分镜：实测 54–58 秒后进入视频生成" })
+  approveStoryboard(
+    @Param("jobId") jobId: string,
+    @Body() dto: ApproveStoryboardDto,
+    @Req() req: RequestWithContentAdmin,
+  ) {
+    return this.service.approveStoryboard(jobId, dto, this.actor(req));
+  }
+
   @Get("jobs/:jobId/preview-url")
-  @ApiOperation({ summary: "成片播放地址（私有桶现签，1 小时有效）" })
+  @ApiOperation({
+    summary: "成片播放地址（私有桶现签，过期时间以 expiresInSec 为准）",
+  })
   previewUrl(@Param("jobId") jobId: string) {
     return this.service.previewUrl(jobId);
+  }
+
+  @Get("jobs/:jobId/download-url")
+  @ApiOperation({ summary: "成片下载地址（OSS attachment，点击时现签）" })
+  downloadUrl(@Param("jobId") jobId: string) {
+    return this.service.downloadUrl(jobId);
   }
 
   @Post("jobs/:jobId/retry")

@@ -21,10 +21,13 @@ import {
   buildStoryboardUserPrompt,
   extractJsonObject,
 } from "../storyboard/storyboard.prompt";
-import type {
-  Storyboard,
-  StoryboardPayload,
-  VideoEmotion,
+import {
+  computeVoiceTextHash,
+  STORYBOARD_MAX_TOTAL_SECONDS,
+  STORYBOARD_MIN_TOTAL_SECONDS,
+  type Storyboard,
+  type StoryboardPayload,
+  type VideoEmotion,
 } from "../storyboard/storyboard.types";
 import { ClipPlanError, planClips } from "./clip-planner";
 import { buildClipPrompt, buildClipSeed } from "./video-prompt";
@@ -74,8 +77,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface VoicedBeat {
+  beat: Storyboard["beats"][number];
+  buffer: Buffer;
+  durationSec: number;
+  characters: number;
+}
+
 /**
- * 60 秒完整故事短片流水线（受控压缩：忠于原文讲完开端→经过→结局）。
+ * 故事短片流水线（受控压缩：忠于原文讲完开端→经过→结局）。
  *
  * 顺序是硬约束：分镜 → TTS → 量真实时长 → 切段 → 视频 → 合成。
  * 先出音再出画，画面时间戳才跟旁白一致；反过来做一定会出现「话说完了镜头还在走」。
@@ -123,21 +133,56 @@ export class AdventureVideoWorkerService {
     if (!job) throw new Error(`作业不存在：${jobId}`);
     if (!config.enabled) throw new Error("短视频开关已关闭，拒绝执行");
 
-    const version = await this.prisma.adventureEpisodeVersion.findUnique({
-      where: { id: job.episodeVersionId },
-    });
-    if (!version) throw new Error(`版本快照不存在：${job.episodeVersionId}`);
-    const payload = (version.payload ?? {}) as unknown as StoryboardPayload;
-    const voices = await this.resolveVoices(config);
+    const approved = Boolean(job.storyboardApprovedAt);
+    let storyboard: Storyboard;
+    if (job.storyboard) {
+      storyboard = job.storyboard as unknown as Storyboard;
+    } else {
+      if (approved) {
+        throw new Error("已批准作业缺少分镜，无法续跑");
+      }
+      const version = await this.prisma.adventureEpisodeVersion.findUnique({
+        where: { id: job.episodeVersionId },
+      });
+      if (!version) throw new Error(`版本快照不存在：${job.episodeVersionId}`);
+      const payload = (version.payload ?? {}) as unknown as StoryboardPayload;
+      storyboard = await this.generateStoryboard(job, payload, config);
+      await this.prisma.adventureVideoJob.update({
+        where: { id: job.id },
+        data: {
+          storyboard: storyboard as unknown as Prisma.InputJsonValue,
+          storyboardRevision: { increment: 1 },
+        },
+      });
+    }
 
-    const storyboard = await this.generateStoryboard(job, payload, config);
-    await this.prisma.adventureVideoJob.update({
-      where: { id: job.id },
-      data: { storyboard: storyboard as unknown as Prisma.InputJsonValue },
-    });
-
-    await this.queue.markStage(job.id, "voice");
-    const voiced = await this.synthesizeBeats(job, storyboard, voices, config);
+    let voiced: VoicedBeat[];
+    if (approved) {
+      const currentHash = computeVoiceTextHash(
+        storyboard.beats,
+        job.voiceSetVersion,
+      );
+      if (job.voiceTextHash && job.voiceTextHash !== currentHash) {
+        throw new AssetStoreError(
+          "VOICE_STALE",
+          "文案已修改但音频未重新生成，请重新配音后再审批",
+        );
+      }
+      voiced = await this.loadVoiced(job, storyboard);
+    } else {
+      const voices = await this.resolveVoices(config);
+      await this.queue.markStage(job.id, "voice");
+      voiced = await this.synthesizeBeats(job, storyboard, voices, config);
+      const totalSec = voiced.reduce((sum, item) => sum + item.durationSec, 0);
+      await this.queue.awaitReview(job.id, {
+        voiceTextHash: computeVoiceTextHash(
+          storyboard.beats,
+          job.voiceSetVersion,
+        ),
+        voiceTotalSec: totalSec,
+      });
+      return;
+    }
 
     await this.queue.markStage(job.id, "visual");
     const plan = planClips(
@@ -148,6 +193,18 @@ export class AdventureVideoWorkerService {
         optional: item.beat.optional,
       })),
     );
+    if (plan.totalSec < STORYBOARD_MIN_TOTAL_SECONDS) {
+      throw new ClipPlanError(
+        "VOICE_TOO_SHORT",
+        `实测旁白 ${plan.totalSec.toFixed(1)} 秒，低于 ${STORYBOARD_MIN_TOTAL_SECONDS} 秒`,
+      );
+    }
+    if (plan.totalSec > STORYBOARD_MAX_TOTAL_SECONDS) {
+      throw new ClipPlanError(
+        "VOICE_TOO_LONG",
+        `实测旁白 ${plan.totalSec.toFixed(1)} 秒，超过 ${STORYBOARD_MAX_TOTAL_SECONDS} 秒`,
+      );
+    }
 
     const referenceUrls = this.referenceUrls(config, storyboard);
     const clipResults: Array<{ buffer: Buffer; durationSec: number }> = [];
@@ -342,29 +399,55 @@ export class AdventureVideoWorkerService {
     throw lastError instanceof Error ? lastError : new Error("分镜生成失败");
   }
 
+  /**
+   * 审批通过后复用已生成的音频，不再调一次 TTS：
+   * 审批依据的就是这批音频的实测时长，重配会让「批的」和「播的」不是同一份。
+   */
+  private async loadVoiced(
+    job: { id: string },
+    storyboard: Storyboard,
+  ): Promise<VoicedBeat[]> {
+    const assets = await this.prisma.adventureVideoAsset.findMany({
+      where: { jobId: job.id, kind: "audio" },
+      orderBy: { createdAt: "desc" },
+    });
+    const byOrder = new Map<number, (typeof assets)[number]>();
+    for (const asset of assets) {
+      const matched = /beat-(\d+)\.wav$/.exec(asset.objectKey);
+      if (!matched) continue;
+      const order = Number.parseInt(matched[1], 10);
+      if (!byOrder.has(order)) byOrder.set(order, asset);
+    }
+    const results: VoicedBeat[] = [];
+    for (const beat of storyboard.beats) {
+      const asset = byOrder.get(beat.order);
+      if (!asset || asset.durationSec === null) {
+        throw new AssetStoreError(
+          "VOICE_ASSET_MISSING",
+          `beat ${beat.order} 的已审批音频不存在，请重新配音后再审批`,
+        );
+      }
+      results.push({
+        beat,
+        buffer: await this.store.get(asset.objectKey),
+        durationSec: asset.durationSec,
+        characters: beat.text.length,
+      });
+    }
+    return results;
+  }
+
   private async synthesizeBeats(
     job: { id: string; businessKey: string; contentHash: string },
     storyboard: Storyboard,
     voices: Record<VideoVoiceRole, string>,
     config: VideoStudioConfig,
-  ): Promise<
-    Array<{
-      beat: Storyboard["beats"][number];
-      buffer: Buffer;
-      durationSec: number;
-      characters: number;
-    }>
-  > {
+  ): Promise<VoicedBeat[]> {
     const model = ttsModelForMode(config.ttsMode);
     // 音色不支持 Instruct 时一律不带：cosyvoice-v3-flash 的系统试跑音色带 instruction
     // 会被上游 428 拒掉整条作业（v3.5-flash 的复刻音色才支持自由中文指令）。
     const withInstruction = supportsTtsInstruction(config);
-    const results: Array<{
-      beat: Storyboard["beats"][number];
-      buffer: Buffer;
-      durationSec: number;
-      characters: number;
-    }> = [];
+    const results: VoicedBeat[] = [];
     for (const beat of storyboard.beats) {
       const speech = await this.speech.synthesize({
         model,

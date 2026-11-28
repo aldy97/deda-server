@@ -40,10 +40,22 @@ export class OssAssetStore implements AssetStore {
     };
   }
 
-  signedUrl(objectKey: string, ttlSec?: number): string {
+  async get(objectKey: string): Promise<Buffer> {
+    const result = await this.oss().get(objectKey);
+    return Buffer.isBuffer(result.content)
+      ? result.content
+      : Buffer.from(result.content);
+  }
+
+  signedUrl(
+    objectKey: string,
+    ttlSec?: number,
+    response?: Record<string, string>,
+  ): string {
     const config = this.videoConfig();
     return this.oss().signatureUrl(objectKey, {
       expires: ttlSec ?? config.oss.signedUrlTtlSec,
+      ...(response ? { response } : {}),
     });
   }
 

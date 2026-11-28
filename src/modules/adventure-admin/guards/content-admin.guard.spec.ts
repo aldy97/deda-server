@@ -3,7 +3,11 @@ import { ExecutionContext, ForbiddenException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
 import { AnalyticsAuthGuard } from "@/modules/analytics/guards/analytics-auth.guard";
-import { ContentAdminGuard, ContentReadOnly } from "./content-admin.guard";
+import {
+  ContentAdminGuard,
+  ContentReadOnly,
+  VideoReviewWrite,
+} from "./content-admin.guard";
 import { CONTENT_ADMIN_SCOPE } from "../content-admin-profile";
 
 /**
@@ -26,6 +30,11 @@ class SampleController {
 
   publish() {
     return "publish";
+  }
+
+  @VideoReviewWrite()
+  reviewStoryboard() {
+    return "review";
   }
 }
 
@@ -209,6 +218,20 @@ describe("ContentAdminGuard", () => {
             method: "POST",
             user: scopedUser(),
             handler: SampleController.prototype.simulate,
+          }),
+        ),
+      ).resolves.toBe(true);
+    });
+
+    it("allows @VideoReviewWrite in readonly so prod superadmin can review storyboards", async () => {
+      const guard = buildGuard("readonly");
+
+      await expect(
+        guard.canActivate(
+          makeContext({
+            method: "POST",
+            user: scopedUser(),
+            handler: SampleController.prototype.reviewStoryboard,
           }),
         ),
       ).resolves.toBe(true);

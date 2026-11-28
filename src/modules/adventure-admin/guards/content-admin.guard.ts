@@ -37,6 +37,20 @@ export const CONTENT_READ_ONLY_METADATA_KEY = "adventure-content:read-only";
 export const ContentReadOnly = () =>
   SetMetadata(CONTENT_READ_ONLY_METADATA_KEY, true);
 
+/**
+ * 视频分镜审核写操作的窄口子：默认 prod 只读，但熊总明确要求
+ * staging 与 prod 的 superadmin 都能审批分镜/重配音/重新生成。
+ *
+ * 只豁免 **环境 profile** 这一道闸，不豁免身份闸：
+ * controller 仍同时挂 SuperAdminGuard + ContentAdminGuard，
+ * 且这里只作用于显式标注的路由，不会影响 adventure-admin 的其他写操作。
+ */
+export const VIDEO_REVIEW_WRITE_METADATA_KEY =
+  "adventure-content:video-review-write";
+
+export const VideoReviewWrite = () =>
+  SetMetadata(VIDEO_REVIEW_WRITE_METADATA_KEY, true);
+
 const READ_METHODS = ["GET", "HEAD", "OPTIONS"];
 
 @Injectable()
@@ -77,6 +91,14 @@ export class ContentAdminGuard extends AnalyticsAuthGuard {
         [context.getHandler(), context.getClass()],
       ) === true;
     if (readOnly) {
+      return false;
+    }
+    const videoReviewWrite =
+      this.reflector.getAllAndOverride<boolean>(
+        VIDEO_REVIEW_WRITE_METADATA_KEY,
+        [context.getHandler(), context.getClass()],
+      ) === true;
+    if (videoReviewWrite) {
       return false;
     }
     const method = String(

@@ -74,9 +74,222 @@ function expectCode(fn: () => unknown, code: string) {
   }
 }
 
+const BASE_OPTIONS = { minTotalSeconds: 0, maxTotalSeconds: 999 } as const;
+
+function check(input: unknown, options: Record<string, unknown> = {}) {
+  return validateStoryboard(input, PAYLOAD, ENVELOPE, {
+    ...BASE_OPTIONS,
+    ...options,
+  });
+}
+
+function longInput() {
+  const beats = Array.from({ length: 4 }, (_, index) =>
+    beat({
+      order: index,
+      sourceSegmentOrders: [Math.min(index, 2)],
+      text: "星星".repeat(33),
+      optional: false,
+    }),
+  );
+  return {
+    stylePrompt: "柔和 3D 毛绒质感，暖色，儿童绘本动画",
+    beats,
+    clips: [
+      { order: 0, beats: [0, 1] },
+      { order: 1, beats: [2, 3] },
+    ],
+  };
+}
+
+describe("validateStoryboard 结构错误分支", () => {
+  function invalid(mutate: (input: ReturnType<typeof validInput>) => void) {
+    const input = validInput();
+    mutate(input);
+    return input;
+  }
+
+  it("stylePrompt 非字符串 / beats 为空 / beats 超上限", () => {
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            (input as unknown as Record<string, unknown>).stylePrompt = 1;
+          }),
+        ),
+      "STORYBOARD_TYPE",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats = [];
+          }),
+        ),
+      "STORYBOARD_BEATS",
+    );
+    const nine = validInput();
+    nine.beats = Array.from({ length: 9 }, (_, index) =>
+      beat({ order: index, sourceSegmentOrders: [0] }),
+    );
+    expectCode(() => check(nine), "STORYBOARD_BEATS");
+  });
+
+  it("beat order / speaker / characters 非法", () => {
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[1].order = 0;
+          }),
+        ),
+      "STORYBOARD_ORDER",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            (input.beats[0] as Record<string, unknown>).speaker = "bob";
+          }),
+        ),
+      "STORYBOARD_SPEAKER",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            (input.beats[0] as Record<string, unknown>).characters = "elly";
+          }),
+        ),
+      "STORYBOARD_CHARACTERS",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].characters = ["bob" as never];
+          }),
+        ),
+      "STORYBOARD_CHARACTERS",
+    );
+  });
+
+  it("sourceSegmentOrders 为空 / 非递增", () => {
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].sourceSegmentOrders = [];
+          }),
+        ),
+      "STORYBOARD_SOURCE",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].sourceSegmentOrders = [1, 0];
+          }),
+        ),
+      "STORYBOARD_SOURCE",
+    );
+  });
+
+  it("text 超长 / 换行，shot 为空，visualPrompt 超长", () => {
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].text = "星".repeat(121);
+          }),
+        ),
+      "STORYBOARD_TOO_LONG",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].text = "第一行\n第二行";
+          }),
+        ),
+      "STORYBOARD_TEXT_NEWLINE",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].shot = " ";
+          }),
+        ),
+      "STORYBOARD_EMPTY",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.beats[0].visualPrompt = "星".repeat(401);
+          }),
+        ),
+      "STORYBOARD_TOO_LONG",
+    );
+  });
+
+  it("clips 非数组 / 超过 2 段 / order 错 / beats 空 / 越界", () => {
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            (input as Record<string, unknown>).clips = "x";
+          }),
+        ),
+      "STORYBOARD_CLIPS",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.clips = [
+              { order: 0, beats: [0] },
+              { order: 1, beats: [1] },
+              { order: 2, beats: [2] },
+            ];
+          }),
+        ),
+      "STORYBOARD_CLIPS",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.clips[0].order = 1;
+          }),
+        ),
+      "STORYBOARD_ORDER",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.clips[0].beats = [];
+          }),
+        ),
+      "STORYBOARD_CLIPS",
+    );
+    expectCode(
+      () =>
+        check(
+          invalid((input) => {
+            input.clips[0].beats = [99];
+          }),
+        ),
+      "STORYBOARD_CLIPS",
+    );
+  });
+});
+
 describe("validateStoryboard", () => {
   it("合法分镜原样通过，并补全信封字段", () => {
-    const result = validateStoryboard(validInput(), PAYLOAD, ENVELOPE);
+    const result = check(validInput());
     expect(result.version).toBe(1);
     expect(result.businessKey).toBe("elly/1/3");
     expect(result.beats).toHaveLength(3);
@@ -90,7 +303,7 @@ describe("validateStoryboard", () => {
   it("受控压缩：忠于原文的改写可以通过（不再要求原文连续子串）", () => {
     const input = validInput();
     input.beats[0].text = "小象在湖边散步。";
-    const result = validateStoryboard(input, PAYLOAD, ENVELOPE);
+    const result = check(input);
     expect(result.beats[0].text).toBe("小象在湖边散步。");
   });
 
@@ -99,7 +312,7 @@ describe("validateStoryboard", () => {
     input.beats[0].text = "小象打败了大坏人。";
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           forbiddenWords: ["坏人"],
         }),
       "STORYBOARD_FORBIDDEN_WORD",
@@ -109,7 +322,7 @@ describe("validateStoryboard", () => {
   it("违禁词列表未配置时不扫描", () => {
     const input = validInput();
     input.beats[0].text = "小象在湖边散步。";
-    const result = validateStoryboard(input, PAYLOAD, ENVELOPE);
+    const result = check(input);
     expect(result.beats[0].text).toBe("小象在湖边散步。");
   });
 
@@ -118,7 +331,7 @@ describe("validateStoryboard", () => {
     input.beats[0].shot = "镜头扫过一片血迹";
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           forbiddenWords: ["血迹"],
         }),
       "STORYBOARD_FORBIDDEN_WORD",
@@ -130,7 +343,7 @@ describe("validateStoryboard", () => {
     input.beats[0].visualPrompt = "地上有血迹，小象后退";
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           forbiddenWords: ["血迹"],
         }),
       "STORYBOARD_FORBIDDEN_WORD",
@@ -142,7 +355,7 @@ describe("validateStoryboard", () => {
     input.stylePrompt = "阴暗恐怖的森林，冷色";
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           forbiddenWords: ["恐怖"],
         }),
       "STORYBOARD_FORBIDDEN_WORD",
@@ -158,33 +371,27 @@ describe("validateStoryboard", () => {
       }),
     ];
     input.clips = [{ order: 0, beats: [0] }];
-    const result = validateStoryboard(input, PAYLOAD, ENVELOPE);
+    const result = check(input);
     expect(result.beats[0].sourceSegmentOrders).toEqual([0, 1]);
   });
 
   it("最多一处角色台词", () => {
     const input = validInput();
     input.beats[1].speaker = "elly";
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_SPEAKER_LIMIT",
-    );
+    expectCode(() => check(input), "STORYBOARD_SPEAKER_LIMIT");
   });
 
   it("角色说话时必须同时出现在画面里", () => {
     const input = validInput();
     input.beats[2].characters = [];
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_SPEAKER_OFFSCREEN",
-    );
+    expectCode(() => check(input), "STORYBOARD_SPEAKER_OFFSCREEN");
   });
 
   it("字数超预算失败", () => {
     const input = validInput();
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           maxChars: 10,
         }),
       "STORYBOARD_CHAR_BUDGET",
@@ -197,17 +404,14 @@ describe("validateStoryboard", () => {
       { order: 0, beats: [0, 1] },
       { order: 1, beats: [1] },
     ];
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_CLIP_COVERAGE",
-    );
+    expectCode(() => check(input), "STORYBOARD_CLIP_COVERAGE");
   });
 
   it("单段超 30 秒失败", () => {
     const input = validInput();
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           maxClipSeconds: 1,
         }),
       "STORYBOARD_CLIP_TOO_LONG",
@@ -218,8 +422,7 @@ describe("validateStoryboard", () => {
     const input = validInput();
     input.beats[1].optional = true;
     expectCode(
-      () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, { maxOptionalBeats: 0 }),
+      () => check(input, { maxOptionalBeats: 0 }),
       "STORYBOARD_OPTIONAL_LIMIT",
     );
   });
@@ -227,53 +430,50 @@ describe("validateStoryboard", () => {
   it("optional 必须是布尔值，字符串形式失败", () => {
     const input = validInput();
     (input.beats[1] as unknown as Record<string, unknown>).optional = "true";
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_TYPE",
-    );
+    expectCode(() => check(input), "STORYBOARD_TYPE");
   });
 
   it("开端 beat 标 optional 失败：三幕闭环不可裁剪开头", () => {
     const input = validInput();
     input.beats[0].optional = true;
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_ENDING_REQUIRED",
-    );
+    expectCode(() => check(input), "STORYBOARD_ENDING_REQUIRED");
   });
 
   it("结局 beat 标 optional 失败：禁止以可裁剪段收尾", () => {
     const input = validInput();
     input.beats[2].optional = true;
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_ENDING_REQUIRED",
-    );
+    expectCode(() => check(input), "STORYBOARD_ENDING_REQUIRED");
   });
 
   it("sourceSegmentOrders 越界失败", () => {
     const input = validInput();
     input.beats[0].sourceSegmentOrders = [99];
-    expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_SOURCE",
-    );
+    expectCode(() => check(input), "STORYBOARD_SOURCE");
   });
 
   it("情绪枚举非法失败", () => {
     const input = validInput();
     input.beats[0].emotion = "angry";
+    expectCode(() => check(input), "STORYBOARD_EMOTION");
+  });
+
+  it("默认下限：旁白不足 54 秒失败", () => {
     expectCode(
-      () => validateStoryboard(input, PAYLOAD, ENVELOPE),
-      "STORYBOARD_EMOTION",
+      () => validateStoryboard(validInput(), PAYLOAD, ENVELOPE),
+      "STORYBOARD_TOTAL_TOO_SHORT",
     );
   });
 
-  it("总时长超 60 秒失败", () => {
+  it("默认上下限：54–58 秒的完整分镜通过", () => {
+    const result = validateStoryboard(longInput(), PAYLOAD, ENVELOPE);
+    expect(result.beats).toHaveLength(4);
+  });
+
+  it("总时长超过上限失败", () => {
     const input = validInput();
     expectCode(
       () =>
-        validateStoryboard(input, PAYLOAD, ENVELOPE, {
+        check(input, {
           maxTotalSeconds: 1,
         }),
       "STORYBOARD_TOTAL_TOO_LONG",

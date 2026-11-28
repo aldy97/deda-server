@@ -55,6 +55,28 @@ export class AdventureVideoQueueService {
     });
   }
 
+  /**
+   * TTS 完成后暂停，等 superadmin 审核分镜与实测时长。
+   * 只认 running：worker 被回收/取消后不再把作业拉回审核态。
+   */
+  async awaitReview(
+    jobId: string,
+    input: { voiceTextHash: string; voiceTotalSec: number },
+  ): Promise<void> {
+    await this.prisma.adventureVideoJob.updateMany({
+      where: { id: jobId, status: "running" },
+      data: {
+        status: "awaiting_review",
+        stage: "review",
+        voiceTextHash: input.voiceTextHash,
+        voiceTotalSec: input.voiceTotalSec,
+        storyboardApprovedAt: null,
+        storyboardApprovedBy: null,
+        heartbeatAt: null,
+      },
+    });
+  }
+
   async succeed(
     jobId: string,
     input: { actualCostCents: number },

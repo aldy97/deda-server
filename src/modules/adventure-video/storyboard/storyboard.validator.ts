@@ -6,6 +6,7 @@ import {
   STORYBOARD_MAX_CLIP_SECONDS,
   STORYBOARD_MAX_OPTIONAL_BEATS,
   STORYBOARD_MAX_TOTAL_SECONDS,
+  STORYBOARD_MIN_TOTAL_SECONDS,
   type Storyboard,
   type StoryboardBeat,
   type StoryboardClip,
@@ -39,6 +40,7 @@ export interface ValidateStoryboardOptions {
   maxBeats?: number;
   maxClips?: number;
   maxClipSeconds?: number;
+  minTotalSeconds?: number;
   maxTotalSeconds?: number;
   maxOptionalBeats?: number;
   /** 儿童内容违禁词（复用 ADVENTURE_LINT_FORBIDDEN_WORDS 同源），命中即拒 */
@@ -109,6 +111,8 @@ export function validateStoryboard(
   const maxBeats = options.maxBeats ?? STORYBOARD_MAX_BEATS;
   const maxClips = options.maxClips ?? STORYBOARD_MAX_CLIPS;
   const maxClipSeconds = options.maxClipSeconds ?? STORYBOARD_MAX_CLIP_SECONDS;
+  const minTotalSeconds =
+    options.minTotalSeconds ?? STORYBOARD_MIN_TOTAL_SECONDS;
   const maxTotalSeconds =
     options.maxTotalSeconds ?? STORYBOARD_MAX_TOTAL_SECONDS;
   const maxOptionalBeats =
@@ -267,7 +271,7 @@ export function validateStoryboard(
   if (nonNarratorCount > 1) {
     fail(
       "STORYBOARD_SPEAKER_LIMIT",
-      "60 秒短片最多只允许一处角色台词，其余必须是旁白",
+      "故事短片最多只允许一处角色台词，其余必须是旁白",
       "beats",
     );
   }
@@ -365,6 +369,13 @@ export function validateStoryboard(
     (sum, beat) => sum + estimateBeatSeconds(beat.text),
     0,
   );
+  if (totalSeconds < minTotalSeconds) {
+    fail(
+      "STORYBOARD_TOTAL_TOO_SHORT",
+      `预估总时长 ${totalSeconds.toFixed(1)} 秒，低于 ${minTotalSeconds} 秒`,
+      "beats",
+    );
+  }
   if (totalSeconds > maxTotalSeconds) {
     fail(
       "STORYBOARD_TOTAL_TOO_LONG",
