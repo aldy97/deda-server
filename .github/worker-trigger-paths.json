@@ -1,0 +1,39 @@
+{
+  "$comment": "deploy-staging.yml 的 worker 重建触发清单。prefixes 为目录/前缀，exact 为跨模块单文件。新增 worker 依赖时由 src/common/workflows/worker-trigger-gate.spec.ts 的闭包守卫强制补全；type-only 导入不计入（编译期擦除）。",
+  "prefixes": [
+    "src/video-worker/",
+    "src/modules/adventure-video/",
+    "src/modules/prompt-registry/",
+    "src/common/prisma/",
+    "src/config/",
+    "src/prisma/"
+  ],
+  "exact": [
+    "src/modules/adventure-admin/adventure-audit.service.ts",
+    "src/modules/adventure-admin/adventure-bundle.ts",
+    "src/modules/adventure-admin/adventure-content-query.service.ts",
+    "src/modules/adventure-admin/adventure-content.service.ts",
+    "src/modules/adventure-admin/adventure-content.types.ts",
+    "src/modules/adventure-admin/adventure-linter.ts",
+    "src/modules/adventure-admin/adventure-simulator.ts",
+    "src/modules/adventure-admin/content-admin-profile.ts",
+    "src/modules/adventure-admin/filters/content-admin-exception.filter.ts",
+    "src/modules/adventure-admin/guards/content-admin.guard.ts",
+    "src/modules/adventure/adventure.constants.ts",
+    "src/modules/analytics/admin-role.ts",
+    "src/modules/analytics/guards/analytics-auth.guard.ts",
+    "src/modules/analytics/guards/super-admin.guard.ts",
+    "src/modules/llm/llm-cost.util.ts",
+    "src/modules/llm/llm.module.ts",
+    "src/modules/llm/llm.service.ts",
+    "src/modules/safety/safety-profile.ts",
+    "src/modules/vendor/child-safety.service.ts",
+    "src/common/filters/http-exception.filter.ts",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "nest-cli.json",
+    "docker/Dockerfile.worker",
+    ".dockerignore"
+  ]
+}
