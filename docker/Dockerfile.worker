@@ -1,0 +1,42 @@
+# 视频 worker 专用镜像。
+#
+# 与 docker/Dockerfile 刻意分开：API 镜像不装 ffmpeg 与中文字体，体积与启动
+# 完全不受短视频功能影响；需要媒体能力时才用本文件。
+#
+# 维护提醒：Node 版本、prisma 复制清单要与 docker/Dockerfile 保持一致，
+# 改主 Dockerfile 时同步检查这里。
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl
+
+COPY package*.json ./
+RUN npm ci --ignore-scripts
+
+COPY . .
+RUN npx prisma generate --schema=src/prisma/schema.prisma
+RUN npm run build
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# ffmpeg 负责合成；font-noto-cjk 负责中文字幕，缺字体会烧出方块。
+RUN apk add --no-cache openssl ffmpeg font-noto-cjk
+
+COPY package*.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
+COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src/prisma ./src/prisma
+
+ENV NODE_ENV=production
+
+# 不跑 migrate：迁移由 API 容器启动时执行，避免两个容器并发迁移。
+CMD ["node", "dist/src/video-worker/main"]

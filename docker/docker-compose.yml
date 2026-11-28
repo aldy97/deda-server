@@ -148,6 +148,64 @@ services:
       APP_ASSET_HOSTS: ${APP_ASSET_HOSTS:-}
       APP_ASSET_MAX_BYTES: ${APP_ASSET_MAX_BYTES:-2097152}
       APP_ASSET_MAX_DIMENSION: ${APP_ASSET_MAX_DIMENSION:-8000}
+      # 冒险短视频：API 侧只负责建单/查单（开关、预算、音色模式）；
+      # 真正的出片在 video-worker 服务里，两个 service 必须同时配置这些键。
+      ADVENTURE_VIDEO_ENABLED: ${ADVENTURE_VIDEO_ENABLED:-false}
+      VIDEO_TTS_MODE: ${VIDEO_TTS_MODE:-system}
+      VIDEO_TEASER_BUDGET_CNY: ${VIDEO_TEASER_BUDGET_CNY:-50}
+      BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
+      BAILIAN_WORKSPACE_ID: ${BAILIAN_WORKSPACE_ID:-}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_SIGNED_URL_TTL_SEC: ${OSS_SIGNED_URL_TTL_SEC:-3600}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - deda-network
+
+  # 短视频出片 worker：不监听端口，ADVENTURE_VIDEO_ENABLED=false 时只启动空转日志。
+  # 依赖独立镜像（含 ffmpeg + 中文字体），与 app 分开重启/扩容。
+  # profiles 显式 opt-in：现有 `docker compose up -d` 不会拉起它，
+  # 启用时加 `--profile video`，避免本次改动影响既有发布流程。
+  video-worker:
+    profiles: ["video"]
+    image: deda-server-video-worker:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: deda-server-video-worker
+    restart: always
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_OPTIONS: ${NODE_OPTIONS:-}
+      DATABASE_URL: postgresql://deda:${DB_PASSWORD}@postgres:5432/${DB_NAME:-deda}?schema=public
+      REDIS_URL: redis://redis:6379/${REDIS_DB:-0}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-qwen-flash}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-30000}
+      ADVENTURE_VIDEO_ENABLED: ${ADVENTURE_VIDEO_ENABLED:-false}
+      VIDEO_TTS_MODE: ${VIDEO_TTS_MODE:-system}
+      VIDEO_ASPECT: ${VIDEO_ASPECT:-9:16}
+      VIDEO_RESOLUTION: ${VIDEO_RESOLUTION:-720P}
+      VIDEO_TEASER_BUDGET_CNY: ${VIDEO_TEASER_BUDGET_CNY:-50}
+      VIDEO_WORKER_CONCURRENCY: ${VIDEO_WORKER_CONCURRENCY:-2}
+      VIDEO_POLL_INTERVAL_MS: ${VIDEO_POLL_INTERVAL_MS:-15000}
+      VIDEO_FONTS_DIR: ${VIDEO_FONTS_DIR:-/usr/share/fonts}
+      VIDEO_REFERENCE_KEYS: ${VIDEO_REFERENCE_KEYS:-{}}
+      BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
+      BAILIAN_WORKSPACE_ID: ${BAILIAN_WORKSPACE_ID:-}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_SIGNED_URL_TTL_SEC: ${OSS_SIGNED_URL_TTL_SEC:-3600}
     depends_on:
       - postgres
       - redis

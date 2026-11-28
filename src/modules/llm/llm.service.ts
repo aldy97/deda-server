@@ -23,6 +23,7 @@ export const LLM_SCENES = [
   "sleep_story_generate",
   "chat_main",
   "parent_report",
+  "adventure_video_storyboard",
 ] as const;
 
 export type LlmScene = (typeof LLM_SCENES)[number];

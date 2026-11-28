@@ -7,6 +7,7 @@ import { resolve } from "path";
 import appConfig from "./config/app.config";
 import databaseConfig from "./config/database.config";
 import redisConfig from "./config/redis.config";
+import videoConfig from "./config/video.config";
 import { UsersModule } from "./modules/users/users.module";
 import { DevicesModule } from "./modules/devices/devices.module";
 import { ChildProfilesModule } from "./modules/child-profiles/child-profiles.module";
@@ -39,6 +40,7 @@ import { AnalyticsModule } from "./modules/analytics/analytics.module";
 import { TurnDecisionModule } from "./modules/turn-decision/turn-decision.module";
 import { BaiduAgentModule } from "./modules/baidu-agent/baidu-agent.module";
 import { AppAssetsModule } from "./modules/app-assets/app-assets.module";
+import { AdventureVideoModule } from "./modules/adventure-video/adventure-video.module";
 
 /**
  * deda-dashboard SPA 静态托管（备案期间 staging 直连 :3001/dashboard 的承载方式；
@@ -63,7 +65,7 @@ const staticImports = existsSync(dashboardDistPath)
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [appConfig, databaseConfig, redisConfig],
+      load: [appConfig, databaseConfig, redisConfig, videoConfig],
       envFilePath: [".env"],
     }),
     LoggerModule.forRoot({
@@ -106,6 +108,7 @@ const staticImports = existsSync(dashboardDistPath)
     TurnDecisionModule,
     BaiduAgentModule,
     AppAssetsModule,
+    AdventureVideoModule,
     ...staticImports,
   ],
 })
