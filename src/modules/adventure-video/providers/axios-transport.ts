@@ -24,9 +24,15 @@ export class AxiosTransport implements HttpTransport {
     }
   }
 
-  async get(url: string): Promise<unknown> {
+  async get(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<unknown> {
     try {
-      const response = await axios.get(url, { timeout: this.timeoutMs });
+      const response = await axios.get(url, {
+        headers,
+        timeout: this.timeoutMs,
+      });
       return response.data;
     } catch (error) {
       throw toProviderError("bailian", error);

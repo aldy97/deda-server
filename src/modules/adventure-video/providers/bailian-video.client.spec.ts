@@ -135,6 +135,16 @@ describe("BailianVideoClient", () => {
     });
   });
 
+  it("查询必须带鉴权头：裸 GET 会被百炼 401 拒绝（2026-11-28 真实出片暴露）", async () => {
+    const { client, http } = makeClient();
+    http.get.mockResolvedValueOnce({ output: { task_status: "PENDING" } });
+    await client.poll("t1");
+    expect(http.get).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/tasks/t1"),
+      { Authorization: expect.stringMatching(/^Bearer /) },
+    );
+  });
+
   it("任务成功但没有 video_url 视为失败，避免下游拿到 undefined", async () => {
     const { client, http } = makeClient();
     http.get.mockResolvedValueOnce({ output: { task_status: "SUCCEEDED" } });

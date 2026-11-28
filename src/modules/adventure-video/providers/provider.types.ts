@@ -56,7 +56,7 @@ export interface HttpTransport {
     body: unknown,
     headers?: Record<string, string>,
   ): Promise<unknown>;
-  get(url: string): Promise<unknown>;
+  get(url: string, headers?: Record<string, string>): Promise<unknown>;
   getBuffer(url: string): Promise<Buffer>;
 }
 
