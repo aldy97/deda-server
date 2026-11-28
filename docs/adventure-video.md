@@ -131,7 +131,8 @@ POST /analytics/adventure-video/jobs/:id/cancel {reason}
 ## 10. 运维
 
 - 迁移：`npx prisma migrate deploy --schema=src/prisma/schema.prisma`（只跑一次，API 容器启动会做）。
-- worker：`docker compose ... up -d video-worker`；`ADVENTURE_VIDEO_ENABLED=false` 时只打日志不轮询。
+- worker：`docker compose --profile video ... up -d video-worker`；默认 profile 不启动它，
+  显式加 `--profile video` 才拉起；`ADVENTURE_VIDEO_ENABLED=false` 时只打日志不轮询。
 - 并发：`VIDEO_WORKER_CONCURRENCY`（默认 2）；可灵系列 10 并发是账号级共享，别开太大。
 - 中间产物：`adventure-video/jobs/...`，建议生命周期 14 天；`final/` 长期保留。
 - 紧急止血：把 `ADVENTURE_VIDEO_ENABLED` 改回 false 并重启 app + worker；

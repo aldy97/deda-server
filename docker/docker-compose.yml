@@ -169,7 +169,10 @@ services:
 
   # 短视频出片 worker：不监听端口，ADVENTURE_VIDEO_ENABLED=false 时只启动空转日志。
   # 依赖独立镜像（含 ffmpeg + 中文字体），与 app 分开重启/扩容。
+  # profiles 显式 opt-in：现有 `docker compose up -d` 不会拉起它，
+  # 启用时加 `--profile video`，避免本次改动影响既有发布流程。
   video-worker:
+    profiles: ["video"]
     image: deda-server-video-worker:${IMAGE_TAG:-latest}
     build:
       context: ..
