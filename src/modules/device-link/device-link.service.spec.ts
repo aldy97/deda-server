@@ -6,6 +6,7 @@ import { DeviceNetworkAggregationService } from "./device-network-aggregation.se
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { ClientApiService } from "@/modules/client-api/client-api.service";
 
 const flushPromises = async (ticks = 3) => {
   for (let i = 0; i < ticks; i += 1) {
@@ -19,6 +20,7 @@ describe("DeviceLinkService", () => {
   let redisService: any;
   let prisma: any;
   let networkAggregation: any;
+  let clientApi: { renewInstanceSignatures: jest.Mock };
   let module: TestingModule;
 
   beforeEach(async () => {
@@ -61,6 +63,14 @@ describe("DeviceLinkService", () => {
           provide: DeviceNetworkAggregationService,
           useValue: { record: jest.fn() },
         },
+        {
+          provide: ClientApiService,
+          useValue: {
+            renewInstanceSignatures: jest
+              .fn()
+              .mockResolvedValue({ renewed: true }),
+          },
+        },
       ],
     }).compile();
 
@@ -69,6 +79,7 @@ describe("DeviceLinkService", () => {
     redisService = module.get(RedisService);
     prisma = module.get(PrismaService);
     networkAggregation = module.get(DeviceNetworkAggregationService);
+    clientApi = module.get(ClientApiService);
   });
 
   it("should be defined", () => {
@@ -378,6 +389,117 @@ describe("DeviceLinkService", () => {
       expect(cached.charging).toBe(true);
       expect(cached.volume).toBe(80);
       expect(cached.battery).toBe(75);
+    });
+  });
+
+  describe("signature renewal（MQTT v1.5 §4.2）", () => {
+    const up = (data: Record<string, unknown> | null) =>
+      Buffer.from(JSON.stringify({ cmd: "query", flag: "success", data }));
+
+    it("forwards both signatures on a query report", async () => {
+      service.handleMessage(
+        "device/up/aabbccddeeff",
+        up({
+          authorization_Role: "role-raw",
+          authorization_TTS: "tts-raw",
+        }),
+      );
+      await flushPromises();
+
+      expect(clientApi.renewInstanceSignatures).toHaveBeenCalledTimes(1);
+      expect(clientApi.renewInstanceSignatures).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        "role-raw",
+        "tts-raw",
+      );
+    });
+
+    it("forwards a single field so the callee can reject the half payload", async () => {
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({ authorization_Role: "role-raw" }),
+      );
+      await flushPromises();
+
+      expect(clientApi.renewInstanceSignatures).toHaveBeenCalledWith(
+        "AABBCCDDEEFF",
+        "role-raw",
+        undefined,
+      );
+    });
+
+    it("does not call renewal when signatures are absent", async () => {
+      service.handleMessage("device/up/AABBCCDDEEFF", up({ battery: 80 }));
+      await flushPromises();
+
+      expect(clientApi.renewInstanceSignatures).not.toHaveBeenCalled();
+    });
+
+    it("does not call renewal for a null data payload", async () => {
+      service.handleMessage("device/up/AABBCCDDEEFF", up(null));
+      await flushPromises();
+
+      expect(clientApi.renewInstanceSignatures).not.toHaveBeenCalled();
+    });
+
+    it("ignores signatures on non-query commands", async () => {
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        Buffer.from(
+          JSON.stringify({
+            cmd: "volume",
+            flag: "success",
+            data: { volume: 30, authorization_Role: "role-raw" },
+          }),
+        ),
+      );
+      await flushPromises();
+
+      expect(clientApi.renewInstanceSignatures).not.toHaveBeenCalled();
+    });
+
+    it("keeps the status merge working when renewal rejects", async () => {
+      const errorSpy = jest
+        .spyOn(Logger.prototype, "error")
+        .mockImplementation(() => undefined);
+      clientApi.renewInstanceSignatures.mockRejectedValue(
+        new Error("redis down"),
+      );
+
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({
+          battery: 77,
+          authorization_Role: "role-raw",
+          authorization_TTS: "tts-raw",
+        }),
+      );
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached.battery).toBe(77);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to renew signatures"),
+        expect.any(Error),
+      );
+    });
+
+    it("never persists signature values in the device link cache", async () => {
+      service.handleMessage(
+        "device/up/AABBCCDDEEFF",
+        up({
+          battery: 80,
+          authorization_Role: "role-raw",
+          authorization_TTS: "tts-raw",
+        }),
+      );
+      await flushPromises();
+
+      const cached = JSON.parse(redisService.setValue.mock.calls[0][1]);
+      expect(cached).not.toHaveProperty("authorization_Role");
+      expect(cached).not.toHaveProperty("authorization_TTS");
+      expect(JSON.stringify(cached)).not.toContain("role-raw");
+      expect(JSON.stringify(cached)).not.toContain("tts-raw");
     });
   });
 

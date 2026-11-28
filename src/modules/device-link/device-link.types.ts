@@ -69,6 +69,16 @@ export interface DeviceQueryData {
    * 4G 或网络未就绪时为显式 null（需清空旧值）；缺省表示老固件未上报。
    */
   wifiRssi?: number | null;
+  /**
+   * 续签用的 switchSceneRole BCE 签名（协议 v1.5 §4.2，每 600 秒上报）。
+   * 仅用于替换当前实例签名，**不写入 device:link 状态缓存、不落日志**。
+   */
+  authorization_Role?: string;
+  /**
+   * 续签用的 interrupt BCE 签名（协议 v1.5 §4.2，每 600 秒上报）。
+   * 仅用于替换当前实例签名，**不写入 device:link 状态缓存、不落日志**。
+   */
+  authorization_TTS?: string;
 }
 
 /** volume 指令/回执数据 */

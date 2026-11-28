@@ -120,7 +120,9 @@
     "version": "1.2.3",
     "charging": false,
     "networkMode": "wifi",
-    "wifiRssi": -62
+    "wifiRssi": -62,
+    "authorization_Role": "bce-auth-v1/{accessKeyId}/{timestamp}/1800/host;x-bce-date/{signature}",
+    "authorization_TTS": "bce-auth-v1/{accessKeyId}/{timestamp}/1800/content-type;host;x-bce-date/{signature}"
   }
 }
 ```
@@ -133,8 +135,24 @@
 | charging | bool | true/false | 是否正在充电。**2026-11-11 约定增补**：机芯厂待实现；未上报时服务端按 `null` 处理，不影响既有链路 |
 | networkMode | string/null | `"wifi"` / `"4g"` / `null` | **v1.8 增补**：当前已就绪的网络模式；切网期间两路均未就绪时为 `null` |
 | wifiRssi | int/null | dBm 整数或 `null` | **v1.8 增补**：Wi‑Fi 联网时为当前连接 RSSI（如 `-62`）；4G 或未就绪时为 `null` |
+| authorization_Role | string | BCE v1 认证串 | **v1.5 增补**：每 600 秒随 query 上报一次新签名，替换当前实例的 switchSceneRole 签名；缺省表示本次不续签 |
+| authorization_TTS | string | BCE v1 认证串 | **v1.5 增补**：与 authorization_Role 同周期，替换当前实例的 interrupt 签名 |
 
-**服务端行为**: 更新设备电量、音量、版本信息，推送状态到App端，如有新固件则自动下发升级指令。
+**服务端行为**: 更新设备电量、音量、版本信息，推送状态到App端，如有新固件则自动下发升级指令；若本次上报带签名字段，另按 §5.2 续签当前实例。
+
+### 5.2 签名续签（v1.5 §4.2）
+
+设备在对话中每 600 秒通过 `device/up/{mac}` 的 `query.data` 带一组新签名（`authorization_Role` / `authorization_TTS`，有效期 1800 秒），服务端用它替换 `POST /client/bot/bot/start` 登记的**当前实例**签名。不新增主题、cmd 或 instanceid 字段。
+
+合并规则（服务端实现口径）：
+
+1. 两字段都缺省 → 不续签、不读 Redis。适用于未升级固件。
+2. **全有或全无**：两个字段必须同时存在、非空、是合法 BCE v1 认证串且未过期；任一不满足 → 两份都不写入，保留原值（拒绝半份续签）。
+3. 只有 `bot:current:{mac}` 指向、且记录 `status=active` 的实例参与续签；无当前实例或实例已 stop → 忽略。
+4. 逐字段比较：新签名时间戳严格大于已存签名时间戳才替换。相等（QoS1 重复上报）或更旧 → 不覆盖。新 `bot/start` 写入的首次签名同样参与比较。
+5. 写入只替换两份签名及其签名时间（`roleSignedAt` / `ttsSignedAt`），其余字段与 `status` 保持不变。
+6. `bot/stop` 时清理两份签名；已过期或不可解析的入站签名不会被接受。
+7. 签名原值不落日志、不进入设备状态缓存，仅保存在实例登记记录中。
 
 ---
 

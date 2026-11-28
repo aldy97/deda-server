@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { MqttModule } from "@/common/mqtt/mqtt.module";
 import { RedisModule } from "@/common/redis/redis.module";
+import { ClientApiModule } from "@/modules/client-api/client-api.module";
 import { DeviceLinkService } from "./device-link.service";
 import { DevicePresenceService } from "./device-presence.service";
 import { DeviceNetworkAggregationService } from "./device-network-aggregation.service";
@@ -12,7 +13,7 @@ import { DeviceNetworkAggregationService } from "./device-network-aggregation.se
  * 待机芯厂确认旧协议下线后清理旧模块。
  */
 @Module({
-  imports: [MqttModule, RedisModule],
+  imports: [MqttModule, RedisModule, ClientApiModule],
   providers: [
     DeviceLinkService,
     DevicePresenceService,

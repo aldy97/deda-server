@@ -18,6 +18,10 @@ import {
   VoiceReconcilePort,
 } from "@/modules/baidu-agent/baidu-agent.types";
 import {
+  isBceAuthExpired,
+  parseBceAuthString,
+} from "@/modules/baidu-agent/bce-auth-string.util";
+import {
   BOT_INSTANCE_TTL_SECONDS,
   PROVISION_RECENT_KEY,
   botCurrentKey,
@@ -33,6 +37,35 @@ import { BotStopDto } from "./dto/bot-stop.dto";
 
 /** 归一化后的 MAC 形态：十二位小写十六进制，无分隔符（机芯厂协议 1.4 节） */
 const NORMALIZED_MAC_PATTERN = /^[0-9a-f]{12}$/;
+
+/** bot/start 对签名字段的长度上限（与 BotStartDto 的 MaxLength 一致） */
+const MAX_AUTH_LENGTH = 8192;
+
+/** 续签被拒绝的原因；只用于日志与测试，不含签名原值 */
+export type SignatureRenewalReason =
+  | "invalid_payload"
+  | "signature_expired"
+  | "no_current_instance"
+  | "no_active_instance"
+  | "not_newer";
+
+export interface SignatureRenewalResult {
+  renewed: boolean;
+  roleUpdated: boolean;
+  ttsUpdated: boolean;
+  reason?: SignatureRenewalReason;
+}
+
+/**
+ * strictNullChecks 关闭时判别联合不会自动收窄，这里用可选 reason + 空串占位，
+ * 由调用方先判 `ok` 再读 raw/timestamp。
+ */
+interface CheckedSignature {
+  ok: boolean;
+  reason?: "invalid_payload" | "signature_expired";
+  raw: string;
+  timestamp: string;
+}
 
 /** 百度实例登记记录（Redis JSON 序列化存储） */
 interface BotInstanceRecord {
@@ -232,6 +265,12 @@ export class ClientApiService {
     const device = await this.assertDeviceRegistered(mac);
 
     const now = new Date().toISOString();
+    // 签名时间取设备签名串自身的时间戳（BCE 第 3 段），无法解析时回落服务器时间。
+    // 解析值参与「旧签名不覆盖新签名」的比较，服务器接收时间会引入本机时钟偏差。
+    const roleSignedAt =
+      parseBceAuthString(dto.authorization_Role)?.timestamp ?? now;
+    const ttsSignedAt =
+      parseBceAuthString(dto.authorization_TTS)?.timestamp ?? now;
     const key = botInstanceKey(mac, dto.instanceid);
     const existing = await this.readInstance(key);
     if (existing) {
@@ -244,8 +283,8 @@ export class ClientApiService {
         authorization: dto.authorization,
         authorization_Role: dto.authorization_Role,
         authorization_TTS: dto.authorization_TTS,
-        roleSignedAt: now,
-        ttsSignedAt: now,
+        roleSignedAt,
+        ttsSignedAt,
         cloudNode: dto.cloud_node ?? "cn",
         lang: dto.lang ?? DEVICE_DEFAULT_LANG,
       };
@@ -261,8 +300,8 @@ export class ClientApiService {
         authorization: dto.authorization,
         authorization_Role: dto.authorization_Role,
         authorization_TTS: dto.authorization_TTS,
-        roleSignedAt: now,
-        ttsSignedAt: now,
+        roleSignedAt,
+        ttsSignedAt,
         cloudNode: dto.cloud_node ?? "cn",
         lang: dto.lang ?? DEVICE_DEFAULT_LANG,
         status: "active",
@@ -292,8 +331,8 @@ export class ClientApiService {
   /**
    * start 登记完成后追平音色/语速期望值。
    *
-   * 重复 start 也要追平：那是签名续签的唯一时机，此前 deferred 的期望值
-   * 只有在这里才可能变成 live。
+   * 重复 start 也要追平：start 会刷新两份签名，此前 deferred 的期望值
+   * 需要在新签名下重试；对话中的 600 秒续签由 renewInstanceSignatures 承担。
    *
    * 本方法由 botStart 以 fire-and-forget 方式触发，因此绝不允许未捕获的
    * rejection 冒泡：v1.4 §5.2 要求 start 幂等返回 {"code":200}，追平失败也不能
@@ -348,6 +387,236 @@ export class ClientApiService {
       JSON.stringify(ended),
       BOT_INSTANCE_TTL_SECONDS,
     );
+  }
+
+  /**
+   * MQTT v1.5 §4.2 签名续签：设备每 600 秒在 `query.data` 带两份新签名，
+   * 替换当前活跃实例的 switchSceneRole / interrupt 签名。
+   *
+   * 规则（Q15）：
+   * - 两字段缺省 → 不动作（老固件）；
+   * - 全有或全无：任一缺失/null/空串/格式错/已过期 → 两份都不写；
+   * - 逐字段比较签名自身 timestamp，严格更新才替换；相等或更旧不写；
+   * - 只改签名与签名时间，保留其余字段与 status。
+   *
+   * 写前复检 `bot:current` 与实例记录，缩小与 bot/stop、bot/start 的竞态窗口；
+   * 残留窗口最多让一次实时切换 deferred，下一轮 start 或 600 秒上报自愈。
+   */
+  async renewInstanceSignatures(
+    mac: string,
+    authorizationRole: unknown,
+    authorizationTts: unknown,
+  ): Promise<SignatureRenewalResult> {
+    if (authorizationRole === undefined && authorizationTts === undefined) {
+      return this.rejectRenewal("invalid_payload");
+    }
+
+    const normalizedMac = mac.replace(/[^0-9A-Fa-f]/g, "").toLowerCase();
+    const role = this.checkRenewalSignature(
+      authorizationRole,
+      "authorization_Role",
+      normalizedMac,
+    );
+    const tts = this.checkRenewalSignature(
+      authorizationTts,
+      "authorization_TTS",
+      normalizedMac,
+    );
+    if (!role.ok) {
+      if (!tts.ok && tts.reason === "signature_expired") {
+        return this.rejectRenewal("signature_expired");
+      }
+      return this.rejectRenewal(role.reason);
+    }
+    if (!tts.ok) {
+      return this.rejectRenewal(tts.reason);
+    }
+
+    const current = await this.loadActiveInstance(normalizedMac);
+    if (typeof current === "string") {
+      return this.rejectRenewal(current);
+    }
+    const applied = this.applyRenewal(current.record, role, tts);
+    if (!applied.roleUpdated && !applied.ttsUpdated) {
+      this.logger.debug(
+        `Signature renewal skipped: not newer, mac=${normalizedMac}`,
+      );
+      return this.rejectRenewal("not_newer");
+    }
+
+    // 写前复检：期间若发生 stop/start 则放弃，避免把已结束实例复活，
+    // 或用旧签名覆盖新 start 的签名。
+    const freshInstanceId = await this.redis.getValue(
+      botCurrentKey(normalizedMac),
+    );
+    if (freshInstanceId !== current.instanceId) {
+      this.logger.debug(
+        `Signature renewal skipped: current instance changed, mac=${normalizedMac}`,
+      );
+      return this.rejectRenewal("no_current_instance");
+    }
+    const freshRecord = await this.readActiveRecord(current.key);
+    if (!freshRecord) {
+      return this.rejectRenewal("no_active_instance");
+    }
+    const freshApplied = this.applyRenewal(freshRecord, role, tts);
+    if (!freshApplied.roleUpdated && !freshApplied.ttsUpdated) {
+      this.logger.debug(
+        `Signature renewal skipped: not newer after recheck, mac=${normalizedMac}`,
+      );
+      return this.rejectRenewal("not_newer");
+    }
+
+    await this.redis.setValue(
+      current.key,
+      JSON.stringify(freshApplied.record),
+      BOT_INSTANCE_TTL_SECONDS,
+    );
+    this.logger.debug(
+      `Signatures renewed, mac=${normalizedMac}, roleUpdated=${freshApplied.roleUpdated}, ttsUpdated=${freshApplied.ttsUpdated}`,
+    );
+    return {
+      renewed: true,
+      roleUpdated: freshApplied.roleUpdated,
+      ttsUpdated: freshApplied.ttsUpdated,
+    };
+  }
+
+  private async loadActiveInstance(
+    mac: string,
+  ): Promise<
+    | { instanceId: string; key: string; record: BotInstanceRecord }
+    | SignatureRenewalReason
+  > {
+    const instanceId = await this.redis.getValue(botCurrentKey(mac));
+    if (!instanceId) {
+      this.logger.debug(
+        `Signature renewal skipped: no current instance, mac=${mac}`,
+      );
+      return "no_current_instance";
+    }
+    const key = botInstanceKey(mac, instanceId);
+    const record = await this.readActiveRecord(key);
+    if (!record) {
+      this.logger.debug(
+        `Signature renewal skipped: no active instance, mac=${mac}`,
+      );
+      return "no_active_instance";
+    }
+    return { instanceId, key, record };
+  }
+
+  private async readActiveRecord(
+    key: string,
+  ): Promise<BotInstanceRecord | null> {
+    const raw = await this.redis.getValue(key);
+    if (!raw) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      this.logger.warn("corrupted bot instance record, treating as missing");
+      return null;
+    }
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as BotInstanceRecord;
+    return record.status === "active" ? record : null;
+  }
+
+  private checkRenewalSignature(
+    raw: unknown,
+    field: "authorization_Role" | "authorization_TTS",
+    mac: string,
+  ): CheckedSignature {
+    if (
+      typeof raw !== "string" ||
+      raw.length === 0 ||
+      raw.length > MAX_AUTH_LENGTH
+    ) {
+      this.logger.warn(
+        `Signature renewal rejected: invalid ${field}, mac=${mac}`,
+      );
+      return {
+        ok: false,
+        reason: "invalid_payload",
+        raw: "",
+        timestamp: "",
+      };
+    }
+    const parsed = parseBceAuthString(raw);
+    if (!parsed) {
+      this.logger.warn(
+        `Signature renewal rejected: unparsable ${field}, mac=${mac}`,
+      );
+      return {
+        ok: false,
+        reason: "invalid_payload",
+        raw: "",
+        timestamp: "",
+      };
+    }
+    if (isBceAuthExpired(parsed)) {
+      this.logger.warn(
+        `Signature renewal rejected: expired ${field}, mac=${mac}`,
+      );
+      return {
+        ok: false,
+        reason: "signature_expired",
+        raw: "",
+        timestamp: "",
+      };
+    }
+    return { ok: true, raw, timestamp: parsed.timestamp };
+  }
+
+  private applyRenewal(
+    record: BotInstanceRecord,
+    role: CheckedSignature,
+    tts: CheckedSignature,
+  ): {
+    record: BotInstanceRecord;
+    roleUpdated: boolean;
+    ttsUpdated: boolean;
+  } {
+    const roleUpdated = this.isSignatureNewer(
+      role.timestamp,
+      record.authorization_Role,
+    );
+    const ttsUpdated = this.isSignatureNewer(
+      tts.timestamp,
+      record.authorization_TTS,
+    );
+    if (!roleUpdated && !ttsUpdated) {
+      return { record, roleUpdated, ttsUpdated };
+    }
+    const updated: BotInstanceRecord = { ...record };
+    if (roleUpdated) {
+      updated.authorization_Role = role.raw;
+      updated.roleSignedAt = role.timestamp;
+    }
+    if (ttsUpdated) {
+      updated.authorization_TTS = tts.raw;
+      updated.ttsSignedAt = tts.timestamp;
+    }
+    return { record: updated, roleUpdated, ttsUpdated };
+  }
+
+  /**
+   * 新签名是否严格晚于已存签名。已存值缺失或不可解析视为无基线，接受新值。
+   */
+  private isSignatureNewer(
+    incomingTimestamp: string,
+    stored: string | undefined,
+  ): boolean {
+    const storedParsed = parseBceAuthString(stored);
+    if (!storedParsed) return true;
+    return Date.parse(incomingTimestamp) > Date.parse(storedParsed.timestamp);
+  }
+
+  private rejectRenewal(
+    reason: SignatureRenewalReason,
+  ): SignatureRenewalResult {
+    return { renewed: false, roleUpdated: false, ttsUpdated: false, reason };
   }
 
   /**
