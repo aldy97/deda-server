@@ -12,5 +12,6 @@ import { BaiduAgentModule } from "@/modules/baidu-agent/baidu-agent.module";
   imports: [BaiduAgentModule],
   controllers: [ClientApiController],
   providers: [ClientApiService],
+  exports: [ClientApiService],
 })
 export class ClientApiModule {}

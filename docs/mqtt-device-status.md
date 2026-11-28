@@ -261,5 +261,7 @@ MQTT_PASSWORD=<32 位随机>
 - API 上 `null` 同时表示「切网中」与「老固件未知」，服务端不做区分。
 - 离线时字段保留最后已知值（Redis TTL 3600s），**前端必须按 `status === "online"` 门控展示**，
   否则会拿一小时前的信号骗家长。
-- 协议 v1.8 第 4.2 节的 `authorization_Role` / `authorization_TTS` 续签**尚未实现**，
-  属独立议题（长对话超过 30 分钟后签名过期，切音色/打断可能失败）。
+- 协议 v1.5 §4.2 的 `authorization_Role` / `authorization_TTS` 续签已实现（合并规则见
+  `docs/vendor-mqtt-protocol.md` §5.2）。设备每 600 秒随 query 上报，服务端替换当前实例的
+  两份 1800 秒签名；缺省、半份、已过期或更旧的签名一律不覆盖。固件侧尚未升级，现网设备
+  不会发送这两个字段，链路保持原行为。

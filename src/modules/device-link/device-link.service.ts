@@ -7,6 +7,7 @@ import {
 import { MqttService } from "@/common/mqtt/mqtt.service";
 import { RedisService } from "@/common/redis/redis.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { ClientApiService } from "@/modules/client-api/client-api.service";
 import { DevicePresenceService } from "./device-presence.service";
 import { DeviceNetworkAggregationService } from "./device-network-aggregation.service";
 import {
@@ -49,6 +50,7 @@ export class DeviceLinkService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly presence: DevicePresenceService,
     private readonly networkAggregation: DeviceNetworkAggregationService,
+    private readonly clientApi: ClientApiService,
   ) {}
 
   onModuleInit(): void {
@@ -227,9 +229,12 @@ export class DeviceLinkService implements OnModuleInit {
     });
 
     switch (message.cmd) {
-      case DeviceLinkCommand.Query:
-        this.mergeQueryStatus(mac, (message.data ?? {}) as DeviceQueryData);
+      case DeviceLinkCommand.Query: {
+        const data = (message.data ?? {}) as DeviceQueryData;
+        this.mergeQueryStatus(mac, data);
+        this.renewSignaturesIfPresent(mac, data);
         break;
+      }
       case DeviceLinkCommand.Volume:
         // 音量设置回执（协议 4.2 节 volume 为双向）
         this.mergeQueryStatus(mac, {
@@ -247,6 +252,32 @@ export class DeviceLinkService implements OnModuleInit {
         this.logger.debug(`Ignoring unknown cmd from ${mac}: ${message.cmd}`);
         this.touch(mac);
     }
+  }
+
+  /**
+   * MQTT v1.5 §4.2：query.data 带签名字段时才触发续签。
+   * 普通 5 秒心跳不带字段，不额外读 Redis；续签失败绝不能影响状态合并或心跳。
+   */
+  private renewSignaturesIfPresent(mac: string, data: DeviceQueryData): void {
+    const raw = data as {
+      authorization_Role?: unknown;
+      authorization_TTS?: unknown;
+    };
+    if (
+      raw.authorization_Role === undefined &&
+      raw.authorization_TTS === undefined
+    ) {
+      return;
+    }
+    void this.clientApi
+      .renewInstanceSignatures(
+        mac,
+        raw.authorization_Role,
+        raw.authorization_TTS,
+      )
+      .catch((err: Error) => {
+        this.logger.error(`Failed to renew signatures for ${mac}`, err);
+      });
   }
 
   /**

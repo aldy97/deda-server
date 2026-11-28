@@ -25,6 +25,29 @@ const MAC = "aabbccddeeff";
 // 黄金值：md5_ascii(md5_utf8(TEST_MAC_KEY + MAC).hexdigest()).hexdigest()
 const GOLDEN_PASSWORD = "84080871e18d02315d66c72e07bcaf45";
 
+const INSTANCE_ID = "9223372036854775806";
+
+/** 秒级 ISO 8601（BCE 签名 timestamp 段只接受这种格式） */
+const isoSecondsAgo = (seconds: number): string =>
+  new Date(Date.now() - seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/** 拼一份格式合法的 BCE v1 认证串 */
+const bceAuth = (
+  timestamp: string,
+  options: {
+    expires?: number;
+    headers?: string;
+    signature?: string;
+  } = {},
+): string => {
+  const {
+    expires = 1800,
+    headers = "host;x-bce-date",
+    signature = "signature",
+  } = options;
+  return `bce-auth-v1/ak/${timestamp}/${expires}/${headers}/${signature}`;
+};
+
 describe("ClientApiService", () => {
   let service: ClientApiService;
   let prisma: {
@@ -281,6 +304,41 @@ describe("ClientApiService", () => {
       expect(record.authorization).toBeUndefined();
       expect(record.authorization_Role).toBe("role-only");
       expect(record.authorization_TTS).toBe("tts-only");
+    });
+
+    it("stores each signature's own timestamp instead of server receipt time", async () => {
+      const roleTs = "2026-11-18T10:00:00Z";
+      const ttsTs = "2026-11-18T10:05:00Z";
+      await service.botStart({
+        ...startDto,
+        authorization_Role: bceAuth(roleTs, { signature: "role-sig" }),
+        authorization_TTS: bceAuth(ttsTs, { signature: "tts-sig" }),
+      });
+
+      const record = JSON.parse(
+        redisStore.get(botInstanceKey(MAC, startDto.instanceid)) ?? "{}",
+      );
+      expect(record.roleSignedAt).toBe(roleTs);
+      expect(record.ttsSignedAt).toBe(ttsTs);
+    });
+
+    it("falls back per field to server time when a signature is unparsable", async () => {
+      const before = Date.now();
+      const ttsTs = "2026-11-18T10:05:00Z";
+      await service.botStart({
+        ...startDto,
+        authorization_Role: "legacy-role",
+        authorization_TTS: bceAuth(ttsTs, { signature: "tts-sig" }),
+      });
+
+      const record = JSON.parse(
+        redisStore.get(botInstanceKey(MAC, startDto.instanceid)) ?? "{}",
+      );
+      expect(record.roleSignedAt).not.toBe("legacy-role");
+      expect(Date.parse(record.roleSignedAt)).toBeGreaterThanOrEqual(
+        before - 1000,
+      );
+      expect(record.ttsSignedAt).toBe(ttsTs);
     });
   });
 
@@ -566,6 +624,406 @@ describe("ClientApiService", () => {
         vol: 1,
         spd: 1.2,
       });
+    });
+  });
+
+  describe("renewInstanceSignatures", () => {
+    const OLD_TS = isoSecondsAgo(900);
+    const NEW_TS = isoSecondsAgo(60);
+    const OLD_ROLE = bceAuth(OLD_TS, { signature: "old-role-sig" });
+    const OLD_TTS = bceAuth(OLD_TS, {
+      headers: "content-type;host;x-bce-date",
+      signature: "old-tts-sig",
+    });
+    const NEW_ROLE = bceAuth(NEW_TS, { signature: "new-role-sig" });
+    const NEW_TTS = bceAuth(NEW_TS, {
+      headers: "content-type;host;x-bce-date",
+      signature: "new-tts-sig",
+    });
+
+    const activeRecord = (overrides: Record<string, unknown> = {}) => ({
+      instanceid: INSTANCE_ID,
+      appid: "app-1",
+      authorization: "legacy-auth",
+      authorization_Role: OLD_ROLE,
+      authorization_TTS: OLD_TTS,
+      roleSignedAt: OLD_TS,
+      ttsSignedAt: OLD_TS,
+      cloudNode: "cn",
+      lang: "zh",
+      status: "active",
+      startedAt: "2026-11-01T00:00:00Z",
+      ...overrides,
+    });
+
+    const seed = (overrides: Record<string, unknown> = {}) => {
+      redisStore.set(botCurrentKey(MAC), INSTANCE_ID);
+      redisStore.set(
+        botInstanceKey(MAC, INSTANCE_ID),
+        JSON.stringify(activeRecord(overrides)),
+      );
+    };
+
+    const readRecord = () =>
+      JSON.parse(redisStore.get(botInstanceKey(MAC, INSTANCE_ID)) ?? "{}");
+
+    it("does nothing when both signatures are absent", async () => {
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        undefined,
+        undefined,
+      );
+
+      expect(result).toEqual({
+        renewed: false,
+        roleUpdated: false,
+        ttsUpdated: false,
+        reason: "invalid_payload",
+      });
+      expect(redis.getValue).not.toHaveBeenCalled();
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("rejects a half payload without touching redis", async () => {
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        undefined,
+      );
+
+      expect(result.reason).toBe("invalid_payload");
+      expect(redis.getValue).not.toHaveBeenCalled();
+    });
+
+    it("rejects a half payload when only TTS is present", async () => {
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        undefined,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("invalid_payload");
+      expect(redis.getValue).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["null", null],
+      ["empty string", ""],
+      ["non-string", 123],
+      ["malformed", "not-a-bce-string"],
+      [
+        "oversized",
+        `bce-auth-v1/ak/${NEW_TS}/1800/host;x-bce-date/${"x".repeat(8193)}`,
+      ],
+    ])("rejects %s payload without touching redis", async (_name, bad) => {
+      const result = await service.renewInstanceSignatures(MAC, bad, NEW_TTS);
+
+      expect(result.reason).toBe("invalid_payload");
+      expect(redis.getValue).not.toHaveBeenCalled();
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("rejects an already-expired inbound signature", async () => {
+      seed();
+      const expired = bceAuth(isoSecondsAgo(3600), {
+        signature: "expired-sig",
+      });
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        expired,
+      );
+
+      expect(result.reason).toBe("signature_expired");
+      expect(redis.setValue).not.toHaveBeenCalled();
+      expect(readRecord().authorization_TTS).toBe(OLD_TTS);
+    });
+
+    it("reports expiry when Role is invalid but TTS is expired", async () => {
+      const expired = bceAuth(isoSecondsAgo(3600), {
+        signature: "expired-sig",
+      });
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        "not-a-bce-string",
+        expired,
+      );
+
+      expect(result.reason).toBe("signature_expired");
+      expect(redis.getValue).not.toHaveBeenCalled();
+    });
+
+    it("returns no_current_instance when the device has no active instance", async () => {
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_current_instance");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("returns no_active_instance when the record is missing", async () => {
+      redisStore.set(botCurrentKey(MAC), INSTANCE_ID);
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_active_instance");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("treats a corrupted record as no_active_instance", async () => {
+      redisStore.set(botCurrentKey(MAC), INSTANCE_ID);
+      redisStore.set(botInstanceKey(MAC, INSTANCE_ID), "not-json");
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_active_instance");
+    });
+
+    it("treats a JSON null record as no_active_instance", async () => {
+      redisStore.set(botCurrentKey(MAC), INSTANCE_ID);
+      redisStore.set(botInstanceKey(MAC, INSTANCE_ID), "null");
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_active_instance");
+    });
+
+    it("does not renew an ended instance", async () => {
+      seed({ status: "ended" });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_active_instance");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("replaces both signatures and records their own timestamps", async () => {
+      seed();
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result).toEqual({
+        renewed: true,
+        roleUpdated: true,
+        ttsUpdated: true,
+        reason: undefined,
+      });
+      const record = readRecord();
+      expect(record).toMatchObject({
+        instanceid: INSTANCE_ID,
+        appid: "app-1",
+        authorization: "legacy-auth",
+        authorization_Role: NEW_ROLE,
+        authorization_TTS: NEW_TTS,
+        roleSignedAt: NEW_TS,
+        ttsSignedAt: NEW_TS,
+        cloudNode: "cn",
+        lang: "zh",
+        status: "active",
+        startedAt: "2026-11-01T00:00:00Z",
+      });
+      expect(redis.setValue).toHaveBeenCalledWith(
+        botInstanceKey(MAC, INSTANCE_ID),
+        expect.any(String),
+        BOT_INSTANCE_TTL_SECONDS,
+      );
+    });
+
+    it("updates only the field whose signature is newer", async () => {
+      seed({ authorization_TTS: NEW_TTS, ttsSignedAt: NEW_TS });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result).toMatchObject({
+        renewed: true,
+        roleUpdated: true,
+        ttsUpdated: false,
+      });
+      expect(readRecord().authorization_Role).toBe(NEW_ROLE);
+      expect(readRecord().authorization_TTS).toBe(NEW_TTS);
+    });
+
+    it("keeps a newer stored TTS while accepting a newer Role", async () => {
+      seed();
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        OLD_TTS,
+      );
+
+      expect(result).toMatchObject({
+        renewed: true,
+        roleUpdated: true,
+        ttsUpdated: false,
+      });
+      expect(readRecord().authorization_TTS).toBe(OLD_TTS);
+    });
+
+    it("is idempotent when both timestamps are equal", async () => {
+      seed();
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        OLD_ROLE,
+        OLD_TTS,
+      );
+
+      expect(result).toEqual({
+        renewed: false,
+        roleUpdated: false,
+        ttsUpdated: false,
+        reason: "not_newer",
+      });
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("accepts the first renewal when stored signatures are unparsable", async () => {
+      seed({ authorization_Role: "legacy-role", authorization_TTS: undefined });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result).toMatchObject({
+        renewed: true,
+        roleUpdated: true,
+        ttsUpdated: true,
+      });
+      expect(readRecord().authorization_Role).toBe(NEW_ROLE);
+      expect(readRecord().authorization_TTS).toBe(NEW_TTS);
+    });
+
+    it("normalizes MAC casing and separators to the lowercase key", async () => {
+      seed();
+
+      await service.renewInstanceSignatures(
+        "AA:BB:CC:DD:EE:FF",
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(redis.getValue).toHaveBeenCalledWith(botCurrentKey(MAC));
+      expect(redis.setValue).toHaveBeenCalledWith(
+        botInstanceKey(MAC, INSTANCE_ID),
+        expect.any(String),
+        BOT_INSTANCE_TTL_SECONDS,
+      );
+    });
+
+    it("skips the write when a new instance became current during the read", async () => {
+      seed();
+      let pointerReads = 0;
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === botCurrentKey(MAC)) {
+          pointerReads += 1;
+          return pointerReads === 1 ? INSTANCE_ID : "111";
+        }
+        return redisStore.get(key) ?? null;
+      });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_current_instance");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("skips the write when the instance was stopped during the read", async () => {
+      seed();
+      let recordReads = 0;
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === botInstanceKey(MAC, INSTANCE_ID)) {
+          recordReads += 1;
+          return JSON.stringify(
+            activeRecord(recordReads === 1 ? {} : { status: "ended" }),
+          );
+        }
+        return redisStore.get(key) ?? null;
+      });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("no_active_instance");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("skips the write when a start wrote fresher signatures during the read", async () => {
+      seed();
+      const fresherTs = isoSecondsAgo(10);
+      const fresher = {
+        authorization_Role: bceAuth(fresherTs, { signature: "fresher-role" }),
+        authorization_TTS: bceAuth(fresherTs, {
+          headers: "content-type;host;x-bce-date",
+          signature: "fresher-tts",
+        }),
+      };
+      let recordReads = 0;
+      redis.getValue.mockImplementation(async (key: string) => {
+        if (key === botInstanceKey(MAC, INSTANCE_ID)) {
+          recordReads += 1;
+          return JSON.stringify(activeRecord(recordReads === 1 ? {} : fresher));
+        }
+        return redisStore.get(key) ?? null;
+      });
+
+      const result = await service.renewInstanceSignatures(
+        MAC,
+        NEW_ROLE,
+        NEW_TTS,
+      );
+
+      expect(result.reason).toBe("not_newer");
+      expect(redis.setValue).not.toHaveBeenCalled();
+    });
+
+    it("never logs signature values", async () => {
+      const warn = jest
+        .spyOn(service["logger"], "warn")
+        .mockImplementation(() => undefined);
+      const secret = "DO-NOT-LOG-THIS-SIGNATURE";
+      const expired = bceAuth(isoSecondsAgo(3600), { signature: secret });
+
+      await service.renewInstanceSignatures(MAC, NEW_ROLE, expired);
+
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(secret);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(NEW_ROLE);
     });
   });
 });
