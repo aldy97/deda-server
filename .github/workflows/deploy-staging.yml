@@ -128,22 +128,24 @@ jobs:
 
       # worker 不监听端口，只能以「容器 running + 启动日志出现」判定。
       # runner.video-worker.runner.ts 只有两条启动日志，两条都算就绪。
+      # 容器名必须是 staging 专属名（staging compose 覆盖），与 base compose 的全局固定名隔离。
       - name: Worker health check
         if: steps.detect.outputs.rebuild == 'true'
         run: |
           ssh "${{ secrets.ECS_USER }}@${{ secrets.ECS_HOST }}" bash -s <<'EOF'
           set -e
+          CONTAINER=deda-server-video-worker-staging
           for _ in $(seq 1 12); do
-            status="$(docker inspect -f '{{.State.Status}}' deda-server-video-worker 2>/dev/null || echo missing)"
-            logs="$(docker logs --tail 200 deda-server-video-worker 2>&1 || true)"
+            status="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
+            logs="$(docker logs --tail 200 "$CONTAINER" 2>&1 || true)"
             if [ "$status" = "running" ] && printf '%s' "$logs" | grep -qE 'worker 启动|worker 不启动轮询'; then
               echo "video-worker 就绪（status=$status）"
               exit 0
             fi
             sleep 5
           done
-          docker inspect -f '{{.State.Status}}' deda-server-video-worker || true
-          docker logs --tail 200 deda-server-video-worker || true
+          docker inspect -f '{{.State.Status}}' "$CONTAINER" || true
+          docker logs --tail 200 "$CONTAINER" || true
           echo "::error::video-worker 未在 60 秒内就绪"
           exit 1
           EOF

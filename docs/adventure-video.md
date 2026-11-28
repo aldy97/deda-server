@@ -143,6 +143,8 @@ POST /analytics/adventure-video/jobs/:id/cancel {reason}
 - 迁移：`npx prisma migrate deploy --schema=src/prisma/schema.prisma`（只跑一次，API 容器启动会做）。
 - worker：`docker compose --profile video ... up -d video-worker`；默认 profile 不启动它，
   显式加 `--profile video` 才拉起；`ADVENTURE_VIDEO_ENABLED=false` 时只打日志不轮询。
+- staging 容器名：`deda-server-video-worker-staging`（`docker-compose.staging.yml` 覆盖）；
+  base compose 的 `deda-server-video-worker` 留给 prod/历史容器，避免 Docker name 冲突。
 - staging 自动构建：push `staging` 时，Deploy Staging 只在 diff 命中 worker 运行面
   （`.github/worker-trigger-paths.json`，含 `src/video-worker/**`、`adventure-video`、prompt-registry、
   llm、prisma schema 等）才构建/传输 worker 镜像并 `--profile video` 拉起；纯 API 侧模块

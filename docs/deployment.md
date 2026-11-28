@@ -111,6 +111,10 @@ docker compose -p deda-staging --env-file env/.env.staging \
   -f docker/docker-compose.yml -f docker/docker-compose.staging.yml --profile video up -d
 ```
 
+staging 的 worker 容器名是 `deda-server-video-worker-staging`（`docker-compose.staging.yml`
+覆盖）；base compose 的 `deda-server-video-worker` 留给 prod/历史容器，避免 Docker 的
+container name 冲突。
+
 若只想让流水线重建 worker 而不改业务代码（例如首次预置镜像、或改了 `/opt/deda/env/.env.staging`
 里的 `VIDEO_*` 需要重载），手动跑一次 Deploy Staging：`workflow_dispatch` 的 `force_worker`
 默认即 `true`。
