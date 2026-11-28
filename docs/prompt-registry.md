@@ -15,7 +15,7 @@
 - 同一份文本在多处复制粘贴后**已经漂移**（见文末「已知漂移」）；
 - 没有「谁在什么时候、为什么改了这句话」的审计链。
 
-现在：**18 个可编辑 prompt 集中在 `PROMPT_DEFAULTS`**，运行时经
+现在：**17 个可编辑 prompt 集中在 `PROMPT_DEFAULTS`**，运行时经
 `PromptRegistryService` 读取，后台经 `/analytics/prompts` 查看 / 编辑 / 发布。
 
 ## 运行时架构
@@ -66,7 +66,7 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 数据库行是**惰性创建**的：admin 第一次保存草稿时才建 `prompt_templates` 行；
 两个 admin 同时首次建行靠唯一键冲突（P2002）重读收敛。
 
-## 18 个可编辑 key
+## 17 个可编辑 key
 
 变量列：`*` = 必填（缺失/空串/纯空白 → 渲染抛错），`?` = 可选（缺省渲染为空串）。
 
@@ -86,6 +86,7 @@ PromptRegistryService ── 内存 Map 缓存（TTL 60s，stale-while-revalidat
 | story | `story_prompt_sleep` | chat_main | 哄睡故事话术 | `todayAdventureSummary` |
 | story | `story_prompt_free` | chat_main | 自由创作故事话术 | - |
 | story | `story_favorite_type_suffix` | chat_main | 偏好题材追加段 | `favoriteStoryType*` |
+| adventure_video | `adventure_video_storyboard_system` | adventure_video_storyboard | 冒险短视频分镜 | - |
 | persona | `persona_elly` | - | 角色人设：小象 Elly | - |
 | persona | `persona_polly` | - | 角色人设：小马 Polly | - |
 

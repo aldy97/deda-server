@@ -20,6 +20,8 @@ export const PROMPT_KEYS = [
   "story_prompt_sleep",
   "story_prompt_free",
   "story_favorite_type_suffix",
+  // 主模型：冒险短视频（后台作业）
+  "adventure_video_storyboard_system",
   // 角色人设（主链路；冒险接话层的本地人设副本刻意不进注册表）
   "persona_elly",
   "persona_polly",
@@ -61,6 +63,7 @@ export const PROMPT_CATEGORIES = [
   "small_model",
   "main_rules",
   "story",
+  "adventure_video",
   "persona",
 ] as const;
 
