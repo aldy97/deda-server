@@ -147,6 +147,15 @@ GET /analytics/users/demographics
     genderSplit: { male, female, unset },
     characterKeySplit: [{ characterKey, devices }],
     bindingsPerDevice: [{ count: 1|2|"3+", devices }] }
+   // 孩子 / 设备口径：统计单位是设备与孩子档案，不等于家长账号数。
+
+GET /analytics/users/parent-demographics
+→ { totalUsers,
+    genderSplit: { male, female, unset },
+    ageDistribution: [{ range: "<18|18-24|25-34|35-44|45+|unknown", users }] }
+   // 家长口径：统计单位是家长账号（users 表）。
+   // 年龄按 users.birthday 与 Asia/Shanghai 当天计算；生日缺失/非法归 unknown；
+   // <18 单列作为数据质量信号。只出聚合计数，不出 userId / openid / 手机号 / 生日原值。
 
 GET /analytics/users/phone-brands
 → { totalUsers, reportedUsers, unknownUsers, coverage, firstReportedAt,
@@ -159,12 +168,15 @@ GET /analytics/users/phone-brands
    // 只出聚合计数，不出 userId / openid / 手机号。
 
 GET /analytics/parents/:userId
-→ { user: { id, nickname, phone, registeredAt, phoneMaker },
+→ { user: { id, nickname, phone, phoneDuplicate, gender, birthday, registeredAt, phoneMaker },
     summary: { deviceCount, childCount, feedbackCount },
     devices: [{ deviceId, deviceCode, characterKey, firmwareVersion, networkType,
                 isOwner, boundAt, boundUserCount, lastPresenceDate,
                 childProfile: { name, englishName, gender, birthday } | null }] }
    // 家长视角详情，dashboard 用户详情页用；家长不存在 → 404。
+   // user.phoneDuplicate = 同一手机号被其他家长账号使用过（反馈回写允许重复）；
+   //   先填后填都标 true，前端展示黄色「重复」tag。
+   // user.gender / birthday 来自家长账号档案，未设置为 null。
    // user.phoneMaker = users.phoneBrand 归一化后的厂商展示名（Apple / 华为…），
    // 与 phone-brands、设备详情 boundUsers 同一口径；未上报/无法识别 → null。
    // devices 排序：binding.sortOrder asc, binding.createdAt asc。
@@ -174,9 +186,9 @@ GET /analytics/parents/:userId
    // feedbackCount = feedback 表按 userId 计数。
 ```
 
-- PII 红线：只出年龄段与计数，不出姓名、生日、openid。
-- 家长视角（`GET /analytics/parents/:userId`）是**按 userId 精确取单条**的 PII 面
-  （昵称/手机号），不得出现在列表/搜索/聚合/导出接口；`openid` 永不下发。
+- PII 红线：聚合/列表/搜索/导出只出年龄段与计数，不出姓名、生日、手机号、openid；
+  例外是**按 userId 精确取单条**的家长视角 `GET /analytics/parents/:userId`
+  （昵称/手机号/性别/生日）与 `GET /users/profile`（本人）。`openid` 永不下发。
 
 ## 内容与质量（P6）
 

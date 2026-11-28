@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import axios from "axios";
@@ -124,7 +124,14 @@ export class UsersService {
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, nickname: true, phone: true, createdAt: true },
+      select: {
+        id: true,
+        nickname: true,
+        phone: true,
+        gender: true,
+        birthday: true,
+        createdAt: true,
+      },
     });
     if (!user) {
       return null;
@@ -141,17 +148,34 @@ export class UsersService {
       id: user.id,
       nickname: user.nickname ?? null,
       phone: user.phone ?? null,
+      gender: user.gender ?? null,
+      birthday: user.birthday ?? null,
       createdAt: user.createdAt,
       deviceCount,
       childCount,
     };
   }
 
-  /** 更新家长档案（本期只有昵称，复用 users.nickname），写库后回读最新档案。 */
+  /**
+   * 更新家长档案：nickname / gender / birthday 均为可选字段，未传保持原值，
+   * gender / birthday 传 null 表示清空。空请求直接 400，避免静默无操作。
+   */
   async updateProfile(userId: string, dto: UpdateProfileDto) {
+    if (
+      dto.nickname === undefined &&
+      dto.gender === undefined &&
+      dto.birthday === undefined
+    ) {
+      throw new BadRequestException("至少提供一个要更新的档案字段");
+    }
+
     await this.prisma.user.update({
       where: { id: userId },
-      data: { nickname: dto.nickname },
+      data: {
+        nickname: dto.nickname,
+        gender: dto.gender,
+        birthday: dto.birthday,
+      },
     });
     return this.getProfile(userId);
   }

@@ -72,7 +72,7 @@ describe("Users profile (e2e)", () => {
     await request(app.getHttpServer()).get("/users/profile").expect(401);
   });
 
-  it("GET 默认档案：昵称/手机号为空、计数为 0、不含 openid", async () => {
+  it("GET 默认档案：昵称/手机号/性别/生日为空、计数为 0、不含 openid", async () => {
     const res = await authedGet().expect(200);
 
     expect(res.body.code).toBe(0);
@@ -80,14 +80,18 @@ describe("Users profile (e2e)", () => {
       id: userId,
       nickname: null,
       phone: null,
+      gender: null,
+      birthday: null,
       createdAt: expect.any(String),
       deviceCount: 0,
       childCount: 0,
     });
     expect(Object.keys(res.body.data).sort()).toEqual([
+      "birthday",
       "childCount",
       "createdAt",
       "deviceCount",
+      "gender",
       "id",
       "nickname",
       "phone",
@@ -116,12 +120,53 @@ describe("Users profile (e2e)", () => {
     expect(res.body.data.nickname).toBe("熊熊妈妈");
   });
 
+  it("PATCH 只更新性别/生日，昵称保持不变", async () => {
+    const res = await authedPatch({
+      gender: "female",
+      birthday: "1990-05-20",
+    }).expect(200);
+
+    expect(res.body.data).toMatchObject({
+      nickname: "熊熊妈妈",
+      gender: "female",
+      birthday: "1990-05-20",
+    });
+
+    const stored = await prisma.user.findUnique({ where: { id: userId } });
+    expect(stored?.gender).toBe("female");
+    expect(stored?.birthday).toBe("1990-05-20");
+    expect(stored?.nickname).toBe("熊熊妈妈");
+  });
+
+  it("PATCH null 清空性别与生日", async () => {
+    const res = await authedPatch({
+      gender: null,
+      birthday: null,
+    }).expect(200);
+
+    expect(res.body.data.gender).toBeNull();
+    expect(res.body.data.birthday).toBeNull();
+  });
+
+  it.each([
+    ["不存在的日期", { birthday: "2026-02-29" }],
+    ["未来日期", { birthday: "2999-01-01" }],
+    ["过早日期", { birthday: "1899-12-31" }],
+    ["非法性别", { gender: "other" }],
+  ])("PATCH %s → 400", async (_label, body) => {
+    await authedPatch(body as Record<string, unknown>).expect(400);
+  });
+
+  it("PATCH 空对象 → 400", async () => {
+    const res = await authedPatch({}).expect(400);
+    expect(res.body.code).toBe(400);
+  });
+
   it.each([
     ["空串", { nickname: "" }],
     ["纯空白", { nickname: "   " }],
     ["超 20 字", { nickname: "熊".repeat(21) }],
     ["未知字段（含 avatarUrl）", { nickname: "小熊", avatarUrl: "https://x" }],
-    ["缺 nickname", {}],
   ])("PATCH %s → 400", async (_label, body) => {
     const res = await authedPatch(body as Record<string, unknown>).expect(400);
     expect(res.body.code).toBe(400);

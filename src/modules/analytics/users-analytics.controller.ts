@@ -29,6 +29,14 @@ export class UsersAnalyticsController {
     return this.usersService.getSummary(query);
   }
 
+  @Get("parent-demographics")
+  @ApiOperation({
+    summary: "家长画像（性别/年龄段，统计单位为家长账号，只出聚合计数）",
+  })
+  getParentDemographics() {
+    return this.usersService.getParentDemographics();
+  }
+
   @Get("demographics")
   @ApiOperation({
     summary: "用户画像（年龄分布只出年龄段，不出姓名生日等 PII）",
