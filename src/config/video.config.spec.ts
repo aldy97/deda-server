@@ -1,7 +1,9 @@
 import {
   buildVoiceSetVersion,
+  parseTtsInstruction,
   parseTtsMode,
   resolveVideoStudioConfig,
+  supportsTtsInstruction,
   VIDEO_SYSTEM_VOICES,
 } from "./video.config";
 import { DEFAULT_FORBIDDEN_WORDS } from "@/common/content/forbidden-words";
@@ -127,5 +129,39 @@ describe("buildVoiceSetVersion", () => {
     expect(buildVoiceSetVersion("cloned", voices).startsWith("cloned:")).toBe(
       true,
     );
+  });
+});
+
+describe("tts instruction 开关", () => {
+  it("默认 on，只有显式 off 才关", () => {
+    expect(parseTtsInstruction(undefined)).toBe("on");
+    expect(parseTtsInstruction("")).toBe("on");
+    expect(parseTtsInstruction(" ON ")).toBe("on");
+    expect(parseTtsInstruction("off")).toBe("off");
+    expect(parseTtsInstruction(" OFF ")).toBe("off");
+    expect(parseTtsInstruction("disable")).toBe("on");
+  });
+
+  it("resolveVideoStudioConfig 读出开关", () => {
+    expect(resolveVideoStudioConfig(reader({})).ttsInstruction).toBe("on");
+    expect(
+      resolveVideoStudioConfig(reader({ VIDEO_TTS_INSTRUCTION: "off" }))
+        .ttsInstruction,
+    ).toBe("off");
+  });
+
+  it("system 试跑音色不支持 instruction，cloned 支持", () => {
+    expect(
+      supportsTtsInstruction({ ttsMode: "system", ttsInstruction: "on" }),
+    ).toBe(false);
+    expect(
+      supportsTtsInstruction({ ttsMode: "cloned", ttsInstruction: "on" }),
+    ).toBe(true);
+  });
+
+  it("紧急开关 off 时 cloned 也不发", () => {
+    expect(
+      supportsTtsInstruction({ ttsMode: "cloned", ttsInstruction: "off" }),
+    ).toBe(false);
   });
 });

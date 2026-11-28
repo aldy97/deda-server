@@ -46,19 +46,12 @@ export class BailianSpeechClient {
         sample_rate: input.sampleRate ?? 24000,
         ...(input.rate ? { rate: input.rate } : {}),
         ...(input.instruction
-          ? { instruction: input.instruction.slice(0, 100) }
+          ? { instruction: truncateInstruction(input.instruction) }
           : {}),
       },
     };
 
-    const response = (await this.http.post(
-      `${this.baseUrl()}/api/v1/services/audio/tts/SpeechSynthesizer`,
-      body,
-      {
-        Authorization: `Bearer ${this.apiKey()}`,
-        "Content-Type": "application/json",
-      },
-    )) as {
+    const response = (await this.request(body, input)) as {
       output?: { audio?: { url?: unknown } };
       usage?: { characters?: unknown };
     };
@@ -78,6 +71,30 @@ export class BailianSpeechClient {
         : text.length;
 
     return { audioUrl, characters };
+  }
+
+  /** 参数类错误（如音色不支持 instruction 的 428）换成领域码，并带出音色与模型。 */
+  private async request(body: unknown, input: SpeechInput): Promise<unknown> {
+    try {
+      return await this.http.post(
+        `${this.baseUrl()}/api/v1/services/audio/tts/SpeechSynthesizer`,
+        body,
+        {
+          Authorization: `Bearer ${this.apiKey()}`,
+          "Content-Type": "application/json",
+        },
+      );
+    } catch (error) {
+      if (error instanceof ProviderError && error.code === "InvalidParameter") {
+        throw new ProviderError(
+          error.provider,
+          "TTS_PARAMETER_INVALID",
+          `${error.message}（voice=${input.voice} model=${input.model}）`,
+          false,
+        );
+      }
+      throw error;
+    }
   }
 
   private baseUrl(): string {
@@ -118,4 +135,23 @@ export class BailianSpeechClient {
     }
     return config;
   }
+}
+
+/** 官方上限：instruction 100 个字符，汉字按 2 计、其余按 1；超了上游直接 428。 */
+const INSTRUCTION_MAX_UNITS = 100;
+const HAN_CHAR = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+function truncateInstruction(
+  text: string,
+  maxUnits = INSTRUCTION_MAX_UNITS,
+): string {
+  let units = 0;
+  let result = "";
+  for (const char of text) {
+    const cost = HAN_CHAR.test(char) ? 2 : 1;
+    if (units + cost > maxUnits) break;
+    units += cost;
+    result += char;
+  }
+  return result;
 }

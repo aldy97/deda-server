@@ -59,7 +59,7 @@ describe("BailianSpeechClient", () => {
     });
   });
 
-  it("instruction 超过 100 字符时截断，不把 400 留给上游", async () => {
+  it("instruction 按官方口径截断：汉字计 2，总量不超过 100", async () => {
     const { client, http } = makeClient();
     http.post.mockResolvedValue({
       output: { audio: { url: "https://oss/a.wav" } },
@@ -71,7 +71,57 @@ describe("BailianSpeechClient", () => {
       text: "你好",
       instruction: "温".repeat(150),
     });
-    expect(http.post.mock.calls[0][1].input.instruction).toHaveLength(100);
+    const instruction = http.post.mock.calls[0][1].input.instruction as string;
+    expect(instruction).toHaveLength(50);
+    expect(instruction).toBe("温".repeat(50));
+  });
+
+  it("instruction 混排时按权重截断，不切断代理对", async () => {
+    const { client, http } = makeClient();
+    http.post.mockResolvedValue({ output: { audio: { url: "u" } } });
+    await client.synthesize({
+      model: "cosyvoice-v3.5-flash",
+      voice: "c1",
+      text: "你好",
+      instruction: `${"a".repeat(90)}${"温".repeat(10)}`,
+    });
+    // 90 个半角 + 5 个汉字 = 100 单位，第 6 个汉字放不进去
+    expect(http.post.mock.calls[0][1].input.instruction).toBe(
+      `${"a".repeat(90)}${"温".repeat(5)}`,
+    );
+  });
+
+  it("非参数类上游错误保持原码原样抛出，不吞 retryable", async () => {
+    const { client, http } = makeClient();
+    const upstream = new ProviderError("bailian", "HTTP_500", "boom", true);
+    http.post.mockRejectedValue(upstream);
+    await expect(
+      client.synthesize({ model: "m", voice: "v", text: "你好" }),
+    ).rejects.toBe(upstream);
+  });
+
+  it("上游参数类错误（如 cosyvoice 428）换成领域码并带出音色与模型", async () => {
+    const { client, http } = makeClient();
+    http.post.mockRejectedValue(
+      new ProviderError(
+        "bailian",
+        "InvalidParameter",
+        "[cosyvoice:]Engine return error code: 428",
+        false,
+      ),
+    );
+    await expect(
+      client.synthesize({
+        model: "cosyvoice-v3-flash",
+        voice: "longwan_v3",
+        text: "小象走进山洞。",
+        instruction: "语气平静",
+      }),
+    ).rejects.toMatchObject({
+      code: "TTS_PARAMETER_INVALID",
+      message: expect.stringContaining("longwan_v3"),
+      retryable: false,
+    });
   });
 
   it("缺字符用量时按文本长度计，避免成本统计变 NaN", async () => {

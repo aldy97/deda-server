@@ -40,6 +40,11 @@ export const VIDEO_SIGNED_URL_TTL_SEC_DEFAULT = 3600;
 export interface VideoStudioConfig {
   enabled: boolean;
   ttsMode: VideoTtsMode;
+  /**
+   * 是否允许给 TTS 请求下发 instruction（情绪/语速）。
+   * off 是紧急止血开关：上游改动 Instruct 规则时靠 env 关掉，不必等发版。
+   */
+  ttsInstruction: VideoTtsInstruction;
   systemVoices: Record<VideoVoiceRole, string>;
   aspect: string;
   resolution: string;
@@ -85,6 +90,25 @@ export function parseTtsMode(value: string | undefined): VideoTtsMode {
   return (value ?? "").trim().toLowerCase() === "cloned" ? "cloned" : "system";
 }
 
+export type VideoTtsInstruction = "on" | "off";
+
+export function parseTtsInstruction(
+  value: string | undefined,
+): VideoTtsInstruction {
+  return (value ?? "").trim().toLowerCase() === "off" ? "off" : "on";
+}
+
+/**
+ * v3-flash 的三个系统试跑音色（longhua_v3 / longze_v3 / longwan_v3）在官方音色表里
+ * 标注「Instruct：不支持」，带 instruction 调用会被上游以 428（InvalidParameter）拒绝；
+ * v3.5-flash 的复刻音色支持自由中文指令，所以只有 cloned 档才下发。
+ */
+export function supportsTtsInstruction(
+  config: Pick<VideoStudioConfig, "ttsMode" | "ttsInstruction">,
+): boolean {
+  return config.ttsInstruction === "on" && config.ttsMode === "cloned";
+}
+
 /**
  * 音色集指纹：进入 job 的唯一性判断。换音色后重新生成不会被
  * 「同一版本已有视频」误判为重复；系统试跑与复刻产物也天然分开。
@@ -105,6 +129,7 @@ export function resolveVideoStudioConfig(get: EnvReader): VideoStudioConfig {
   return {
     enabled: (get("ADVENTURE_VIDEO_ENABLED") ?? "").trim() === "true",
     ttsMode,
+    ttsInstruction: parseTtsInstruction(get("VIDEO_TTS_INSTRUCTION")),
     systemVoices: { ...VIDEO_SYSTEM_VOICES },
     aspect: nonEmpty(get("VIDEO_ASPECT")) ?? VIDEO_ASPECT_DEFAULT,
     resolution: nonEmpty(get("VIDEO_RESOLUTION")) ?? VIDEO_RESOLUTION_DEFAULT,
