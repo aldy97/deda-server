@@ -77,6 +77,18 @@ describe("resolveVideoStudioConfig", () => {
       ).lintForbiddenWords,
     ).toEqual([]);
   });
+
+  it("VIDEO_REFERENCE_KEYS 解析合法 JSON，非法 JSON 回落空对象", () => {
+    expect(
+      resolveVideoStudioConfig(
+        reader({ VIDEO_REFERENCE_KEYS: '{"elly":"a.png","polly":"b.png"}' }),
+      ).referenceKeys,
+    ).toEqual({ elly: "a.png", polly: "b.png" });
+    expect(
+      resolveVideoStudioConfig(reader({ VIDEO_REFERENCE_KEYS: "not-json" }))
+        .referenceKeys,
+    ).toEqual({});
+  });
 });
 
 describe("parseTtsMode", () => {
