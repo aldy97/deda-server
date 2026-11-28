@@ -4,7 +4,11 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { LlmService } from "@/modules/llm/llm.service";
 import { PromptRegistryService } from "@/modules/prompt-registry/prompt-registry.service";
-import type { VideoStudioConfig, VideoVoiceRole } from "@/config/video.config";
+import {
+  supportsTtsInstruction,
+  type VideoStudioConfig,
+  type VideoVoiceRole,
+} from "@/config/video.config";
 import {
   estimateTeaserCostCents,
   ttsModelForMode,
@@ -352,6 +356,9 @@ export class AdventureVideoWorkerService {
     }>
   > {
     const model = ttsModelForMode(config.ttsMode);
+    // 音色不支持 Instruct 时一律不带：cosyvoice-v3-flash 的系统试跑音色带 instruction
+    // 会被上游 428 拒掉整条作业（v3.5-flash 的复刻音色才支持自由中文指令）。
+    const withInstruction = supportsTtsInstruction(config);
     const results: Array<{
       beat: Storyboard["beats"][number];
       buffer: Buffer;
@@ -363,7 +370,9 @@ export class AdventureVideoWorkerService {
         model,
         voice: voices[beat.speaker],
         text: beat.text,
-        instruction: EMOTION_INSTRUCTION[beat.emotion],
+        instruction: withInstruction
+          ? EMOTION_INSTRUCTION[beat.emotion]
+          : undefined,
         format: "wav",
         sampleRate: 24000,
       });

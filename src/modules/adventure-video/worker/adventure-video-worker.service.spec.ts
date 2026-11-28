@@ -1,6 +1,9 @@
 import { ConfigService } from "@nestjs/config";
 import { AdventureVideoWorkerService } from "./adventure-video-worker.service";
-import { resolveVideoStudioConfig } from "@/config/video.config";
+import {
+  resolveVideoStudioConfig,
+  type VideoStudioConfig,
+} from "@/config/video.config";
 import { PROMPT_DEFAULTS } from "@/modules/prompt-registry/prompt-defaults";
 
 const PAYLOAD = {
@@ -65,7 +68,7 @@ function buildConfig() {
   };
 }
 
-function makeWorker() {
+function makeWorker(configOverrides: Partial<VideoStudioConfig> = {}) {
   const prisma = {
     adventureVideoJob: { findUnique: jest.fn(), update: jest.fn() },
     adventureEpisodeVersion: { findUnique: jest.fn() },
@@ -87,7 +90,7 @@ function makeWorker() {
   const store = { put: jest.fn(), signedUrl: jest.fn() };
   const assembler = { probe: jest.fn(), assemble: jest.fn() };
   const config = {
-    get: jest.fn(() => buildConfig()),
+    get: jest.fn(() => ({ ...buildConfig(), ...configOverrides })),
   } as unknown as ConfigService;
 
   const worker = new AdventureVideoWorkerService(
@@ -246,6 +249,45 @@ describe("AdventureVideoWorkerService", () => {
       expect.stringContaining("坏人"),
     );
     expect(video.submit).not.toHaveBeenCalled();
+  });
+
+  it("system 试跑音色不下发 instruction：v3-flash 三个音色不支持，发了会被 428 拒", async () => {
+    const { worker, speech } = makeWorker();
+    await worker.runOnce();
+    expect(speech.synthesize).toHaveBeenCalledTimes(3);
+    for (const [input] of speech.synthesize.mock.calls) {
+      expect(input.model).toBe("cosyvoice-v3-flash");
+      expect(input.instruction).toBeUndefined();
+    }
+  });
+
+  it("cloned 模式（v3.5-flash）带情绪 instruction", async () => {
+    const { worker, speech, prisma } = makeWorker({ ttsMode: "cloned" });
+    prisma.adventureVideoVoice.findMany.mockResolvedValue([
+      { role: "elly", status: "ready", voiceId: "c-elly" },
+      { role: "polly", status: "ready", voiceId: "c-polly" },
+      { role: "narrator", status: "ready", voiceId: "c-narrator" },
+    ]);
+    await worker.runOnce();
+    expect(speech.synthesize.mock.calls[0][0]).toMatchObject({
+      model: "cosyvoice-v3.5-flash",
+      voice: "c-narrator",
+      instruction: "语气平静，语速稍慢，像睡前故事",
+    });
+  });
+
+  it("VIDEO_TTS_INSTRUCTION=off 时 cloned 也不下发 instruction", async () => {
+    const { worker, speech, prisma } = makeWorker({
+      ttsMode: "cloned",
+      ttsInstruction: "off",
+    });
+    prisma.adventureVideoVoice.findMany.mockResolvedValue([
+      { role: "elly", status: "ready", voiceId: "c-elly" },
+      { role: "polly", status: "ready", voiceId: "c-polly" },
+      { role: "narrator", status: "ready", voiceId: "c-narrator" },
+    ]);
+    await worker.runOnce();
+    expect(speech.synthesize.mock.calls[0][0].instruction).toBeUndefined();
   });
 
   it("视频任务失败时落 failed，错误码透传", async () => {

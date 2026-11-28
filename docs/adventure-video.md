@@ -44,6 +44,10 @@ API 镜像不装 ffmpeg；worker 用 `docker/Dockerfile.worker`（含 ffmpeg + N
 
 - `ADVENTURE_VIDEO_ENABLED`：总开关，必须显式 `true`。
 - `VIDEO_TTS_MODE`：`system` / `cloned`。
+- `VIDEO_TTS_INSTRUCTION`：默认 `on`；`off` 是紧急止血开关，强制所有档位都不下发
+  `instruction`。只有 `cloned`（cosyvoice-v3.5-flash 复刻音色）真正会带情绪指令：
+  v3-flash 的三个系统试跑音色在官方音色表里标注「Instruct：不支持」，带指令会被
+  上游以 428 拒绝。
 - `VIDEO_REFERENCE_KEYS`：`{"elly":"adventure-video/refs/elly.png","polly":"..."}`，
   缺省则不带参考图出片（角色一致性会明显下降）。
 - `BAILIAN_API_KEY` / `BAILIAN_WORKSPACE_ID`：必须同属华北2。
@@ -85,6 +89,8 @@ npm run check:oss
 5. 合规：只复刻有书面授权的音色；授权文件不入库。
 
 系统试跑音色（仅联调）：Elly=`longhua_v3`、Polly=`longze_v3`、旁白=`longwan_v3`。
+这三个音色官方标注 Instruct 不支持，因此 `system` 档不带情绪指令（全片一条语调）；
+要情绪弧线需切 `cloned`（v3.5-flash 复刻音色支持自由中文指令）。
 
 ## 7. 接口
 
@@ -122,6 +128,7 @@ POST /analytics/adventure-video/jobs/:id/cancel {reason}
 | `EPISODE_RETIRED` | 已下架 |
 | `BUDGET_EXCEEDED` | 预估超预算 |
 | `VOICE_NOT_READY` | cloned 模式但三条音色未齐 |
+| `TTS_PARAMETER_INVALID` | TTS 参数被上游拒绝（如音色不支持 instruction 的 cosyvoice 428），message 带 voice/model；可先查 `VIDEO_TTS_INSTRUCTION`，再决定换音色 |
 | `STORYBOARD_FORBIDDEN_WORD` | 分镜文案命中违禁词（ADVENTURE_LINT_FORBIDDEN_WORDS 同源扫描），已重试一次仍失败 |
 | `STORYBOARD_ENDING_REQUIRED` | 开端或结局 beat 被标 optional（三幕闭环不可裁剪），已重试一次仍失败 |
 | `STORYBOARD_CHAR_BUDGET` / `STORYBOARD_CLIP_TOO_LONG` | 分镜超字数/超 30 秒 |
