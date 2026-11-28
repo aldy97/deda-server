@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { findDuplicatePhones } from "./phone-duplicate.util";
 
 export interface ParentReportFeedbackQuery {
   startDate?: string;
@@ -202,6 +203,7 @@ export class FeedbackAnalyticsService {
         take: pageSize,
         select: {
           id: true,
+          userId: true,
           content: true,
           contact: true,
           createdAt: true,
@@ -210,14 +212,24 @@ export class FeedbackAnalyticsService {
       }),
     ]);
 
+    // 联系方式重复：同一号码在 users.phone 上出现 ≥2 次。批量一次查询，避免 N+1。
+    const duplicateContacts = await findDuplicatePhones(
+      this.prisma,
+      rows.map((row) => row.contact),
+    );
+
     return {
       total,
       page,
       pageSize,
       items: rows.map((row) => ({
         id: row.id,
+        userId: row.userId,
         content: row.content,
         contact: row.contact,
+        contactDuplicate: row.contact
+          ? duplicateContacts.has(row.contact)
+          : false,
         createdAt: row.createdAt,
         user: row.user,
       })),

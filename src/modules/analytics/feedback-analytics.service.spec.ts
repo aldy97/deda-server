@@ -9,6 +9,7 @@ function buildPrisma(data: {
   feedbacks?: Row[];
   device?: Row | null;
   boundUserIds?: string[];
+  phoneCounts?: Record<string, number>;
 }) {
   return {
     device: {
@@ -36,6 +37,17 @@ function buildPrisma(data: {
     feedback: {
       count: jest.fn((_args?: any) => (data.feedbacks ?? []).length),
       findMany: jest.fn((_args?: any) => data.feedbacks ?? []),
+    },
+    user: {
+      groupBy: jest.fn((args?: any) => {
+        const phones: string[] = args?.where?.phone?.in ?? [];
+        return phones
+          .filter((phone) => (data.phoneCounts?.[phone] ?? 0) > 0)
+          .map((phone) => ({
+            phone,
+            _count: { _all: data.phoneCounts?.[phone] ?? 0 },
+          }));
+      }),
     },
   };
 }
@@ -183,13 +195,15 @@ describe("FeedbackAnalyticsService", () => {
         feedbacks: [
           {
             id: "fb1",
+            userId: "u1",
             content: "希望增加儿歌内容",
-            contact: "wx-user-01",
+            contact: "13800138000",
             createdAt,
             user: { nickname: "乐乐妈", phone: null },
           },
           {
             id: "fb2",
+            userId: "u2",
             content: "匿名反馈",
             contact: null,
             createdAt,
@@ -204,14 +218,71 @@ describe("FeedbackAnalyticsService", () => {
       expect(result.total).toBe(2);
       expect(result.items[0]).toEqual({
         id: "fb1",
+        userId: "u1",
         content: "希望增加儿歌内容",
-        contact: "wx-user-01",
+        contact: "13800138000",
+        contactDuplicate: false,
         createdAt,
         user: { nickname: "乐乐妈", phone: null },
       });
       expect(result.items[1].user).toBeNull();
+      expect(result.items[1].contactDuplicate).toBe(false);
       const findManyArgs = prisma.feedback.findMany.mock.calls[0]?.[0] as any;
       expect(findManyArgs.orderBy).toEqual({ createdAt: "desc" });
+    });
+
+    it("联系方式被多个账号使用 → contactDuplicate=true，且只批量查一次", async () => {
+      const createdAt = new Date("2026-11-05T02:00:00Z");
+      const prisma = buildPrisma({
+        feedbacks: [
+          {
+            id: "fb1",
+            userId: "u1",
+            content: "第一条",
+            contact: "13900139000",
+            createdAt,
+            user: { nickname: "甲", phone: "13900139000" },
+          },
+          {
+            id: "fb2",
+            userId: "u2",
+            content: "第二条",
+            contact: "13900139000",
+            createdAt,
+            user: { nickname: "乙", phone: "13900139000" },
+          },
+          {
+            id: "fb3",
+            userId: "u3",
+            content: "第三条",
+            contact: "13700137000",
+            createdAt,
+            user: { nickname: "丙", phone: "13700137000" },
+          },
+        ],
+        phoneCounts: {
+          "13900139000": 2,
+          "13700137000": 1,
+        },
+      });
+      const service = await buildService(prisma);
+
+      const result = await service.listUserFeedbacks({});
+
+      expect(result.items.map((item) => item.contactDuplicate)).toEqual([
+        true,
+        true,
+        false,
+      ]);
+      expect(prisma.user.groupBy).toHaveBeenCalledTimes(1);
+      expect(prisma.user.groupBy).toHaveBeenCalledWith({
+        by: ["phone"],
+        where: { phone: { in: ["13900139000", "13700137000"] } },
+        _count: { _all: true },
+      });
+      expect(prisma.feedback.findMany.mock.calls[0]?.[0]?.select.userId).toBe(
+        true,
+      );
     });
 
     it("hasContact=true 过滤 null 和空串联系方式", async () => {

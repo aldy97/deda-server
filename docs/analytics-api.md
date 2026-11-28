@@ -236,9 +236,13 @@ GET /analytics/feedback/parent-reports?startDate=&endDate=&isUseful=&deviceId=&p
 
 GET /analytics/feedback/user-feedbacks?startDate=&endDate=&hasContact=&deviceId=&page=&pageSize=
 → { total, page, pageSize,
-    items: [{ id, content, contact, createdAt, user: { nickname, phone } | null }] }
+    items: [{ id, userId, content, contact, contactDuplicate, createdAt,
+              user: { nickname, phone } | null }] }
    // 日期区间按 createdAt；deviceId 经 UserDeviceBinding 反查该设备全部绑定账号的反馈；
-   // 设备不存在或无绑定用户返回空页
+   // 设备不存在或无绑定用户返回空页。
+   // userId 仅用于 dashboard 跳转家长画像（/parents/:userId），用户已注销时为 null。
+   // contactDuplicate = 该 contact 号码在 users.phone 上被 ≥2 个账号使用，
+   //   与 GET /analytics/parents/:userId 的 phoneDuplicate 同一口径；批量一次查询。
 
 GET /analytics/parent-reports?deviceId=&page=&pageSize=   (deviceId 必填)
 → { total, page, pageSize,
